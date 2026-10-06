@@ -1,37 +1,27 @@
-use ratatui::crossterm::event::{self, Event, KeyCode};
-use ratatui::layout::Alignment;
-use ratatui::style::Stylize;
-use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Wrap};
+mod app;
+mod ui;
+
+use ratatui::crossterm::event::{self, Event};
+
+use crate::app::App;
 
 fn main() -> std::io::Result<()> {
-    // `ratatui::run` does ALL the terminal ceremony for us:
-    //   before: enable raw mode, switch to the alternate screen,
-    //           install a panic hook that restores the terminal
-    //   after:  restore the terminal (even if we panic or return an error)
+    // `ratatui::run` owns all terminal ceremony:
+    // raw mode + alternate screen + panic-safe restore in and out.
     // We only supply the event loop.
     ratatui::run(|terminal| {
-        loop {
-            // 1. draw one frame
-            terminal.draw(|frame| {
-                let hello = format!("Hello, {}! Press q to quit.", hi_core::NAME);
-                let paragraph = Paragraph::new(vec![
-                    Line::from("ratatui is alive 🎉".bold()),
-                    Line::from(hello),
-                ])
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: false });
-                frame.render_widget(paragraph, frame.area());
-            })?;
+        let mut app = App::new();
 
-            // 2. block until an event arrives; quit on 'q'
-            //    (on unix every key event is a Press, so we can skip
-            //     checking key.kind here — relevant on Windows only)
+        // The heartbeat: draw current state, wait for an event,
+        // let the app react, repeat until the app says stop.
+        while !app.quit {
+            terminal.draw(|frame| ui::draw(frame, &app))?;
+
             if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('q') {
-                    return Ok(());
-                }
+                app.handle_key(key);
             }
         }
+
+        Ok(())
     })
 }
