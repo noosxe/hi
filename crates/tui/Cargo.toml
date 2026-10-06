@@ -1,0 +1,14 @@
+[package]
+name = "hi-tui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hi-core = { path = "../core" }
+# ratatui re-exports its crossterm dependency, so one dep covers both
+ratatui = "0.30"
+
+# The final binary is called just `hi`
+[[bin]]
+name = "hi"
+path = "src/main.rs"

@@ -1,0 +1,4 @@
+/target
+.direnv
+.DS_Store
+.pi/tasks
