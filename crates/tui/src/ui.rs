@@ -1,5 +1,5 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::Stylize;
 use ratatui::widgets::{Block, Paragraph};
 
@@ -17,7 +17,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     .areas(frame.area());
 
     draw_transcript(frame, transcript_area, app);
-    draw_input(frame, input_area);
+    draw_input(frame, input_area, app);
 }
 
 /// The scrolling conversation: user messages, assistant messages,
@@ -36,9 +36,22 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
-/// The input box: bordered so it reads as an interactive element,
-/// one line for now — multi-line editing comes later.
-fn draw_input(frame: &mut Frame, area: Rect) {
+/// The input box: bordered so it reads as an interactive element.
+/// Shows whatever is currently being typed, with the real terminal
+/// cursor parked right after the text.
+fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
     let block = Block::bordered().title(" input ");
-    frame.render_widget(Paragraph::new("").block(block), area);
+    // Borrow what we need from `block` BEFORE the render call:
+    // `.block(block)` below moves ownership of block into the
+    // paragraph, and a moved value can't be used again.
+    let inner = block.inner(area);
+
+    // as_str borrows the text — no clone needed for rendering.
+    frame.render_widget(Paragraph::new(app.input.as_str()).block(block), area);
+
+    // Park the real terminal cursor just past the typed text.
+    frame.set_cursor_position(Position::new(
+        inner.x + 1 + app.input.chars().count() as u16,
+        inner.y,
+    ));
 }
