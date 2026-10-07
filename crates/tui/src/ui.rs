@@ -50,8 +50,10 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(app.input.as_str()).block(block), area);
 
     // Park the real terminal cursor just past the typed text.
+    // inner.x is already the first writable column — inner() excludes
+    // the border, so no extra +1 (that double-counted it).
     frame.set_cursor_position(Position::new(
-        inner.x + 1 + app.input.chars().count() as u16,
+        inner.x + app.input.chars().count() as u16,
         inner.y,
     ));
 }
