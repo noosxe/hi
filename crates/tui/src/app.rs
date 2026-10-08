@@ -1,5 +1,7 @@
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use hi_core::Message;
+
 /// All TUI state lives here.
 ///
 /// The contract that keeps a TUI codebase sane as it grows:
@@ -10,9 +12,8 @@ pub struct App {
     pub quit: bool,
     /// Text currently being typed in the input box.
     pub input: String,
-    /// Placeholder conversation transcript. Will become real
-    /// message types once the core crate starts producing events.
-    pub messages: Vec<String>,
+    /// The conversation transcript.
+    pub messages: Vec<Message>,
 }
 
 impl App {
@@ -44,7 +45,7 @@ impl App {
                 // no clone needed since we own the value anyway.
                 let msg = std::mem::take(&mut self.input);
                 if !msg.trim().is_empty() {
-                    self.messages.push(msg);
+                    self.messages.push(Message::User(msg));
                 }
             }
             _ => {}

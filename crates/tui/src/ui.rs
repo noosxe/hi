@@ -3,6 +3,8 @@ use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::Stylize;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use hi_core::Message;
+use ratatui::text::Line;
 use crate::app::App;
 
 /// Render one full frame: a pure function of the app state.
@@ -29,7 +31,14 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &App) {
         let lines: Vec<_> = app
             .messages
             .iter()
-            .map(|msg| msg.clone().into())
+            .map(|msg| match msg {
+                Message::User(text) => {
+                    Line::from(vec!["you ".dim(), text.clone().into()])
+                }
+                Message::Assistant(text) => {
+                    Line::from(vec!["assistant ".dim(), text.clone().into()])
+                }
+            })
             .collect();
         Paragraph::new(lines)
     };
