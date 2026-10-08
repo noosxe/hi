@@ -1,6 +1,8 @@
 mod app;
 mod ui;
 
+use std::time::Duration;
+
 use ratatui::crossterm::event::{self, Event};
 use ratatui::{TerminalOptions, Viewport};
 
@@ -8,13 +10,13 @@ use crate::app::App;
 
 fn main() -> std::io::Result<()> {
     // Inline mode: NO alternate screen. The terminal keeps its normal
-    // buffer and scrollback — we manage only the bottom 3 rows (the
-    // input area), and transcript lines are printed *above* the
-    // viewport, owned by the terminal from then on. Native scrolling,
-    // search, and copy come for free; pi's "regular mode" works the
-    // same way.
+    // buffer and scrollback — we manage only the bottom 5 rows (a
+    // two-row live streaming area above the 3-row input), and
+    // transcript lines are printed *above* the viewport, owned by the
+    // terminal from then on. Native scrolling, search, and copy come
+    // for free; pi's "regular mode" works the same way.
     let options = TerminalOptions {
-        viewport: Viewport::Inline(3),
+        viewport: Viewport::Inline(5),
     };
     // try_init_with_options: enables raw mode, skips the alternate
     // screen, and installs a panic hook that restores the terminal.
@@ -32,6 +34,10 @@ fn main() -> std::io::Result<()> {
     // 3. two newlines: the cursor was parked on the viewport's middle
     //    row, so this lands on the first line *below* the old viewport
     //    — a fresh row for the shell prompt
+    //
+    // Quitting mid-turn: `app` drops here, dropping the turn's
+    // Receiver. The provider thread's next send fails, so it returns
+    // instead of streaming into a dead channel.
     terminal.clear()?;
     // restore() reports its own errors to stderr and returns () —
     // the try_restore() variant is the Result-returning one.
@@ -48,6 +54,20 @@ fn run(
     let mut printed = 0;
 
     while !app.quit {
+        // The frame clock: wait up to 50ms for a key, then continue
+        // either way. `poll` (unlike the blocking `read` we had
+        // before) is what lets provider events arrive and render with
+        // zero keyboard input — roughly 20 frames per second.
+        if event::poll(Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? {
+                app.handle_key(key);
+            }
+        }
+
+        // Deliver whatever the provider thread streamed this frame;
+        // finished turns are finalized into `app.messages`.
+        app.pump();
+
         // Anything appended to the transcript but not yet printed goes
         // into the scrollback, above the viewport. Once printed, the
         // terminal owns the line — we never redraw history.
@@ -57,12 +77,8 @@ fn run(
             printed += 1;
         }
 
-        // Redraw the managed region (input area only).
+        // Redraw the managed region (live streaming area + input).
         terminal.draw(|frame| ui::draw(frame, app))?;
-
-        if let Event::Key(key) = event::read()? {
-            app.handle_key(key);
-        }
     }
 
     Ok(())

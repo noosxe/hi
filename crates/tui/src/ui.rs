@@ -1,9 +1,9 @@
 use hi_core::Message;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::Stylize;
+use ratatui::style::{Stylize, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 
 use crate::app::App;
@@ -12,8 +12,17 @@ use crate::app::App;
 /// The transcript is NOT drawn here — it lives in the terminal's
 /// scrollback (see `message_into`).
 pub fn draw(frame: &mut Frame, app: &App) {
-    // The frame IS the 3-row inline viewport — no layout solving needed.
-    draw_input(frame, frame.area(), app);
+    // The frame IS the 5-row inline viewport. Two fixed-height areas
+    // need no layout solver — plain struct arithmetic. The functional
+    // update syntax `..frame.area()` copies every field not named.
+    let stream_area = Rect { height: 2, ..frame.area() };
+    let input_area = Rect {
+        y: frame.area().y + 2,
+        height: 3,
+        ..frame.area()
+    };
+    draw_stream(frame, stream_area, app);
+    draw_input(frame, input_area, app);
 }
 
 /// The input area: top/bottom rules only, no side walls — pi-style.
@@ -36,6 +45,30 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
         inner.x + app.input.chars().count() as u16,
         inner.y,
     ));
+}
+
+/// The in-progress reply, rendered live in the viewport, dimmed to
+/// signal it is not final. Only the tail fits in two rows — the
+/// complete text is printed to scrollback when the turn ends.
+fn draw_stream(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(turn) = app.turn.as_ref() else {
+        return;
+    };
+    if turn.text.is_empty() {
+        return;
+    }
+    // Keep only as many trailing characters as fit the two wrapped
+    // rows. Counted in chars, not display columns — emoji drift is a
+    // known gap, queued for the input-polish milestone.
+    let capacity = area.width as usize * area.height as usize;
+    let count = turn.text.chars().count();
+    let tail: String = turn
+        .text
+        .chars()
+        .skip(count.saturating_sub(capacity))
+        .collect();
+    let line = Line::from(tail).style(Style::new().dim());
+    frame.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), area);
 }
 
 /// Format one transcript message and render it into a scrollback row.
