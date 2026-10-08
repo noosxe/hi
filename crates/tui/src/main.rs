@@ -24,9 +24,20 @@ fn main() -> std::io::Result<()> {
     let mut app = App::new();
     let result = run(&mut terminal, &mut app);
 
+    // Teardown, in order:
+    // 1. wipe the managed region — clear() erases from the viewport
+    //    origin to the end of the screen and then restores the cursor,
+    //    so the last drawn frame doesn't linger under the shell
+    // 2. restore terminal modes (raw mode off)
+    // 3. two newlines: the cursor was parked on the viewport's middle
+    //    row, so this lands on the first line *below* the old viewport
+    //    — a fresh row for the shell prompt
+    terminal.clear()?;
     // restore() reports its own errors to stderr and returns () —
     // the try_restore() variant is the Result-returning one.
     ratatui::restore();
+    println!();
+    println!();
     result
 }
 
