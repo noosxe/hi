@@ -40,9 +40,7 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &App) {
 /// Shows whatever is currently being typed, with the real terminal
 /// cursor parked right after the text.
 fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::new()
-        .borders(Borders::TOP | Borders::BOTTOM)
-        .title(" input ");
+    let block = Block::new().borders(Borders::TOP | Borders::BOTTOM);
     // Borrow what we need from `block` BEFORE the render call:
     // `.block(block)` below moves ownership of block into the
     // paragraph, and a moved value can't be used again.
