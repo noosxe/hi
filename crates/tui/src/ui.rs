@@ -1,48 +1,19 @@
-use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::Stylize;
-use ratatui::widgets::{Block, Borders, Paragraph};
-
 use hi_core::Message;
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Position, Rect};
+use ratatui::style::Stylize;
 use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders, Paragraph, Widget};
+use ratatui::Frame;
+
 use crate::app::App;
 
-/// Render one full frame: a pure function of the app state.
-/// Same state in, same pixels out — this function never mutates anything.
+/// Render the managed region: the input area, and nothing else.
+/// The transcript is NOT drawn here — it lives in the terminal's
+/// scrollback (see `message_into`).
 pub fn draw(frame: &mut Frame, app: &App) {
-    // Split the screen vertically: transcript takes everything
-    // that's left, input always gets exactly 3 rows at the bottom.
-    let [transcript_area, input_area] = Layout::vertical([
-        Constraint::Min(0),    // "give me at least 0 rows, i.e. the rest"
-        Constraint::Length(3), // border row + one text row + border row
-    ])
-    .areas(frame.area());
-
-    draw_transcript(frame, transcript_area, app);
-    draw_input(frame, input_area, app);
-}
-
-/// The scrolling conversation: user messages, assistant messages,
-/// tool calls — everything the agent does will render in here.
-fn draw_transcript(frame: &mut Frame, area: Rect, app: &App) {
-    let paragraph = if app.messages.is_empty() {
-        Paragraph::new("no messages yet".dim())
-    } else {
-        let lines: Vec<_> = app
-            .messages
-            .iter()
-            .map(|msg| match msg {
-                Message::User(text) => {
-                    Line::from(vec!["you ".dim(), text.clone().into()])
-                }
-                Message::Assistant(text) => {
-                    Line::from(vec!["assistant ".dim(), text.clone().into()])
-                }
-            })
-            .collect();
-        Paragraph::new(lines)
-    };
-    frame.render_widget(paragraph, area);
+    // The frame IS the 3-row inline viewport — no layout solving needed.
+    draw_input(frame, frame.area(), app);
 }
 
 /// The input area: top/bottom rules only, no side walls — pi-style.
@@ -65,4 +36,17 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
         inner.x + app.input.chars().count() as u16,
         inner.y,
     ));
+}
+
+/// Format one transcript message and render it into a scrollback row.
+/// Called via `Terminal::insert_before`; after this runs, the line is
+/// terminal-owned history — scrolling it is the emulator's job.
+pub fn message_into(msg: Message, buf: &mut Buffer) {
+    // We own the message, so its String moves straight into the line —
+    // no clones. The dim label marks who spoke.
+    let line = match msg {
+        Message::User(text) => Line::from(vec!["you ".dim(), text.into()]),
+        Message::Assistant(text) => Line::from(vec!["assistant ".dim(), text.into()]),
+    };
+    Paragraph::new(line).render(buf.area, buf);
 }
