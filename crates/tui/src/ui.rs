@@ -1,7 +1,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::Stylize;
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::app::App;
 
@@ -36,11 +36,13 @@ fn draw_transcript(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
-/// The input box: bordered so it reads as an interactive element.
+/// The input area: top/bottom rules only, no side walls — pi-style.
 /// Shows whatever is currently being typed, with the real terminal
 /// cursor parked right after the text.
 fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::bordered().title(" input ");
+    let block = Block::new()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .title(" input ");
     // Borrow what we need from `block` BEFORE the render call:
     // `.block(block)` below moves ownership of block into the
     // paragraph, and a moved value can't be used again.
