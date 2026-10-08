@@ -5,9 +5,11 @@
 //! keeps the harness usable headless (tests, CLI, daemons) later.
 pub mod event;
 pub mod message;
+pub mod provider;
 
 pub use event::Event;
 pub use message::Message;
+pub use provider::{Provider, spawn_turn};
 
 /// The program's name, shared by every crate in the workspace.
 pub const NAME: &str = "hi";
