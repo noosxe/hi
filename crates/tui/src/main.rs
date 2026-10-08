@@ -19,6 +19,7 @@ fn main() -> std::io::Result<()> {
     // try_init_with_options: enables raw mode, skips the alternate
     // screen, and installs a panic hook that restores the terminal.
     let mut terminal = ratatui::try_init_with_options(options)?;
+    terminal.insert_before(1, |buf| ui::welcome_into(buf))?;
 
     let mut app = App::new();
     let result = run(&mut terminal, &mut app);

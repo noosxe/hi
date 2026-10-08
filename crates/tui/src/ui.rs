@@ -50,3 +50,14 @@ pub fn message_into(msg: Message, buf: &mut Buffer) {
     };
     Paragraph::new(line).render(buf.area, buf);
 }
+
+/// One-row welcome banner, printed above the viewport on startup.
+/// Doubles as visual separation from whatever the terminal was
+/// showing before the app launched.
+pub fn welcome_into(buf: &mut Buffer) {
+    let line = Line::from(vec![
+        "hi".bold(),
+        " · say something, ctrl-c to quit".dim(),
+    ]);
+    Paragraph::new(line).render(buf.area, buf);
+}
