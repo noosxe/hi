@@ -1,7 +1,8 @@
 //! `models.json` — provider/model configuration, shaped like pi's.
 //!
-//! The file lives in hi's config directory (`~/.config/hi/models.json`
-//! on Linux, `~/Library/Application Support/hi/models.json` on macOS).
+//! The file lives at `~/.config/hi/models.json` on every platform
+//! (`$XDG_CONFIG_HOME/hi/models.json` when set) — one path to
+//! configure, sync, and reason about on Linux and macOS alike.
 //! Deserialization ignores unknown fields on purpose: new keys added
 //! later (or copied from a pi config) never break older builds — the
 //! forward-compatibility trick pi itself relies on.
@@ -79,11 +80,28 @@ fn resolve_value(raw: &str) -> String {
     }
 }
 
-/// hi's configuration directory — platform-conventional via the
-/// `dirs` crate: `~/.config/hi` on Linux, `~/Library/Application
-/// Support/hi` on macOS.
+/// hi's configuration directory: `~/.config/hi`, honoring
+/// `$XDG_CONFIG_HOME`. Deliberately identical on Linux and macOS —
+/// one path across machines, friendly to dotfile syncing.
 pub fn config_dir() -> Option<PathBuf> {
-    dirs::config_dir().map(|dir| dir.join("hi"))
+    config_dir_from(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        std::env::home_dir().as_deref(),
+    )
+}
+
+/// The pure decision, split out for testing: an explicit XDG
+/// override wins, else `<home>/.config`. An *empty*
+/// `XDG_CONFIG_HOME` counts as unset, per the XDG spec.
+fn config_dir_from(
+    xdg: Option<&std::ffi::OsStr>,
+    home: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    let base = match xdg {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => home?.join(".config"),
+    };
+    Some(base.join("hi"))
 }
 
 /// The expected path of `models.json` inside the config directory.
@@ -167,5 +185,22 @@ mod tests {
         assert_eq!(resolve_value("${HI_TEST_KEY}"), "sekrit");
         assert_eq!(resolve_value("literal-key"), "literal-key");
         assert_eq!(resolve_value("$HI_TEST_KEY_MISSING"), "");
+    }
+
+    #[test]
+    fn config_dir_prefers_xdg_then_falls_back_to_home() {
+        let from_xdg =
+            config_dir_from(Some("/custom/xdg".as_ref()), Some("/home/u".as_ref())).unwrap();
+        assert_eq!(from_xdg, PathBuf::from("/custom/xdg/hi"));
+
+        let from_home = config_dir_from(None, Some("/home/u".as_ref())).unwrap();
+        assert_eq!(from_home, PathBuf::from("/home/u/.config/hi"));
+
+        // Empty XDG_CONFIG_HOME counts as unset, per the XDG spec.
+        let empty = config_dir_from(Some("".as_ref()), Some("/home/u".as_ref())).unwrap();
+        assert_eq!(empty, PathBuf::from("/home/u/.config/hi"));
+
+        // No home anywhere — no directory to speak of.
+        assert!(config_dir_from(None, None).is_none());
     }
 }
