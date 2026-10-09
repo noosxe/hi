@@ -1,0 +1,516 @@
+//! The one wire protocol hi speaks: an OpenAI-compatible endpoint.
+//!
+//! Chat turns are `POST {baseUrl}/chat/completions` with
+//! `"stream": true`, read back as server-sent events. Model listing is
+//! the hybrid policy: explicit `models` entries from `models.json` win
+//! (only they can carry what discovery cannot know — context window,
+//! reasoning flag); an empty list means *ask the server* via
+//! `GET {baseUrl}/models`.
+//!
+//! Everything here is blocking I/O (`ureq`), by design: the turn runs
+//! on its own thread, so a blocking HTTP client is the simplest tool
+//! that keeps the UI responsive — no async runtime anywhere.
+
+use std::io::{BufRead, BufReader};
+use std::sync::mpsc::Sender;
+
+use serde::{Deserialize, Serialize};
+
+use crate::config::{ModelConfig, ProviderConfig};
+use crate::event::Event;
+use crate::message::Message;
+use crate::provider::Provider;
+
+/// A provider backed by any OpenAI-compatible HTTP endpoint.
+#[derive(Debug, Clone)]
+pub struct OpenAiCompatProvider {
+    /// Root of the API *including* the version path, e.g.
+    /// `http://localhost:8080/v1`.
+    base_url: String,
+    /// Resolved bearer token; `None` sends no `Authorization` header.
+    api_key: Option<String>,
+    /// The model identifier sent with every chat request.
+    model: String,
+    /// Explicit `models` entries; non-empty means config wins over
+    /// discovery (see `list_models`).
+    configured_models: Vec<ModelConfig>,
+}
+
+impl OpenAiCompatProvider {
+    /// Build from raw parts. Intended for tests; real callers go
+    /// through [`from_config`].
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            base_url: base_url.into(),
+            api_key,
+            model: model.into(),
+            configured_models: Vec::new(),
+        }
+    }
+
+    /// Build from a parsed `models.json` provider entry.
+    ///
+    /// The `$ENV` interpolation of the API key happens here, *once*:
+    /// the environment at launch time is what the session uses —
+    /// changing variables mid-session does nothing, which keeps
+    /// behavior predictable.
+    pub fn from_config(cfg: &ProviderConfig, model: impl Into<String>) -> Self {
+        Self {
+            base_url: cfg.base_url.clone(),
+            api_key: cfg.resolved_api_key().filter(|key| !key.is_empty()),
+            model: model.into(),
+            configured_models: cfg.models.clone(),
+        }
+    }
+
+    /// Model ids this provider offers — the hybrid policy:
+    /// configured entries when present, otherwise discovered live
+    /// from `{baseUrl}/models`. Sorted and deduplicated so callers
+    /// get a stable order.
+    pub fn list_models(&self) -> Result<Vec<String>, String> {
+        if !self.configured_models.is_empty() {
+            return Ok(self
+                .configured_models
+                .iter()
+                .map(|model| model.id.clone())
+                .collect());
+        }
+        self.discover_models()
+    }
+
+    fn discover_models(&self) -> Result<Vec<String>, String> {
+        let url = self.endpoint("models");
+        let response = self
+            .authorized(ureq::get(&url))
+            .call()
+            .map_err(|err| describe("model discovery", err))?;
+        let parsed: ModelsResponse = response
+            .into_body()
+            .read_json()
+            .map_err(|err| format!("model discovery: bad response body: {err}"))?;
+        let mut ids: Vec<String> = parsed
+            .data
+            .into_iter()
+            .map(|entry| entry.id)
+            .filter(|id| !id.is_empty())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
+
+    fn endpoint(&self, path: &str) -> String {
+        format!("{}/{}", self.base_url.trim_end_matches('/'), path)
+    }
+
+    /// Attach the bearer token when one is configured — and only
+    /// then. Some local servers reject requests that carry an
+    /// unexpected `Authorization` header. Generic over ureq's
+    /// typestate (`WithBody`/`WithoutBody`), so both call sites share it.
+    fn authorized<State>(
+        &self,
+        request: ureq::RequestBuilder<State>,
+    ) -> ureq::RequestBuilder<State> {
+        match &self.api_key {
+            Some(key) => request.header("Authorization", format!("Bearer {key}")),
+            None => request,
+        }
+    }
+
+    /// Stream one turn: the blocking HTTP conversation behind
+    /// `Provider::respond`.
+    fn stream(&self, history: &[Message], tx: &Sender<Event>) -> Result<(), String> {
+        let payload = ChatRequest {
+            model: &self.model,
+            messages: wire_messages(history),
+            stream: true,
+        };
+        let url = self.endpoint("chat/completions");
+        let response = self
+            .authorized(ureq::post(&url))
+            .send_json(&payload)
+            .map_err(|err| describe("chat request", err))?;
+
+        // The body reader is a plain `Read`; buffering turns it into
+        // lines, which is exactly what SSE frames are.
+        let buffered = BufReader::new(response.into_body().into_reader());
+        for line in buffered.lines() {
+            let line = line.map_err(|err| format!("reading stream: {err}"))?;
+            match parse_data_line(&line) {
+                DataLine::Token(token) => {
+                    if tx.send(Event::Token(token)).is_err() {
+                        // Receiver dropped mid-stream: that is the
+                        // cancellation signal. Stop quietly — nobody
+                        // is listening for a final event.
+                        return Ok(());
+                    }
+                }
+                DataLine::Done => return Ok(()),
+                DataLine::Ignore => {}
+                DataLine::Malformed(why) => return Err(why),
+            }
+        }
+        // Server closed without `[DONE]`: tolerate it and treat the
+        // stream as complete.
+        Ok(())
+    }
+}
+
+impl Provider for OpenAiCompatProvider {
+    fn respond(&self, history: &[Message], tx: Sender<Event>) {
+        if tx.send(Event::TurnStart).is_err() {
+            return;
+        }
+        match self.stream(history, &tx) {
+            Ok(()) => {
+                let _ = tx.send(Event::TurnEnd);
+            }
+            Err(err) => {
+                // Contract (see `Event`): any partial `Token`s stand,
+                // then one `Error`, then `TurnEnd` — consumers keep a
+                // single finalization path.
+                let _ = tx.send(Event::Error(err));
+                let _ = tx.send(Event::TurnEnd);
+            }
+        }
+    }
+}
+
+/// Turn a provider error into something a human can act on. Status
+/// codes are called out because "HTTP 401" is usually the whole
+/// diagnosis (bad or missing key).
+fn describe(action: &str, err: ureq::Error) -> String {
+    match err {
+        ureq::Error::StatusCode(code) => format!("{action}: server returned HTTP {code}"),
+        err => format!("{action}: {err}"),
+    }
+}
+
+/// The outcome of one SSE line. Frames are `data: <payload>`;
+/// comments (`: ping`), event names, and blank lines are noise.
+#[derive(Debug, PartialEq)]
+enum DataLine {
+    Token(String),
+    Done,
+    Ignore,
+    Malformed(String),
+}
+
+fn parse_data_line(line: &str) -> DataLine {
+    let Some(payload) = line.strip_prefix("data:") else {
+        return DataLine::Ignore;
+    };
+    let payload = payload.trim();
+    if payload == "[DONE]" {
+        return DataLine::Done;
+    }
+    let chunk: StreamChunk = match serde_json::from_str(payload) {
+        Ok(chunk) => chunk,
+        Err(err) => return DataLine::Malformed(format!("malformed stream payload: {err}")),
+    };
+    // First choice, its delta content if present. Role-only and empty
+    // deltas happen (openers, keep-alives) and are not tokens.
+    match chunk.choices.into_iter().next().and_then(|c| c.delta.content) {
+        Some(content) if !content.is_empty() => DataLine::Token(content),
+        _ => DataLine::Ignore,
+    }
+}
+
+/// One OpenAI chat request. `&'a str` borrows instead of cloning —
+/// the payload is built, sent, and dropped within one call.
+#[derive(Serialize)]
+struct ChatRequest<'a> {
+    model: &'a str,
+    messages: Vec<WireMessage<'a>>,
+    stream: bool,
+}
+
+#[derive(Serialize)]
+struct WireMessage<'a> {
+    role: &'static str,
+    content: &'a str,
+}
+
+/// Map the harness's history onto the wire. `Message::Error` entries
+/// are local annotations — replaying a failure to the model as if it
+/// were a conversation turn would be meaningless, so they are dropped.
+fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
+    history
+        .iter()
+        .filter_map(|msg| {
+            let role = match msg {
+                Message::Error(_) => return None,
+                Message::User(_) => "user",
+                Message::Assistant(_) => "assistant",
+            };
+            Some(WireMessage {
+                role,
+                content: msg.text(),
+            })
+        })
+        .collect()
+}
+
+/// One streamed chunk. Only `choices[0].delta.content` matters to hi;
+/// everything else (ids, finish reasons, usage) is ignored by serde.
+#[derive(Deserialize)]
+struct StreamChunk {
+    #[serde(default)]
+    choices: Vec<StreamChoice>,
+}
+
+#[derive(Deserialize)]
+struct StreamChoice {
+    #[serde(default)]
+    delta: Delta,
+}
+
+#[derive(Deserialize, Default)]
+struct Delta {
+    #[serde(default)]
+    content: Option<String>,
+}
+
+/// The `GET {baseUrl}/models` response shape: `{"data":[{"id":…}]}`.
+#[derive(Deserialize)]
+struct ModelsResponse {
+    #[serde(default)]
+    data: Vec<ModelEntry>,
+}
+
+#[derive(Deserialize)]
+struct ModelEntry {
+    #[serde(default)]
+    id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::spawn_turn;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::thread;
+
+    #[test]
+    fn parses_sse_data_lines() {
+        assert_eq!(
+            parse_data_line("data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}"),
+            DataLine::Token("Hi".into())
+        );
+        assert_eq!(parse_data_line("data: [DONE]"), DataLine::Done);
+        // Role-only opener chunk: no content, not a token.
+        assert_eq!(
+            parse_data_line("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}"),
+            DataLine::Ignore
+        );
+        // SSE comments and stray lines are noise.
+        assert_eq!(parse_data_line(": keep-alive"), DataLine::Ignore);
+        assert_eq!(parse_data_line(""), DataLine::Ignore);
+        // Garbage payload must not be silently dropped.
+        assert!(matches!(parse_data_line("data: {not json"), DataLine::Malformed(_)));
+    }
+
+    #[test]
+    fn error_messages_are_never_sent_to_the_model() {
+        let history = vec![
+            Message::User("question".into()),
+            Message::Error("local annotation".into()),
+            Message::Assistant("answer".into()),
+        ];
+        let wire = wire_messages(&history);
+        assert_eq!(wire.len(), 2);
+        assert_eq!((wire[0].role, wire[1].role), ("user", "assistant"));
+    }
+
+    #[test]
+    fn configured_models_win_without_touching_the_network() {
+        // Port 1 on localhost is not listening — any HTTP attempt
+        // would fail this test loudly.
+        let cfg = ProviderConfig {
+            base_url: "http://127.0.0.1:1/v1".into(),
+            api_key: None,
+            models: vec![ModelConfig {
+                id: "listed".into(),
+                ..Default::default()
+            }],
+        };
+        let provider = OpenAiCompatProvider::from_config(&cfg, "listed");
+        assert_eq!(provider.list_models().unwrap(), vec!["listed".to_string()]);
+    }
+
+    #[test]
+    fn discovers_models_when_none_are_configured() {
+        let api = FakeApi::start(json_response(
+            "{\"data\":[{\"id\":\"beta\"},{\"id\":\"alpha\"},{\"id\":\"beta\"}]}",
+        ));
+        let provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "whatever");
+        // Sorted, deduplicated.
+        assert_eq!(
+            provider.list_models().unwrap(),
+            vec!["alpha".to_string(), "beta".to_string()]
+        );
+        let request = api.first_request();
+        assert!(request.starts_with("GET /v1/models"));
+        // No key configured — no Authorization header may be sent.
+        assert!(!request.to_ascii_lowercase().contains("authorization:"));
+    }
+
+    #[test]
+    fn streams_tokens_from_chat_completions() {
+        let api = FakeApi::start(sse_response(&[
+            "{\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}",
+            "{\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}",
+            "{\"choices\":[{\"delta\":{\"content\":\"lo!\"}}]}",
+            "[DONE]",
+        ]));
+        let provider =
+            OpenAiCompatProvider::new(api.base_url.clone(), Some("sekrit".into()), "test-model");
+        let rx = spawn_turn(
+            Arc::new(provider),
+            &[Message::User("hi there".into())],
+        );
+        let events: Vec<Event> = rx.iter().collect();
+
+        assert_eq!(events.first(), Some(&Event::TurnStart));
+        assert_eq!(events.last(), Some(&Event::TurnEnd));
+        assert!(!events.iter().any(|event| matches!(event, Event::Error(_))));
+        let text: String = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Token(token) => Some(token.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "Hello!");
+
+        let request = api.first_request();
+        assert!(request.starts_with("POST /v1/chat/completions"));
+        assert!(request.to_ascii_lowercase().contains("authorization: bearer sekrit"));
+        // send_json pretty-prints, so compare the body without
+        // whitespace: collapse it all, then look for compact pairs.
+        let compact: String = request.split_whitespace().collect();
+        assert!(compact.contains("\"model\":\"test-model\""));
+        assert!(compact.contains("\"stream\":true"));
+        assert!(compact.contains("\"content\":\"hithere\""));
+    }
+
+    #[test]
+    fn http_error_becomes_error_then_turnend() {
+        let api = FakeApi::start(
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let provider =
+            OpenAiCompatProvider::new(api.base_url.clone(), Some("bad".into()), "m");
+        let rx = spawn_turn(Arc::new(provider), &[]);
+        let events: Vec<Event> = rx.iter().collect();
+
+        assert_eq!(events.first(), Some(&Event::TurnStart));
+        let error = events.iter().find_map(|event| match event {
+            Event::Error(msg) => Some(msg.clone()),
+            _ => None,
+        });
+        assert!(error.unwrap().contains("401"));
+        assert_eq!(events.last(), Some(&Event::TurnEnd));
+    }
+
+    /// A minimal HTTP server on an ephemeral port: reads each request
+    /// fully, records it, answers with one canned response, closes.
+    /// One thread per test, one connection per request.
+    struct FakeApi {
+        base_url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl FakeApi {
+        fn start(response: impl Into<String>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&requests);
+            let response = response.into();
+            thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let mut stream = stream.unwrap();
+                    let request = read_request(&mut stream);
+                    recorded.lock().unwrap().push(request);
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+                    // Dropping closes the socket; every response says
+                    // `Connection: close`, so one accept per request.
+                }
+            });
+            Self {
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                requests,
+            }
+        }
+
+        fn first_request(&self) -> String {
+            self.requests
+                .lock()
+                .unwrap()
+                .first()
+                .cloned()
+                .unwrap_or_default()
+        }
+    }
+
+    /// SSE response for the given `data:` frames.
+    fn sse_response(frames: &[&str]) -> String {
+        let mut body = String::new();
+        for frame in frames {
+            body.push_str(&format!("data: {frame}\n\n"));
+        }
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// JSON response with a computed Content-Length.
+    fn json_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// Read a whole HTTP request: headers through the blank line,
+    /// then exactly `Content-Length` bytes of body.
+    fn read_request(stream: &mut TcpStream) -> String {
+        let mut bytes = Vec::new();
+        let mut buf = [0u8; 1024];
+        let header_end = loop {
+            let n = stream.read(&mut buf).unwrap();
+            assert!(n > 0, "client closed before sending headers");
+            bytes.extend_from_slice(&buf[..n]);
+            if let Some(pos) = find_subsequence(&bytes, b"\r\n\r\n") {
+                break pos + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&bytes[..header_end]).to_string();
+        let lowered = headers.to_ascii_lowercase();
+        let content_length = lowered
+            .lines()
+            .find_map(|line| line.strip_prefix("content-length:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        while bytes.len() < header_end + content_length {
+            let n = stream.read(&mut buf).unwrap();
+            assert!(n > 0, "client closed before sending body");
+            bytes.extend_from_slice(&buf[..n]);
+        }
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|window| window == needle)
+    }
+}

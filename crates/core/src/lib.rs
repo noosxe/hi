@@ -7,12 +7,14 @@ pub mod config;
 pub mod event;
 pub mod message;
 pub mod mock;
+pub mod openai;
 pub mod provider;
 
 pub use config::{ModelConfig, ModelsConfig, ProviderConfig};
 pub use event::Event;
 pub use message::Message;
 pub use mock::MockProvider;
+pub use openai::OpenAiCompatProvider;
 pub use provider::{Provider, spawn_turn};
 
 /// The program's name, shared by every crate in the workspace.

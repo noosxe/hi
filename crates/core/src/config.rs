@@ -39,7 +39,7 @@ pub struct ProviderConfig {
 }
 
 /// One model entry.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ModelConfig {
     /// The model identifier sent to the API.
     pub id: String,
