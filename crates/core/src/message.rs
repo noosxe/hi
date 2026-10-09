@@ -13,13 +13,15 @@ pub enum Message {
     User(String),
     /// Something the model produced.
     Assistant(String),
+    /// A turn-level failure, shown in the transcript.
+    Error(String),
 }
 
 impl Message {
     /// The text content, whoever said it.
     pub fn text(&self) -> &str {
         match self {
-            Message::User(text) | Message::Assistant(text) => text,
+            Message::User(text) | Message::Assistant(text) | Message::Error(text) => text,
         }
     }
 }

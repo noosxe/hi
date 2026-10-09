@@ -30,6 +30,9 @@ pub struct Turn {
     /// Reply text accumulated so far — rendered live, finalized into
     /// `messages` when the turn ends.
     pub text: String,
+    /// Set when the provider reported a failure for this turn;
+    /// `Some` turns the finalization into an error transcript entry.
+    pub error: Option<String>,
     /// Events from the provider thread. Private on purpose: consumed
     /// only by `App::pump`, so raw events never leak into UI code.
     rx: Receiver<Event>,
@@ -87,6 +90,7 @@ impl App {
         let rx = spawn_turn(Arc::clone(&self.provider), &self.messages);
         self.turn = Some(Turn {
             text: String::new(),
+            error: None,
             rx,
         });
     }
@@ -104,6 +108,7 @@ impl App {
             match event {
                 Event::TurnStart => {} // nothing to do yet — tokens follow
                 Event::Token(token) => turn.text.push_str(&token),
+                Event::Error(message) => turn.error = Some(message),
                 Event::TurnEnd => {
                     finished = true;
                     break;
@@ -115,7 +120,14 @@ impl App {
             // The mutable borrow above has ended by now, so taking
             // ownership to move the text out is allowed.
             if let Some(turn) = self.turn.take() {
-                self.messages.push(Message::Assistant(turn.text));
+                // Partial output is still worth keeping; the error
+                // entry goes below it so the failure is visible.
+                if !turn.text.is_empty() {
+                    self.messages.push(Message::Assistant(turn.text));
+                }
+                if let Some(err) = turn.error {
+                    self.messages.push(Message::Error(err));
+                }
             }
         }
     }

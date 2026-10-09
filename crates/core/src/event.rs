@@ -16,4 +16,9 @@ pub enum Event {
     Token(String),
     /// The turn finished. Whatever accumulated is the final reply.
     TurnEnd,
+    /// The turn failed (network, HTTP status, malformed response…).
+    /// Any `Token`s sent before it are the partial output. A
+    /// `TurnEnd` still follows, so consumers keep a single
+    /// finalization path and just mark the reply as failed.
+    Error(String),
 }

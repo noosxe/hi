@@ -54,7 +54,7 @@ fn draw_stream(frame: &mut Frame, area: Rect, app: &App) {
     let Some(turn) = app.turn.as_ref() else {
         return;
     };
-    if turn.text.is_empty() {
+    if turn.text.is_empty() && turn.error.is_none() {
         return;
     }
     // Keep only as many trailing characters as fit the two wrapped
@@ -62,13 +62,20 @@ fn draw_stream(frame: &mut Frame, area: Rect, app: &App) {
     // known gap, queued for the input-polish milestone.
     let capacity = area.width as usize * area.height as usize;
     let count = turn.text.chars().count();
-    let tail: String = turn
-        .text
-        .chars()
-        .skip(count.saturating_sub(capacity))
-        .collect();
-    let line = Line::from(tail).style(Style::new().dim());
-    frame.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), area);
+    let mut lines: Vec<Line> = Vec::new();
+    if !turn.text.is_empty() {
+        let tail: String = turn
+            .text
+            .chars()
+            .skip(count.saturating_sub(capacity))
+            .collect();
+        lines.push(Line::from(tail).style(Style::new().dim()));
+    }
+    if let Some(err) = &turn.error {
+        lines.push(Line::from(err.clone()).red());
+    }
+    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
 }
 
 /// Format one transcript message and render it into a scrollback row.
@@ -80,6 +87,7 @@ pub fn message_into(msg: Message, buf: &mut Buffer) {
     let line = match msg {
         Message::User(text) => Line::from(vec!["you ".dim(), text.into()]),
         Message::Assistant(text) => Line::from(vec!["assistant ".dim(), text.into()]),
+        Message::Error(text) => Line::from(vec!["error ".red(), text.into()]),
     };
     Paragraph::new(line).render(buf.area, buf);
 }
