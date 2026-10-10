@@ -68,6 +68,19 @@ impl ProviderConfig {
     }
 }
 
+impl ProviderConfig {
+    /// Hybrid model listing for selection-time decisions (before any
+    /// provider object exists): explicit entries win; an empty list
+    /// means `GET {baseUrl}/models`.
+    pub fn list_model_ids(&self) -> Result<Vec<String>, String> {
+        if !self.models.is_empty() {
+            return Ok(self.models.iter().map(|model| model.id.clone()).collect());
+        }
+        let key = self.resolved_api_key().filter(|key| !key.is_empty());
+        crate::openai::discover_model_ids(&self.base_url, key.as_deref())
+    }
+}
+
 /// pi's value syntax: `$NAME` or `${NAME}` interpolates the
 /// environment; anything else is taken literally.
 fn resolve_value(raw: &str) -> String {

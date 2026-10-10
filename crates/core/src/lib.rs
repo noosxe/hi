@@ -9,6 +9,10 @@ pub mod message;
 pub mod mock;
 pub mod openai;
 pub mod provider;
+pub mod selection;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use config::{ModelConfig, ModelsConfig, ProviderConfig};
 pub use event::Event;

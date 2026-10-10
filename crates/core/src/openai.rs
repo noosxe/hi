@@ -13,6 +13,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::sync::mpsc::Sender;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -79,29 +80,9 @@ impl OpenAiCompatProvider {
                 .map(|model| model.id.clone())
                 .collect());
         }
-        self.discover_models()
+        discover_model_ids(&self.base_url, self.api_key.as_deref())
     }
 
-    fn discover_models(&self) -> Result<Vec<String>, String> {
-        let url = self.endpoint("models");
-        let response = self
-            .authorized(ureq::get(&url))
-            .call()
-            .map_err(|err| describe("model discovery", err))?;
-        let parsed: ModelsResponse = response
-            .into_body()
-            .read_json()
-            .map_err(|err| format!("model discovery: bad response body: {err}"))?;
-        let mut ids: Vec<String> = parsed
-            .data
-            .into_iter()
-            .map(|entry| entry.id)
-            .filter(|id| !id.is_empty())
-            .collect();
-        ids.sort();
-        ids.dedup();
-        Ok(ids)
-    }
 
     fn endpoint(&self, path: &str) -> String {
         format!("{}/{}", self.base_url.trim_end_matches('/'), path)
@@ -158,6 +139,40 @@ impl OpenAiCompatProvider {
         // stream as complete.
         Ok(())
     }
+}
+
+/// `GET {baseUrl}/models` — the discovery half of the hybrid policy.
+/// A free function because selection resolves providers *before* any
+/// `OpenAiCompatProvider` exists. Overall 10s timeout: discovery runs
+/// at startup/listing time, where hanging forever would be worse than
+/// failing. (Turn streams get no timeout — Esc cancels those.)
+pub(crate) fn discover_model_ids(
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let request = ureq::get(&url)
+        .config()
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build();
+    let request = match api_key {
+        Some(key) => request.header("Authorization", format!("Bearer {key}")),
+        None => request,
+    };
+    let response = request.call().map_err(|err| describe("model discovery", err))?;
+    let parsed: ModelsResponse = response
+        .into_body()
+        .read_json()
+        .map_err(|err| format!("model discovery: bad response body: {err}"))?;
+    let mut ids: Vec<String> = parsed
+        .data
+        .into_iter()
+        .map(|entry| entry.id)
+        .filter(|id| !id.is_empty())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
 }
 
 impl Provider for OpenAiCompatProvider {
@@ -292,11 +307,8 @@ struct ModelEntry {
 mod tests {
     use super::*;
     use crate::provider::spawn_turn;
-    use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
+    use crate::test_support::{FakeApi, json_response, sse_response};
     use std::sync::Arc;
-    use std::sync::Mutex;
-    use std::thread;
 
     #[test]
     fn parses_sse_data_lines() {
@@ -420,97 +432,4 @@ mod tests {
         assert_eq!(events.last(), Some(&Event::TurnEnd));
     }
 
-    /// A minimal HTTP server on an ephemeral port: reads each request
-    /// fully, records it, answers with one canned response, closes.
-    /// One thread per test, one connection per request.
-    struct FakeApi {
-        base_url: String,
-        requests: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl FakeApi {
-        fn start(response: impl Into<String>) -> Self {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let port = listener.local_addr().unwrap().port();
-            let requests = Arc::new(Mutex::new(Vec::new()));
-            let recorded = Arc::clone(&requests);
-            let response = response.into();
-            thread::spawn(move || {
-                for stream in listener.incoming() {
-                    let mut stream = stream.unwrap();
-                    let request = read_request(&mut stream);
-                    recorded.lock().unwrap().push(request);
-                    let _ = stream.write_all(response.as_bytes());
-                    let _ = stream.flush();
-                    // Dropping closes the socket; every response says
-                    // `Connection: close`, so one accept per request.
-                }
-            });
-            Self {
-                base_url: format!("http://127.0.0.1:{port}/v1"),
-                requests,
-            }
-        }
-
-        fn first_request(&self) -> String {
-            self.requests
-                .lock()
-                .unwrap()
-                .first()
-                .cloned()
-                .unwrap_or_default()
-        }
-    }
-
-    /// SSE response for the given `data:` frames.
-    fn sse_response(frames: &[&str]) -> String {
-        let mut body = String::new();
-        for frame in frames {
-            body.push_str(&format!("data: {frame}\n\n"));
-        }
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        )
-    }
-
-    /// JSON response with a computed Content-Length.
-    fn json_response(body: &str) -> String {
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        )
-    }
-
-    /// Read a whole HTTP request: headers through the blank line,
-    /// then exactly `Content-Length` bytes of body.
-    fn read_request(stream: &mut TcpStream) -> String {
-        let mut bytes = Vec::new();
-        let mut buf = [0u8; 1024];
-        let header_end = loop {
-            let n = stream.read(&mut buf).unwrap();
-            assert!(n > 0, "client closed before sending headers");
-            bytes.extend_from_slice(&buf[..n]);
-            if let Some(pos) = find_subsequence(&bytes, b"\r\n\r\n") {
-                break pos + 4;
-            }
-        };
-        let headers = String::from_utf8_lossy(&bytes[..header_end]).to_string();
-        let lowered = headers.to_ascii_lowercase();
-        let content_length = lowered
-            .lines()
-            .find_map(|line| line.strip_prefix("content-length:"))
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or(0);
-        while bytes.len() < header_end + content_length {
-            let n = stream.read(&mut buf).unwrap();
-            assert!(n > 0, "client closed before sending body");
-            bytes.extend_from_slice(&buf[..n]);
-        }
-        String::from_utf8_lossy(&bytes).to_string()
-    }
-
-    fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-        haystack.windows(needle.len()).position(|window| window == needle)
-    }
 }
