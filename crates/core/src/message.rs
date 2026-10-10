@@ -15,13 +15,16 @@ pub enum Message {
     Assistant(String),
     /// A turn-level failure, shown in the transcript.
     Error(String),
+    /// A harness announcement (e.g. "default model saved: …"), shown
+    /// dim in the transcript.
+    System(String),
 }
 
 impl Message {
     /// The text content, whoever said it.
     pub fn text(&self) -> &str {
         match self {
-            Message::User(text) | Message::Assistant(text) | Message::Error(text) => text,
+            Message::User(text) | Message::Assistant(text) | Message::Error(text) | Message::System(text) => text,
         }
     }
 }

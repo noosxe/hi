@@ -3,8 +3,9 @@ use std::sync::mpsc::Receiver;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use hi_core::{Event, Message, Provider, spawn_turn};
+use hi_core::{Event, Message, ModelsConfig, OpenAiCompatProvider, Provider, Settings, spawn_turn};
 
+use crate::catalog::Catalog;
 use crate::status::{Status, location_label};
 /// All TUI state lives here.
 ///
@@ -28,6 +29,14 @@ pub struct App {
     /// Left side of the status bar, computed once at startup:
     /// `~/Projects/hi (main)`.
     pub location: String,
+    /// What the `/model` picker can offer, gathered once at startup.
+    pub catalog: Catalog,
+    /// The parsed `models.json` — needed to rebuild providers when
+    /// the picker switches models at runtime.
+    pub config: ModelsConfig,
+    /// The open `/model` picker, if any. `Some` means it owns the
+    /// keyboard.
+    pub picker: Option<Picker>,
     /// The turn in flight, if any. `Some` from Enter until TurnEnd.
     pub turn: Option<Turn>,
 }
@@ -45,8 +54,20 @@ pub struct Turn {
     rx: Receiver<Event>,
 }
 
+/// The open `/model` chooser: flat `provider/model` items plus the
+/// highlighted row.
+pub struct Picker {
+    pub items: Vec<String>,
+    pub selected: usize,
+}
+
 impl App {
-    pub fn new(provider: Arc<dyn Provider>, status: Status) -> Self {
+    pub fn new(
+        provider: Arc<dyn Provider>,
+        status: Status,
+        catalog: Catalog,
+        config: ModelsConfig,
+    ) -> Self {
         Self {
             quit: false,
             input: String::new(),
@@ -54,6 +75,9 @@ impl App {
             provider,
             status,
             location: location_label(),
+            catalog,
+            config,
+            picker: None,
             turn: None,
         }
     }
@@ -66,6 +90,11 @@ impl App {
             return;
         }
 
+        // When the picker is open, it owns the keyboard.
+        if self.picker.is_some() {
+            self.handle_picker_key(key);
+            return;
+        }
         match key.code {
             KeyCode::Char(c) => self.input.push(c),
             KeyCode::Backspace => {
@@ -84,6 +113,12 @@ impl App {
                 // no clone needed since we own the value anyway.
                 let msg = std::mem::take(&mut self.input);
                 if msg.trim().is_empty() {
+                    return;
+                }
+                // Slash commands: `/model` opens the picker instead of
+                // sending a chat message. More commands will follow.
+                if msg.trim() == "/model" {
+                    self.open_picker();
                     return;
                 }
                 self.messages.push(Message::User(msg));
@@ -114,6 +149,74 @@ impl App {
             error: None,
             rx,
         });
+    }
+
+    /// `/model`: fill the picker from the startup catalog and
+    /// preselect the current choice, if it is still listed.
+    fn open_picker(&mut self) {
+        let items = self.catalog.items();
+        let current = format!("{}/{}", self.status.provider, self.status.model);
+        let selected = items.iter().position(|item| *item == current).unwrap_or(0);
+        self.picker = Some(Picker { items, selected });
+    }
+
+    /// Keyboard owner while the picker is open.
+    fn handle_picker_key(&mut self, key: KeyEvent) {
+        let Some(picker) = self.picker.as_mut() else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => {
+                if picker.selected + 1 < picker.items.len() {
+                    picker.selected += 1;
+                }
+            }
+            // pi's contract: Ctrl-S persists the choice as the startup
+            // default; Enter only switches this session.
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(item) = picker.items.get(picker.selected) {
+                    let settings = Settings {
+                        default_model: Some(item.clone()),
+                    };
+                    match settings.save() {
+                        Ok(()) => self
+                            .messages
+                            .push(Message::System(format!("default model saved: {item}"))),
+                        Err(err) => self.messages.push(Message::Error(err)),
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                // Copy the choice out of the picker borrow first — the
+                // borrow must end before `apply_model_choice` can take
+                // `&mut self` whole.
+                let choice = picker.items.get(picker.selected).cloned();
+                if let Some(item) = choice {
+                    self.apply_model_choice(item);
+                }
+                self.picker = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Switch this session to `provider/model`. Safe even mid-turn:
+    /// the running turn thread holds its own `Arc` to the old provider
+    /// and finishes on it; only new turns pick up the new one.
+    fn apply_model_choice(&mut self, item: String) {
+        let Some((provider, model)) = item.split_once('/') else {
+            return;
+        };
+        let Some(entry) = self.config.providers.get(provider) else {
+            return;
+        };
+        self.provider = Arc::new(OpenAiCompatProvider::from_config(entry, model));
+        self.status = Status {
+            provider: provider.to_string(),
+            model: model.to_string(),
+        };
     }
 
     /// Drain every event the provider thread has delivered so far.

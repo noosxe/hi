@@ -11,7 +11,7 @@ use std::sync::Arc;
 use clap::Parser;
 
 use hi_core::{MockProvider, ModelsConfig, OpenAiCompatProvider, Provider, Settings};
-use hi_tui::{Status, run};
+use hi_tui::{Catalog, Status, run};
 
 #[derive(Parser)]
 #[command(
@@ -48,6 +48,8 @@ fn main() -> ExitCode {
                 provider: "mock".into(),
                 model: "mock".into(),
             },
+            Catalog::default(),
+            ModelsConfig::default(),
         );
     }
 
@@ -71,6 +73,24 @@ fn main() -> ExitCode {
         };
     }
 
+    // The `/model` picker's menu, gathered once at startup (each
+    // provider bounded by the 10s discovery timeout). Providers that
+    // fail or list nothing simply don't appear; their errors are
+    // visible through --list-models.
+    let catalog = Catalog {
+        entries: config
+            .providers
+            .iter()
+            .filter_map(|(name, entry)| {
+                entry
+                    .list_model_ids()
+                    .ok()
+                    .filter(|models| !models.is_empty())
+                    .map(|models| (name.clone(), models))
+            })
+            .collect(),
+    };
+
     let settings = match Settings::load() {
         Ok(settings) => settings,
         Err(err) => return fail(&err),
@@ -90,12 +110,17 @@ fn main() -> ExitCode {
         provider: selected.provider,
         model: selected.model,
     };
-    launch(provider, status)
+    launch(provider, status, catalog, config)
 }
 
 /// Hand the session to the interactive interface.
-fn launch(provider: Arc<dyn Provider>, status: Status) -> ExitCode {
-    match run(provider, status) {
+fn launch(
+    provider: Arc<dyn Provider>,
+    status: Status,
+    catalog: Catalog,
+    config: ModelsConfig,
+) -> ExitCode {
+    match run(provider, status, catalog, config) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => fail(&err.to_string()),
     }

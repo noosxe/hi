@@ -7,8 +7,10 @@
 mod app;
 mod ui;
 
+pub mod catalog;
 pub mod status;
 
+pub use catalog::Catalog;
 pub use status::Status;
 
 use std::sync::Arc;
@@ -18,10 +20,15 @@ use ratatui::crossterm::event::{self, Event};
 use ratatui::{TerminalOptions, Viewport};
 
 use crate::app::App;
-use hi_core::Provider;
+use hi_core::{ModelsConfig, Provider};
 
 /// Run the interactive interface until the user quits.
-pub fn run(provider: Arc<dyn Provider>, status: Status) -> std::io::Result<()> {
+pub fn run(
+    provider: Arc<dyn Provider>,
+    status: Status,
+    catalog: Catalog,
+    config: ModelsConfig,
+) -> std::io::Result<()> {
     // Inline mode: NO alternate screen. The terminal keeps its normal
     // buffer and scrollback — we manage only the bottom 6 rows (a
     // two-row live streaming area above the 3-row input and the
@@ -37,7 +44,7 @@ pub fn run(provider: Arc<dyn Provider>, status: Status) -> std::io::Result<()> {
     let mut terminal = ratatui::try_init_with_options(options)?;
     terminal.insert_before(1, |buf| ui::welcome_into(buf))?;
 
-    let mut app = App::new(provider, status);
+    let mut app = App::new(provider, status, catalog, config);
     let result = event_loop(&mut terminal, &mut app);
 
     // Teardown, in order:

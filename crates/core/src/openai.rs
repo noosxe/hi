@@ -288,15 +288,16 @@ struct WireMessage<'a> {
     content: &'a str,
 }
 
-/// Map the harness's history onto the wire. `Message::Error` entries
-/// are local annotations — replaying a failure to the model as if it
-/// were a conversation turn would be meaningless, so they are dropped.
+/// Map the harness's history onto the wire. `Message::Error` and
+/// `Message::System` entries are local annotations — replaying them
+/// to the model as conversation turns would be meaningless, so they
+/// are dropped.
 fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
     history
         .iter()
         .filter_map(|msg| {
             let role = match msg {
-                Message::Error(_) => return None,
+                Message::Error(_) | Message::System(_) => return None,
                 Message::User(_) => "user",
                 Message::Assistant(_) => "assistant",
             };

@@ -3,7 +3,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Stylize, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
+use ratatui::widgets::{List, ListItem, ListState, Block, Borders, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 
 use crate::app::App;
@@ -27,8 +27,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
         height: 1,
         ..frame.area()
     };
-    draw_stream(frame, stream_area, app);
-    draw_input(frame, input_area, app);
+    if app.picker.is_some() {
+        let picker_area = Rect { height: 5, ..frame.area() };
+        draw_picker(frame, picker_area, app);
+    } else {
+        draw_stream(frame, stream_area, app);
+        draw_input(frame, input_area, app);
+    }
     draw_status(frame, status_area, app);
 }
 
@@ -60,6 +65,31 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let text = crate::status::compose_status(&app.location, &app.status.label(), area.width);
     frame.render_widget(Paragraph::new(text).style(Style::new().dim()), area);
+}
+
+/// The `/model` popup: fills the viewport above the status row. The
+/// inline viewport is only 6 rows, so the picker lives inside it —
+/// the `List` scrolls, so any model count works.
+fn draw_picker(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(picker) = app.picker.as_ref() else {
+        return;
+    };
+    let items: Vec<ListItem> = picker
+        .items
+        .iter()
+        .map(|item| ListItem::from(item.as_str()))
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(picker.selected));
+    let list = List::new(items)
+        .block(
+            Block::new()
+                .borders(Borders::ALL)
+                .title(" model — enter: use · ctrl-s: default · esc: close "),
+        )
+        .highlight_symbol("› ")
+        .highlight_style(Style::new().bold());
+    frame.render_stateful_widget(list, area, &mut state);
 }
 /// The in-progress reply, rendered live in the viewport, dimmed to
 /// signal it is not final. Only the tail fits in two rows — the
@@ -102,6 +132,7 @@ pub fn message_into(msg: Message, buf: &mut Buffer) {
         Message::User(text) => Line::from(vec!["you ".dim(), text.into()]),
         Message::Assistant(text) => Line::from(vec!["assistant ".dim(), text.into()]),
         Message::Error(text) => Line::from(vec!["error ".red(), text.into()]),
+        Message::System(text) => Line::from(text).style(Style::new().dim()),
     };
     Paragraph::new(line).render(buf.area, buf);
 }
