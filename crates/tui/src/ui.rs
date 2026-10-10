@@ -8,21 +8,28 @@ use ratatui::Frame;
 
 use crate::app::App;
 
-/// Render the managed region: the input area, and nothing else.
-/// The transcript is NOT drawn here — it lives in the terminal's
+/// Render the managed region: streaming area, input, and the status
+/// row. The transcript is NOT drawn here — it lives in the terminal's
 /// scrollback (see `message_into`).
 pub fn draw(frame: &mut Frame, app: &App) {
-    // The frame IS the 5-row inline viewport. Two fixed-height areas
-    // need no layout solver — plain struct arithmetic. The functional
-    // update syntax `..frame.area()` copies every field not named.
+    // The frame IS the 6-row inline viewport. Three fixed-height
+    // areas need no layout solver — plain struct arithmetic. The
+    // functional update syntax `..frame.area()` copies every field
+    // not named.
     let stream_area = Rect { height: 2, ..frame.area() };
     let input_area = Rect {
         y: frame.area().y + 2,
         height: 3,
         ..frame.area()
     };
+    let status_area = Rect {
+        y: frame.area().y + 5,
+        height: 1,
+        ..frame.area()
+    };
     draw_stream(frame, stream_area, app);
     draw_input(frame, input_area, app);
+    draw_status(frame, status_area, app);
 }
 
 /// The input area: top/bottom rules only, no side walls — pi-style.
@@ -47,6 +54,13 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
     ));
 }
 
+
+/// The status row: cwd (branch) on the left, (provider) model on the
+/// right. All dim — decoration is never the star of the frame.
+fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
+    let text = crate::status::compose_status(&app.location, &app.status.label(), area.width);
+    frame.render_widget(Paragraph::new(text).style(Style::new().dim()), area);
+}
 /// The in-progress reply, rendered live in the viewport, dimmed to
 /// signal it is not final. Only the tail fits in two rows — the
 /// complete text is printed to scrollback when the turn ends.

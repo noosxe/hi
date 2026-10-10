@@ -4,6 +4,8 @@ use std::sync::mpsc::Receiver;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use hi_core::{Event, Message, Provider, spawn_turn};
+
+use crate::status::{Status, location_label};
 /// All TUI state lives here.
 ///
 /// The contract that keeps a TUI codebase sane as it grows:
@@ -20,6 +22,12 @@ pub struct App {
     /// The backend producing assistant turns. A trait object (`dyn`),
     /// so swapping mock → real LLM later is a one-line change here.
     pub provider: Arc<dyn Provider>,
+    /// Status-bar facts: which provider and model this session uses.
+    /// Passed in from the CLI — the trait object can't name itself.
+    pub status: Status,
+    /// Left side of the status bar, computed once at startup:
+    /// `~/Projects/hi (main)`.
+    pub location: String,
     /// The turn in flight, if any. `Some` from Enter until TurnEnd.
     pub turn: Option<Turn>,
 }
@@ -38,12 +46,14 @@ pub struct Turn {
 }
 
 impl App {
-    pub fn new(provider: Arc<dyn Provider>) -> Self {
+    pub fn new(provider: Arc<dyn Provider>, status: Status) -> Self {
         Self {
             quit: false,
             input: String::new(),
             messages: Vec::new(),
             provider,
+            status,
+            location: location_label(),
             turn: None,
         }
     }

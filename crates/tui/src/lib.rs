@@ -7,6 +7,10 @@
 mod app;
 mod ui;
 
+pub mod status;
+
+pub use status::Status;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,22 +21,23 @@ use crate::app::App;
 use hi_core::Provider;
 
 /// Run the interactive interface until the user quits.
-pub fn run(provider: Arc<dyn Provider>) -> std::io::Result<()> {
+pub fn run(provider: Arc<dyn Provider>, status: Status) -> std::io::Result<()> {
     // Inline mode: NO alternate screen. The terminal keeps its normal
-    // buffer and scrollback — we manage only the bottom 5 rows (a
-    // two-row live streaming area above the 3-row input), and
+    // buffer and scrollback — we manage only the bottom 6 rows (a
+    // two-row live streaming area above the 3-row input and the
+    // status row), and
     // transcript lines are printed *above* the viewport, owned by the
     // terminal from then on. Native scrolling, search, and copy come
     // for free; pi's "regular mode" works the same way.
     let options = TerminalOptions {
-        viewport: Viewport::Inline(5),
+        viewport: Viewport::Inline(6),
     };
     // try_init_with_options: enables raw mode, skips the alternate
     // screen, and installs a panic hook that restores the terminal.
     let mut terminal = ratatui::try_init_with_options(options)?;
     terminal.insert_before(1, |buf| ui::welcome_into(buf))?;
 
-    let mut app = App::new(provider);
+    let mut app = App::new(provider, status);
     let result = event_loop(&mut terminal, &mut app);
 
     // Teardown, in order:

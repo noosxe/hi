@@ -11,7 +11,7 @@ use std::sync::Arc;
 use clap::Parser;
 
 use hi_core::{MockProvider, ModelsConfig, OpenAiCompatProvider, Provider};
-use hi_tui::run;
+use hi_tui::{Status, run};
 
 #[derive(Parser)]
 #[command(
@@ -42,7 +42,13 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     if cli.mock {
-        return launch(Arc::new(MockProvider::default()));
+        return launch(
+            Arc::new(MockProvider::default()),
+            Status {
+                provider: "mock".into(),
+                model: "mock".into(),
+            },
+        );
     }
 
     let config = match ModelsConfig::load() {
@@ -74,13 +80,17 @@ fn main() -> ExitCode {
         Err(err) => return fail(&err),
     };
     let entry = &config.providers[&selected.provider];
-    let provider = OpenAiCompatProvider::from_config(entry, selected.model);
-    launch(Arc::new(provider))
+    let provider = Arc::new(OpenAiCompatProvider::from_config(entry, selected.model.clone()));
+    let status = Status {
+        provider: selected.provider,
+        model: selected.model,
+    };
+    launch(provider, status)
 }
 
 /// Hand the session to the interactive interface.
-fn launch(provider: Arc<dyn Provider>) -> ExitCode {
-    match run(provider) {
+fn launch(provider: Arc<dyn Provider>, status: Status) -> ExitCode {
+    match run(provider, status) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => fail(&err.to_string()),
     }

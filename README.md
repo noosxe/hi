@@ -55,7 +55,10 @@ How hi picks a provider and model when you don't name both:
 4. nothing — the first provider (alphabetically) that offers any model
 
 In the TUI: **Enter** sends, **Esc** cancels the running turn (partial
-output stays in the transcript), **Ctrl-C** quits.
+output stays in the transcript), **Ctrl-C** quits. A dim status row
+under the input shows `cwd (branch)` on the left — the branch only
+when you're inside a git repository — and `(provider) model` on the
+right.
 
 A saved default (`defaultModel`) will slot in between flags and the
 autopick later; headless one-shot mode is planned as a second branch
