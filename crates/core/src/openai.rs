@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::{ModelConfig, ProviderConfig};
 use crate::event::Event;
 use crate::message::Message;
+use crate::thinking::ThinkingLevel;
 use crate::provider::Provider;
 
 /// A provider backed by any OpenAI-compatible HTTP endpoint.
@@ -41,6 +42,9 @@ pub struct OpenAiCompatProvider {
     /// The resolved system prompt, sent as the leading system
     /// message. `None` sends none and the model's defaults rule.
     system_prompt: Option<String>,
+    /// The session's thinking level; kwargs merge only when the
+    /// current model's `thinkingLevelMap` has an entry for it.
+    thinking_level: Option<ThinkingLevel>,
 }
 
 impl std::fmt::Debug for OpenAiCompatProvider {
@@ -53,6 +57,7 @@ impl std::fmt::Debug for OpenAiCompatProvider {
             .field("model", &self.model)
             .field("configured_models", &self.configured_models.len())
             .field("system_prompt", &self.system_prompt.as_ref().map(|_| "[set]"))
+            .field("thinking_level", &self.thinking_level.map(|l| l.name()))
             .finish()
     }
 }
@@ -72,6 +77,7 @@ impl OpenAiCompatProvider {
             configured_models: Vec::new(),
             agent: bounded_agent(),
             system_prompt: None,
+            thinking_level: None,
         }
     }
 
@@ -89,6 +95,7 @@ impl OpenAiCompatProvider {
             configured_models: cfg.models.clone(),
             agent: bounded_agent(),
             system_prompt: None,
+            thinking_level: None,
         }
     }
 
@@ -97,6 +104,22 @@ impl OpenAiCompatProvider {
     pub fn with_system_prompt(mut self, system_prompt: Option<String>) -> Self {
         self.system_prompt = system_prompt;
         self
+    }
+
+    /// Attach the session's thinking level.
+    pub fn with_thinking_level(mut self, thinking_level: Option<ThinkingLevel>) -> Self {
+        self.thinking_level = thinking_level;
+        self
+    }
+
+    /// The current model's `thinkingLevelMap`, if it has one.
+    fn thinking_level_map(
+        &self,
+    ) -> Option<&std::collections::BTreeMap<String, serde_json::Value>> {
+        self.configured_models
+            .iter()
+            .find(|model| model.id == self.model)
+            .and_then(|model| model.thinking_level_map.as_ref())
     }
 
     /// Model ids this provider offers — the hybrid policy:
@@ -143,11 +166,30 @@ impl OpenAiCompatProvider {
             });
         }
         messages.extend(wire_messages(history));
-        let payload = ChatRequest {
+        let chat_request = ChatRequest {
             model: &self.model,
             messages,
             stream: true,
         };
+        let mut payload = serde_json::to_value(&chat_request)
+            .map_err(|err| format!("cannot serialize request: {err}"))?;
+        // Merge the active thinking level's kwargs (from the model's
+        // `thinkingLevelMap`) into the top-level body. Models without
+        // a map, or levels without an entry, send nothing.
+        if let Some(level) = &self.thinking_level {
+            if let Some(kwargs) = self
+                .thinking_level_map()
+                .and_then(|map| map.get(level.name()))
+            {
+                if let (Some(body), Some(kwargs)) =
+                    (payload.as_object_mut(), kwargs.as_object())
+                {
+                    for (key, value) in kwargs {
+                        body.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
         let url = self.endpoint("chat/completions");
         let response = self
             .authorized(self.agent.post(&url))
@@ -456,12 +498,25 @@ mod tests {
             "{\"choices\":[{\"delta\":{\"content\":\"lo!\"}}]}",
             "[DONE]",
         ]));
-        let provider = OpenAiCompatProvider::new(
-            api.base_url.clone(),
-            Some("sekrit".into()),
-            "test-model",
-        )
-        .with_system_prompt(Some("You are terse.".into()));
+        let cfg = ProviderConfig {
+            base_url: api.base_url.clone(),
+            api_key: Some("sekrit".into()),
+            models: vec![ModelConfig {
+                id: "test-model".into(),
+                thinking_level_map: Some(
+                    [(
+                        "high".to_string(),
+                        serde_json::json!({"thinking": {"type": "enabled"}}),
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+                ..Default::default()
+            }],
+        };
+        let provider = OpenAiCompatProvider::from_config(&cfg, "test-model")
+            .with_system_prompt(Some("You are terse.".into()))
+            .with_thinking_level(Some(ThinkingLevel::High));
         let rx = spawn_turn(
             Arc::new(provider),
             &[Message::User("hi there".into())],
@@ -494,6 +549,23 @@ mod tests {
         assert!(compact.contains("\"role\":\"system\""));
         assert!(compact.contains("Youareterse."));
         assert!(compact.find("\"role\":\"system\"").unwrap() < compact.find("\"role\":\"user\"").unwrap());
+        // The thinking level's kwargs merged into the request body.
+        assert!(compact.contains("\"thinking\":{\"type\":\"enabled\"}"));
+    }
+
+    #[test]
+    fn no_thinking_level_sends_no_kwargs() {
+        let api = FakeApi::start(sse_response(&[
+            "{\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}",
+            "[DONE]",
+        ]));
+        let provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "test-model");
+        let rx = spawn_turn(Arc::new(provider), &[Message::User("hi".into())]);
+        let events: Vec<Event> = rx.iter().collect();
+        assert!(!events.iter().any(|event| matches!(event, Event::Error(_))));
+        let request = api.first_request();
+        let compact: String = request.split_whitespace().collect();
+        assert!(!compact.contains("\"thinking\""));
     }
 
     #[test]

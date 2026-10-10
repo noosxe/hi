@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use clap::Parser;
 
-use hi_core::{MockProvider, ModelsConfig, OpenAiCompatProvider, Provider, Settings};
+use hi_core::{
+    MockProvider, ModelsConfig, OpenAiCompatProvider, Provider, Settings, ThinkingLevel,
+};
 use hi_tui::{Catalog, Status, run};
 
 #[derive(Parser)]
@@ -51,6 +53,7 @@ fn main() -> ExitCode {
             Catalog::default(),
             ModelsConfig::default(),
             // The mock ignores system prompts — nothing to resolve.
+            None,
             None,
         );
     }
@@ -101,6 +104,7 @@ fn main() -> ExitCode {
     // The system prompt: built-in default, replaced/appended by
     // SYSTEM.md / APPEND_SYSTEM.md at the user and project levels.
     let system_prompt = Some(hi_core::system_prompt::resolve());
+    let thinking = settings.thinking;
     let selected = match hi_core::selection::resolve(
         &config,
         cli.provider.as_deref(),
@@ -116,7 +120,7 @@ fn main() -> ExitCode {
         provider: selected.provider,
         model: selected.model,
     };
-    launch(provider, status, catalog, config, system_prompt)
+    launch(provider, status, catalog, config, system_prompt, thinking)
 }
 
 /// Hand the session to the interactive interface.
@@ -126,8 +130,9 @@ fn launch(
     catalog: Catalog,
     config: ModelsConfig,
     system_prompt: Option<String>,
+    thinking: Option<ThinkingLevel>,
 ) -> ExitCode {
-    match run(provider, status, catalog, config, system_prompt) {
+    match run(provider, status, catalog, config, system_prompt, thinking) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => fail(&err.to_string()),
     }

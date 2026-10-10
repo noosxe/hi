@@ -12,6 +12,7 @@ pub mod provider;
 pub mod selection;
 pub mod settings;
 pub mod system_prompt;
+pub mod thinking;
 
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -23,6 +24,7 @@ pub use mock::MockProvider;
 pub use openai::OpenAiCompatProvider;
 pub use provider::{Provider, spawn_turn};
 pub use settings::Settings;
+pub use thinking::ThinkingLevel;
 
 /// The program's name, shared by every crate in the workspace.
 pub const NAME: &str = "hi";

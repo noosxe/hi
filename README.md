@@ -195,6 +195,24 @@ Precedence: project replaces user replaces default; appends join in
 user-then-project order, blank-line separated. Whitespace-only files
 count as absent.
 
+### Thinking level
+
+`settings.json` accepts `"thinking": "off" | "minimal" | "low" | "medium" |
+"high"` (default: unset — the provider's own default applies). The level
+reaches the wire only when the model's `thinkingLevelMap` defines it; the
+map's JSON object for that level merges into the chat request body. The
+status row shows the active level.
+
+```jsonc
+// models.json, per model:
+{ "id": "glm-4.6", "thinkingLevelMap": {
+    "off":  { "thinking": { "type": "disabled" } },
+    "high": { "thinking": { "type": "enabled" } }
+} }
+// settings.json:
+{ "defaultModel": "zai/glm-4.6", "thinking": "high" }
+```
+
 ### Wire protocol
 
 The only protocol hi speaks (v0): OpenAI-compatible chat completions.

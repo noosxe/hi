@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::thinking::ThinkingLevel;
 use serde::{Deserialize, Serialize};
 
 /// The parsed contents of `settings.json`.
@@ -18,6 +19,11 @@ pub struct Settings {
     /// will join it here later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    /// Reasoning effort level: `off` | `minimal` | `low` | `medium` |
+    /// `high`. Reaches the wire only when the model's
+    /// `thinkingLevelMap` has an entry for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingLevel>,
 }
 
 /// The expected path of `settings.json` next to `models.json`.
@@ -95,6 +101,7 @@ mod tests {
         let path = dir.join("nested/settings.json");
         let original = Settings {
             default_model: Some("local/llama".into()),
+            thinking: None,
         };
         original.save_to(&path).unwrap();
         let loaded = Settings::load_from(&path).unwrap();

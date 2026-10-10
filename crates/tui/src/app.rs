@@ -4,7 +4,10 @@ use std::time::Instant;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use hi_core::{Event, Message, ModelsConfig, OpenAiCompatProvider, Provider, Settings, spawn_turn};
+use hi_core::{
+    Event, Message, ModelsConfig, OpenAiCompatProvider, Provider, Settings, ThinkingLevel,
+    spawn_turn,
+};
 
 use crate::catalog::Catalog;
 use crate::status::{Status, location_label};
@@ -50,6 +53,9 @@ pub struct App {
     /// The resolved system prompt, re-attached whenever the model
     /// picker rebuilds the provider.
     pub system_prompt: Option<String>,
+    /// The session's thinking level, re-attached whenever the model
+    /// picker rebuilds the provider.
+    pub thinking: Option<ThinkingLevel>,
     /// The turn in flight, if any. `Some` from Enter until TurnEnd.
     pub turn: Option<Turn>,
 }
@@ -95,6 +101,7 @@ impl App {
         catalog: Catalog,
         config: ModelsConfig,
         system_prompt: Option<String>,
+        thinking: Option<ThinkingLevel>,
     ) -> Self {
         Self {
             quit: false,
@@ -106,6 +113,7 @@ impl App {
             catalog,
             config,
             system_prompt,
+        thinking,
             picker: None,
             completion: None,
             tick: 0,
@@ -257,6 +265,7 @@ impl App {
                 if let Some(item) = picker.items.get(picker.selected) {
                     let settings = Settings {
                         default_model: Some(item.clone()),
+                        thinking: None,
                     };
                     match settings.save() {
                         Ok(()) => self
@@ -290,10 +299,11 @@ impl App {
         let Some(entry) = self.config.providers.get(provider) else {
             return;
         };
-        self.provider =
-            Arc::new(OpenAiCompatProvider::from_config(entry, model).with_system_prompt(
-                self.system_prompt.clone(),
-            ));
+        self.provider = Arc::new(
+            OpenAiCompatProvider::from_config(entry, model)
+                .with_system_prompt(self.system_prompt.clone())
+                .with_thinking_level(self.thinking),
+        );
         self.status = Status {
             provider: provider.to_string(),
             model: model.to_string(),
@@ -479,6 +489,7 @@ mod tests {
             },
             Catalog::default(),
             ModelsConfig::default(),
+            None,
             None,
         )
     }

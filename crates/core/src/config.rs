@@ -56,6 +56,13 @@ pub struct ModelConfig {
     /// Maximum completion tokens the model accepts.
     #[serde(rename = "maxTokens", default)]
     pub max_tokens: Option<u32>,
+    /// Per-level request kwargs (pi-compatible key): when the
+    /// session's thinking level is `"high"` and this map has a
+    /// `"high"` entry, that JSON object merges into the chat request
+    /// body. Values are arbitrary JSON, e.g.
+    /// `{"thinking": {"type": "enabled"}}` for GLM.
+    #[serde(rename = "thinkingLevelMap", default)]
+    pub thinking_level_map: Option<BTreeMap<String, serde_json::Value>>,
 }
 
 impl ProviderConfig {

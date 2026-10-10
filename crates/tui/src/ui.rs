@@ -99,7 +99,12 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
 /// The status row: cwd (branch) on the left, (provider) model on the
 /// right. All dim — decoration is never the star of the frame.
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
-    let text = crate::status::compose_status(&app.location, &app.status.label(), area.width);
+    // The thinking level rides on the right label when set.
+    let right = match app.thinking {
+        Some(level) => format!("{} · thinking:{}", app.status.label(), level.name()),
+        None => app.status.label(),
+    };
+    let text = crate::status::compose_status(&app.location, &right, area.width);
     frame.render_widget(Paragraph::new(text).style(Style::new().dim()), area);
 }
 
