@@ -178,6 +178,23 @@ listing failures always name the provider and the cause.
 }
 ```
 
+### System prompt
+
+hi sends a short built-in default (`"You are hi, a concise terminal
+assistant."`) as the leading system message. Two markdown files
+override or extend it, at the user level and the project level:
+
+| File | Scope | Effect |
+|---|---|---|
+| `~/.config/hi/SYSTEM.md` | user | replaces the default |
+| `~/.config/hi/APPEND_SYSTEM.md` | user | appends |
+| `.hi/SYSTEM.md` (in the project) | project | replaces everything above |
+| `.hi/APPEND_SYSTEM.md` (in the project) | project | appends |
+
+Precedence: project replaces user replaces default; appends join in
+user-then-project order, blank-line separated. Whitespace-only files
+count as absent.
+
 ### Wire protocol
 
 The only protocol hi speaks (v0): OpenAI-compatible chat completions.
