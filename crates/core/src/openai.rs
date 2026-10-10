@@ -160,16 +160,22 @@ pub(crate) fn discover_model_ids(
         None => request,
     };
     let response = request.call().map_err(|err| describe("model discovery", err))?;
-    let parsed: ModelsResponse = response
+    let value: serde_json::Value = response
         .into_body()
         .read_json()
         .map_err(|err| format!("model discovery: bad response body: {err}"))?;
-    let mut ids: Vec<String> = parsed
-        .data
-        .into_iter()
-        .map(|entry| entry.id)
-        .filter(|id| !id.is_empty())
-        .collect();
+    let mut ids = extract_model_ids(&value);
+    if ids.is_empty() {
+        // A 200 with no recognizable list is how a half-compatible
+        // server says hello. Never pretend that means "no models" —
+        // send the user to the escape hatch instead.
+        return Err(
+            "model discovery: the server responded, but with no recognizable \
+             model list (looked for data[].id and models[].slug). List the \
+             models explicitly in models.json instead."
+                .to_string(),
+        );
+    }
     ids.sort();
     ids.dedup();
     Ok(ids)
@@ -290,17 +296,31 @@ struct Delta {
     content: Option<String>,
 }
 
-/// The `GET {baseUrl}/models` response shape: `{"data":[{"id":…}]}`.
-#[derive(Deserialize)]
-struct ModelsResponse {
-    #[serde(default)]
-    data: Vec<ModelEntry>,
-}
-
-#[derive(Deserialize)]
-struct ModelEntry {
-    #[serde(default)]
-    id: String,
+/// Pull model ids out of a `/models` response. The OpenAI shape is
+/// `{"data":[{"id":…}]}`; some providers (z.ai's `/api/v1` catalog,
+/// for one) instead serve `{"models":[{"slug":…}]}` — accepted too,
+/// because discovery answers "what does this server serve", not
+/// "whose protocol doc is canonical".
+fn extract_model_ids(value: &serde_json::Value) -> Vec<String> {
+    let Some(map) = value.as_object() else {
+        return Vec::new();
+    };
+    let items = map
+        .get("data")
+        .or_else(|| map.get("models"))
+        .and_then(|items| items.as_array());
+    let Some(items) = items else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let entry = item.as_object()?;
+            let id = entry.get("id").or_else(|| entry.get("slug"))?;
+            id.as_str().map(str::to_string)
+        })
+        .filter(|id| !id.is_empty())
+        .collect()
 }
 
 #[cfg(test)]
@@ -430,6 +450,45 @@ mod tests {
         });
         assert!(error.unwrap().contains("401"));
         assert_eq!(events.last(), Some(&Event::TurnEnd));
+    }
+
+    #[test]
+    fn extracts_ids_from_both_response_shapes() {
+        let openai: serde_json::Value =
+            serde_json::from_str(r#"{"data":[{"id":"b"},{"id":"a"}]}"#).unwrap();
+        assert_eq!(extract_model_ids(&openai), vec!["b".to_string(), "a".to_string()]);
+
+        let catalog: serde_json::Value =
+            serde_json::from_str(r#"{"models":[{"slug":"glm-5.3"},{"id":"glm-4.6"}]}"#).unwrap();
+        assert_eq!(
+            extract_model_ids(&catalog),
+            vec!["glm-5.3".to_string(), "glm-4.6".to_string()]
+        );
+
+        // Recognized envelope, unrecognized entries: empty, not error.
+        let junk: serde_json::Value = serde_json::from_str(r#"{"data":[{}]}"#).unwrap();
+        assert!(extract_model_ids(&junk).is_empty());
+    }
+
+    #[test]
+    fn discovery_with_no_recognizable_shape_is_a_loud_error() {
+        let api = FakeApi::start(json_response("{\"surprise\":true}"));
+        let provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "m");
+        let err = provider.list_models().unwrap_err();
+        assert!(err.contains("no recognizable"), "{err}");
+        assert!(err.contains("models.json"), "{err}");
+    }
+
+    #[test]
+    fn catalog_shaped_discovery_works_end_to_end() {
+        let api = FakeApi::start(json_response(
+            "{\"models\":[{\"slug\":\"glm-5.3\"},{\"slug\":\"glm-4.6\"}]}",
+        ));
+        let provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "m");
+        assert_eq!(
+            provider.list_models().unwrap(),
+            vec!["glm-4.6".to_string(), "glm-5.3".to_string()]
+        );
     }
 
 }

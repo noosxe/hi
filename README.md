@@ -130,9 +130,10 @@ mid-session does nothing. That is deliberate: predictable and testable.
   deduplicated. Point hi at a third-party provider with just a URL and a
   key and it finds everything that server serves.
 
-Discovery failures say so explicitly and hint at the escape hatch
-(*list models explicitly in models.json*) — e.g. when a server has no
-`/models` endpoint.
+Discovery accepts the OpenAI shape (`data[].id`) and catalog-style
+`models[].slug` responses. A 200 reply with *neither* is a loud error
+suggesting explicit `models` entries — never a silent empty list — and
+listing failures always name the provider and the cause.
 
 ### Example
 
