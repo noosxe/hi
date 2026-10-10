@@ -184,5 +184,10 @@ Design notes worth keeping in mind:
   with successful turns; partial output always survives.
 - **Blocking I/O on a thread, not async.** The turn thread blocks;
   the UI thread never does.
+- **Nothing outlives its session.** Every thread or child process hi
+  spawns is born with a deadline — bounded DNS/connect on network
+  attempts, hard timeouts for any future child processes — and dies
+  with the session: teardown sweeps children, so nothing orphans
+  itself to the OS and burns a core for hours.
 - Errors are plain `String`s for now — descriptive and user-facing;
   a dedicated error type arrives when it earns its keep.

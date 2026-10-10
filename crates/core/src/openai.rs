@@ -23,7 +23,7 @@ use crate::message::Message;
 use crate::provider::Provider;
 
 /// A provider backed by any OpenAI-compatible HTTP endpoint.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenAiCompatProvider {
     /// Root of the API *including* the version path, e.g.
     /// `http://localhost:8080/v1`.
@@ -35,6 +35,22 @@ pub struct OpenAiCompatProvider {
     /// Explicit `models` entries; non-empty means config wins over
     /// discovery (see `list_models`).
     configured_models: Vec<ModelConfig>,
+    /// Shared HTTP agent: connection pooling plus the timeout policy,
+    /// defined once in `bounded_agent`.
+    agent: ureq::Agent,
+}
+
+impl std::fmt::Debug for OpenAiCompatProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Hand-written so the dump can summarize the agent and, more
+        // importantly, never print the credential's value.
+        f.debug_struct("OpenAiCompatProvider")
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[set]"))
+            .field("model", &self.model)
+            .field("configured_models", &self.configured_models.len())
+            .finish()
+    }
 }
 
 impl OpenAiCompatProvider {
@@ -50,6 +66,7 @@ impl OpenAiCompatProvider {
             api_key,
             model: model.into(),
             configured_models: Vec::new(),
+            agent: bounded_agent(),
         }
     }
 
@@ -65,6 +82,7 @@ impl OpenAiCompatProvider {
             api_key: cfg.resolved_api_key().filter(|key| !key.is_empty()),
             model: model.into(),
             configured_models: cfg.models.clone(),
+            agent: bounded_agent(),
         }
     }
 
@@ -82,7 +100,6 @@ impl OpenAiCompatProvider {
         }
         discover_model_ids(&self.base_url, self.api_key.as_deref())
     }
-
 
     fn endpoint(&self, path: &str) -> String {
         format!("{}/{}", self.base_url.trim_end_matches('/'), path)
@@ -112,7 +129,7 @@ impl OpenAiCompatProvider {
         };
         let url = self.endpoint("chat/completions");
         let response = self
-            .authorized(ureq::post(&url))
+            .authorized(self.agent.post(&url))
             .send_json(&payload)
             .map_err(|err| describe("chat request", err))?;
 
@@ -141,6 +158,21 @@ impl OpenAiCompatProvider {
     }
 }
 
+/// One agent per provider: connection pooling, plus the timeout
+/// policy in exactly one place. Connect and DNS are *bounded* — an
+/// unreachable server must not wedge a turn thread for minutes (Esc
+/// frees the UI, not a blocked `connect()`; cooperative cancellation
+/// only works if the worker reaches a checkpoint). The stream itself
+/// stays unbounded on purpose — turns think for minutes — and rides
+/// the dropped receiver for cancellation.
+fn bounded_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_resolve(Some(Duration::from_secs(10)))
+        .build()
+        .new_agent()
+}
+
 /// `GET {baseUrl}/models` — the discovery half of the hybrid policy.
 /// A free function because selection resolves providers *before* any
 /// `OpenAiCompatProvider` exists. Overall 10s timeout: discovery runs
@@ -151,7 +183,7 @@ pub(crate) fn discover_model_ids(
     api_key: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let request = ureq::get(&url)
+    let request = bounded_agent().get(&url)
         .config()
         .timeout_global(Some(Duration::from_secs(10)))
         .build();
