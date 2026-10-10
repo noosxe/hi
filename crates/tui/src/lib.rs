@@ -1,14 +1,23 @@
+//! The terminal front end: an inline-viewport ratatui interface.
+//!
+//! A *library*, not a binary: the `hi` binary lives in `crates/cli`
+//! and hands a chosen provider to [`run`]. A future headless mode
+//! simply never links any of this.
+
 mod app;
 mod ui;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use ratatui::crossterm::event::{self, Event};
 use ratatui::{TerminalOptions, Viewport};
 
 use crate::app::App;
+use hi_core::Provider;
 
-fn main() -> std::io::Result<()> {
+/// Run the interactive interface until the user quits.
+pub fn run(provider: Arc<dyn Provider>) -> std::io::Result<()> {
     // Inline mode: NO alternate screen. The terminal keeps its normal
     // buffer and scrollback — we manage only the bottom 5 rows (a
     // two-row live streaming area above the 3-row input), and
@@ -23,8 +32,8 @@ fn main() -> std::io::Result<()> {
     let mut terminal = ratatui::try_init_with_options(options)?;
     terminal.insert_before(1, |buf| ui::welcome_into(buf))?;
 
-    let mut app = App::new();
-    let result = run(&mut terminal, &mut app);
+    let mut app = App::new(provider);
+    let result = event_loop(&mut terminal, &mut app);
 
     // Teardown, in order:
     // 1. wipe the managed region — clear() erases from the viewport
@@ -47,7 +56,7 @@ fn main() -> std::io::Result<()> {
     result
 }
 
-fn run(
+fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
 ) -> std::io::Result<()> {

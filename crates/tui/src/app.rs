@@ -3,8 +3,7 @@ use std::sync::mpsc::Receiver;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use hi_core::{Event, Message, MockProvider, Provider, spawn_turn};
-
+use hi_core::{Event, Message, Provider, spawn_turn};
 /// All TUI state lives here.
 ///
 /// The contract that keeps a TUI codebase sane as it grows:
@@ -39,12 +38,12 @@ pub struct Turn {
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(provider: Arc<dyn Provider>) -> Self {
         Self {
             quit: false,
             input: String::new(),
             messages: Vec::new(),
-            provider: Arc::new(MockProvider::default()),
+            provider,
             turn: None,
         }
     }
