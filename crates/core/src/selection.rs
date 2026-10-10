@@ -123,14 +123,25 @@ pub fn list_for(
             Ok((name.into(), models))
         }
         None => {
+            // Same contract as `resolve`'s autopick: failures are
+            // collected and reported, never silently skipped — a
+            // broken discovery must not masquerade as "no config".
+            let mut failures: Vec<String> = Vec::new();
             for (name, entry) in &config.providers {
-                if let Ok(models) = entry.list_model_ids() {
-                    if !models.is_empty() {
+                match entry.list_model_ids() {
+                    Ok(models) if !models.is_empty() => {
                         return Ok((name.clone(), models));
                     }
+                    Ok(_) => failures.push(format!("{name}: no models")),
+                    Err(err) => failures.push(format!("{name}: {err}")),
                 }
             }
-            Err("no provider offers models; add entries to models.json".into())
+            let detail = if failures.is_empty() {
+                "the config has no providers".to_string()
+            } else {
+                failures.join("; ")
+            };
+            Err(format!("no provider offers models ({detail})"))
         }
     }
 }
@@ -298,5 +309,24 @@ mod tests {
         let (name, models) = list_for(&cfg, None).unwrap();
         assert_eq!(name, "local");
         assert_eq!(models, vec!["served".to_string()]);
+    }
+
+    #[test]
+    fn listing_error_names_the_causes() {
+        let api = FakeApi::start(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let cfg = config_with(&[("alpha", &api.base_url, &[])]);
+        let err = list_for(&cfg, None).unwrap_err();
+        assert!(err.contains("alpha"), "{err}");
+        assert!(err.contains("500"), "{err}");
+    }
+
+    #[test]
+    fn listing_surfaces_unrecognized_shapes() {
+        let api = FakeApi::start(json_response("{\"surprise\":true}"));
+        let cfg = config_with(&[("alpha", &api.base_url, &[])]);
+        let err = list_for(&cfg, None).unwrap_err();
+        assert!(err.contains("no recognizable"), "{err}");
     }
 }
