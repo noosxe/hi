@@ -16,31 +16,31 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // areas need no layout solver — plain struct arithmetic. The
     // functional update syntax `..frame.area()` copies every field
     // not named.
-    let stream_area = Rect { height: 2, ..frame.area() };
+    let area = frame.area();
+    // The frame is the inline viewport: 6 resting rows (2 stream + 3
+    // input + 1 status) plus, while a menu is open, the menu rows
+    // grown in beneath the input. Fixed heights need no layout
+    // solver — plain struct arithmetic; `..area` copies the rest.
+    let stream_area = Rect { height: 2, ..area };
     let input_area = Rect {
-        y: frame.area().y + 2,
+        y: area.y + 2,
         height: 3,
-        ..frame.area()
+        ..area
     };
     let status_area = Rect {
-        y: frame.area().y + 5,
+        y: area.y + area.height - 1,
         height: 1,
-        ..frame.area()
+        ..area
     };
-    if app.picker.is_some() {
-        let picker_area = Rect { height: 5, ..frame.area() };
-        draw_picker(frame, picker_area, app);
-    } else {
-        draw_stream(frame, stream_area, app);
-        draw_input(frame, input_area, app);
-    }
+    // Menus hug the input box: bottom-anchored to the input's top
+    // border, growing upward. (ratatui's inline viewport has no
+    // public way to grow downward — the dynamic-height experiment
+    // lives in git history.)
+    draw_stream(frame, stream_area, app);
+    draw_input(frame, input_area, app);
+    draw_completion(frame, area, app);
+    draw_picker(frame, area, app);
     draw_status(frame, status_area, app);
-
-    // The `/` completion menu overlays the upper rows — never while
-    // the model picker owns the screen.
-    if app.picker.is_none() {
-        draw_completion(frame, frame.area(), app);
-    }
 }
 
 /// The input area: top/bottom rules only, no side walls — pi-style.
@@ -80,6 +80,11 @@ fn draw_picker(frame: &mut Frame, area: Rect, app: &App) {
     let Some(picker) = app.picker.as_ref() else {
         return;
     };
+    let height = (picker.items.len() as u16 + 2)
+        .clamp(5, 12)
+        .min(area.y + 2);
+    let y = (area.y + 2).saturating_sub(height);
+    let popup = Rect { x: area.x, y, width: area.width, height };
     let items: Vec<ListItem> = picker
         .items
         .iter()
@@ -95,7 +100,7 @@ fn draw_picker(frame: &mut Frame, area: Rect, app: &App) {
         )
         .highlight_symbol("› ")
         .highlight_style(Style::new().bold());
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_stateful_widget(list, popup, &mut state);
 }
 
 /// The `/` completion menu: anchored to the top of the viewport,
@@ -105,12 +110,12 @@ fn draw_completion(frame: &mut Frame, area: Rect, app: &App) {
     let Some(completion) = app.completion.as_ref() else {
         return;
     };
-    let height = (completion.items.len() as u16 + 2).clamp(3, area.height);
-    let popup = Rect {
-        height,
-        width: area.width.min(64),
-        ..area
-    };
+    let height = (completion.items.len() as u16 + 2).clamp(3, 8);
+    let width = area.width.min(64);
+    // Bottom-anchored: the menu's last row sits directly on the
+    // input's top border, growing upward.
+    let y = (area.y + 2).saturating_sub(height);
+    let popup = Rect { x: area.x, y, width, height };
     let items: Vec<ListItem> = completion
         .items
         .iter()

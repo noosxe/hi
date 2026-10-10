@@ -256,6 +256,7 @@ impl App {
         };
     }
 
+
     /// Rebuild the `/` completion menu from the current input: open
     /// while the text is a bare `/prefix` (no spaces yet — argument
     /// parsing is a future problem), closed otherwise.
@@ -480,3 +481,4 @@ mod tests {
         assert!(!app.messages.iter().any(|m| matches!(m, Message::User(_))));
     }
 }
+
