@@ -11,6 +11,7 @@ pub mod openai;
 pub mod provider;
 pub mod selection;
 pub mod settings;
+pub mod system_prompt;
 
 #[cfg(test)]
 pub(crate) mod test_support;

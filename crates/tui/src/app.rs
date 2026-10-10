@@ -47,6 +47,9 @@ pub struct App {
     /// Messages typed mid-turn, merged into one user message that
     /// fires the moment the current reply finishes.
     pub queued: Option<String>,
+    /// The resolved system prompt, re-attached whenever the model
+    /// picker rebuilds the provider.
+    pub system_prompt: Option<String>,
     /// The turn in flight, if any. `Some` from Enter until TurnEnd.
     pub turn: Option<Turn>,
 }
@@ -91,6 +94,7 @@ impl App {
         status: Status,
         catalog: Catalog,
         config: ModelsConfig,
+        system_prompt: Option<String>,
     ) -> Self {
         Self {
             quit: false,
@@ -101,6 +105,7 @@ impl App {
             location: location_label(),
             catalog,
             config,
+            system_prompt,
             picker: None,
             completion: None,
             tick: 0,
@@ -285,7 +290,10 @@ impl App {
         let Some(entry) = self.config.providers.get(provider) else {
             return;
         };
-        self.provider = Arc::new(OpenAiCompatProvider::from_config(entry, model));
+        self.provider =
+            Arc::new(OpenAiCompatProvider::from_config(entry, model).with_system_prompt(
+                self.system_prompt.clone(),
+            ));
         self.status = Status {
             provider: provider.to_string(),
             model: model.to_string(),
@@ -471,6 +479,7 @@ mod tests {
             },
             Catalog::default(),
             ModelsConfig::default(),
+            None,
         )
     }
 

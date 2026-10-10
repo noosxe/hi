@@ -38,6 +38,9 @@ pub struct OpenAiCompatProvider {
     /// Shared HTTP agent: connection pooling plus the timeout policy,
     /// defined once in `bounded_agent`.
     agent: ureq::Agent,
+    /// The resolved system prompt, sent as the leading system
+    /// message. `None` sends none and the model's defaults rule.
+    system_prompt: Option<String>,
 }
 
 impl std::fmt::Debug for OpenAiCompatProvider {
@@ -49,6 +52,7 @@ impl std::fmt::Debug for OpenAiCompatProvider {
             .field("api_key", &self.api_key.as_ref().map(|_| "[set]"))
             .field("model", &self.model)
             .field("configured_models", &self.configured_models.len())
+            .field("system_prompt", &self.system_prompt.as_ref().map(|_| "[set]"))
             .finish()
     }
 }
@@ -67,6 +71,7 @@ impl OpenAiCompatProvider {
             model: model.into(),
             configured_models: Vec::new(),
             agent: bounded_agent(),
+            system_prompt: None,
         }
     }
 
@@ -83,7 +88,15 @@ impl OpenAiCompatProvider {
             model: model.into(),
             configured_models: cfg.models.clone(),
             agent: bounded_agent(),
+            system_prompt: None,
         }
+    }
+
+    /// Attach the resolved system prompt. `None` sends no system
+    /// message and the model's own defaults rule.
+    pub fn with_system_prompt(mut self, system_prompt: Option<String>) -> Self {
+        self.system_prompt = system_prompt;
+        self
     }
 
     /// Model ids this provider offers — the hybrid policy:
@@ -122,9 +135,17 @@ impl OpenAiCompatProvider {
     /// Stream one turn: the blocking HTTP conversation behind
     /// `Provider::respond`.
     fn stream(&self, history: &[Message], tx: &Sender<Event>) -> Result<(), String> {
+        let mut messages = Vec::new();
+        if let Some(system) = &self.system_prompt {
+            messages.push(WireMessage {
+                role: "system",
+                content: system,
+            });
+        }
+        messages.extend(wire_messages(history));
         let payload = ChatRequest {
             model: &self.model,
-            messages: wire_messages(history),
+            messages,
             stream: true,
         };
         let url = self.endpoint("chat/completions");
@@ -435,8 +456,12 @@ mod tests {
             "{\"choices\":[{\"delta\":{\"content\":\"lo!\"}}]}",
             "[DONE]",
         ]));
-        let provider =
-            OpenAiCompatProvider::new(api.base_url.clone(), Some("sekrit".into()), "test-model");
+        let provider = OpenAiCompatProvider::new(
+            api.base_url.clone(),
+            Some("sekrit".into()),
+            "test-model",
+        )
+        .with_system_prompt(Some("You are terse.".into()));
         let rx = spawn_turn(
             Arc::new(provider),
             &[Message::User("hi there".into())],
@@ -464,6 +489,11 @@ mod tests {
         assert!(compact.contains("\"model\":\"test-model\""));
         assert!(compact.contains("\"stream\":true"));
         assert!(compact.contains("\"content\":\"hithere\""));
+        // The system prompt rides as the leading system message,
+        // before any user content.
+        assert!(compact.contains("\"role\":\"system\""));
+        assert!(compact.contains("Youareterse."));
+        assert!(compact.find("\"role\":\"system\"").unwrap() < compact.find("\"role\":\"user\"").unwrap());
     }
 
     #[test]

@@ -30,6 +30,7 @@ pub fn run(
     status: Status,
     catalog: Catalog,
     config: ModelsConfig,
+    system_prompt: Option<String>,
 ) -> std::io::Result<()> {
     // Inline mode: NO alternate screen. The terminal keeps its normal
     // buffer and scrollback — we manage only the bottom 12 rows (an
@@ -46,7 +47,7 @@ pub fn run(
     let mut terminal = ratatui::try_init_with_options(options)?;
     terminal.insert_before(1, |buf| ui::welcome_into(buf))?;
 
-    let mut app = App::new(provider, status, catalog, config);
+    let mut app = App::new(provider, status, catalog, config, system_prompt);
     let result = event_loop(&mut terminal, &mut app);
 
     // Teardown, in order:

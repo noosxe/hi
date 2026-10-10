@@ -50,6 +50,8 @@ fn main() -> ExitCode {
             },
             Catalog::default(),
             ModelsConfig::default(),
+            // The mock ignores system prompts — nothing to resolve.
+            None,
         );
     }
 
@@ -95,6 +97,10 @@ fn main() -> ExitCode {
         Ok(settings) => settings,
         Err(err) => return fail(&err),
     };
+
+    // The system prompt: built-in default, replaced/appended by
+    // SYSTEM.md / APPEND_SYSTEM.md at the user and project levels.
+    let system_prompt = Some(hi_core::system_prompt::resolve());
     let selected = match hi_core::selection::resolve(
         &config,
         cli.provider.as_deref(),
@@ -110,7 +116,7 @@ fn main() -> ExitCode {
         provider: selected.provider,
         model: selected.model,
     };
-    launch(provider, status, catalog, config)
+    launch(provider, status, catalog, config, system_prompt)
 }
 
 /// Hand the session to the interactive interface.
@@ -119,8 +125,9 @@ fn launch(
     status: Status,
     catalog: Catalog,
     config: ModelsConfig,
+    system_prompt: Option<String>,
 ) -> ExitCode {
-    match run(provider, status, catalog, config) {
+    match run(provider, status, catalog, config, system_prompt) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => fail(&err.to_string()),
     }
