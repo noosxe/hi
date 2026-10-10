@@ -256,6 +256,20 @@ impl App {
         };
     }
 
+    /// Height of the open menu, borders included: pickers are 4-5
+    /// rows, completion menus 3-4; 0 when no menu is open. The menu
+    /// takes its rows from the streaming area (elastic 8 → 2), so it
+    /// lands directly above the input.
+    pub fn menu_height(&self) -> u16 {
+        if let Some(picker) = &self.picker {
+            (picker.items.len() as u16 + 2).clamp(5, 6)
+        } else if let Some(completion) = &self.completion {
+            (completion.items.len() as u16 + 2).clamp(3, 6)
+        } else {
+            0
+        }
+    }
+
 
     /// Rebuild the `/` completion menu from the current input: open
     /// while the text is a bare `/prefix` (no spaces yet — argument
@@ -480,5 +494,18 @@ mod tests {
         assert!(matches!(app.messages.last(), Some(Message::System(_))));
         assert!(!app.messages.iter().any(|m| matches!(m, Message::User(_))));
     }
+
+    #[test]
+    fn menu_height_by_menu_kind() {
+        let mut app = app();
+        assert_eq!(app.menu_height(), 0);
+        type_string(&mut app, "/");
+        // One registry command: 3 rows (item + borders).
+        assert_eq!(app.menu_height(), 3);
+        app.completion = None;
+        app.open_picker(); // empty catalog clamps to the 5-row minimum
+        assert_eq!(app.menu_height(), 5);
+    }
 }
+
 

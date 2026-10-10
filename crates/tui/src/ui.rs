@@ -17,29 +17,42 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // functional update syntax `..frame.area()` copies every field
     // not named.
     let area = frame.area();
-    // The frame is the inline viewport: 6 resting rows (2 stream + 3
-    // input + 1 status) plus, while a menu is open, the menu rows
-    // grown in beneath the input. Fixed heights need no layout
-    // solver — plain struct arithmetic; `..area` copies the rest.
-    let stream_area = Rect { height: 2, ..area };
+    // The frame is a fixed 12-row inline viewport. Layout:
+    //
+    //   resting:   [stream 8] [input 3] [status 1]
+    //   menu open: [stream 2] [menu n] [input 3] [status 1]
+    //
+    // A menu takes its rows from the *stream* (elastic, 8 → 2), so it
+    // sits directly above the input, hugging its top border. Input
+    // and status never move. Plain struct arithmetic; `..area` copies
+    // every field not named.
+    let menu_h = app.menu_height();
+    let stream_h = 8 - menu_h;
+    let stream_area = Rect { height: stream_h, ..area };
     let input_area = Rect {
-        y: area.y + 2,
+        y: area.y + 8,
         height: 3,
         ..area
     };
     let status_area = Rect {
-        y: area.y + area.height - 1,
+        y: area.y + 11,
         height: 1,
         ..area
     };
-    // Menus hug the input box: bottom-anchored to the input's top
-    // border, growing upward. (ratatui's inline viewport has no
-    // public way to grow downward — the dynamic-height experiment
-    // lives in git history.)
     draw_stream(frame, stream_area, app);
     draw_input(frame, input_area, app);
-    draw_completion(frame, area, app);
-    draw_picker(frame, area, app);
+    if menu_h > 0 {
+        let menu_area = Rect {
+            y: area.y + stream_h,
+            height: menu_h,
+            ..area
+        };
+        if app.picker.is_some() {
+            draw_picker(frame, menu_area, app);
+        } else {
+            draw_completion(frame, menu_area, app);
+        }
+    }
     draw_status(frame, status_area, app);
 }
 
@@ -73,18 +86,13 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(text).style(Style::new().dim()), area);
 }
 
-/// The `/model` popup: fills the viewport above the status row. The
-/// inline viewport is only 6 rows, so the picker lives inside it —
-/// the `List` scrolls, so any model count works.
+/// The `/model` picker, drawn in the menu zone directly above the
+/// input. Five rows for the common case (a handful of models); the
+/// `List` scrolls when a server offers more.
 fn draw_picker(frame: &mut Frame, area: Rect, app: &App) {
     let Some(picker) = app.picker.as_ref() else {
         return;
     };
-    let height = (picker.items.len() as u16 + 2)
-        .clamp(5, 12)
-        .min(area.y + 2);
-    let y = (area.y + 2).saturating_sub(height);
-    let popup = Rect { x: area.x, y, width: area.width, height };
     let items: Vec<ListItem> = picker
         .items
         .iter()
@@ -100,22 +108,21 @@ fn draw_picker(frame: &mut Frame, area: Rect, app: &App) {
         )
         .highlight_symbol("› ")
         .highlight_style(Style::new().bold());
-    frame.render_stateful_widget(list, popup, &mut state);
+    frame.render_stateful_widget(list, area, &mut state);
 }
 
-/// The `/` completion menu: anchored to the top of the viewport,
-/// echoing the typed text in its title. Commands grow over time; the
-/// list scrolls.
+/// The `/` completion menu, drawn in the menu zone between the
+/// streaming area and the input. Echoes the typed text in its title;
+/// commands grow over time, and the list scrolls.
 fn draw_completion(frame: &mut Frame, area: Rect, app: &App) {
     let Some(completion) = app.completion.as_ref() else {
         return;
     };
-    let height = (completion.items.len() as u16 + 2).clamp(3, 8);
-    let width = area.width.min(64);
-    // Bottom-anchored: the menu's last row sits directly on the
-    // input's top border, growing upward.
-    let y = (area.y + 2).saturating_sub(height);
-    let popup = Rect { x: area.x, y, width, height };
+    // Narrower than the viewport reads as a menu, not a pane.
+    let popup = Rect {
+        width: area.width.min(64),
+        ..area
+    };
     let items: Vec<ListItem> = completion
         .items
         .iter()

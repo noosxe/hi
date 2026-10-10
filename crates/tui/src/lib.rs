@@ -31,14 +31,14 @@ pub fn run(
     config: ModelsConfig,
 ) -> std::io::Result<()> {
     // Inline mode: NO alternate screen. The terminal keeps its normal
-    // buffer and scrollback — we manage only the bottom 6 rows (a
-    // two-row live streaming area above the 3-row input and the
-    // status row), and
+    // buffer and scrollback — we manage only the bottom 12 rows (an
+    // 8-row live streaming area that shrinks while a menu is open
+    // above the 3-row input, plus the status row), and
     // transcript lines are printed *above* the viewport, owned by the
     // terminal from then on. Native scrolling, search, and copy come
     // for free; pi's "regular mode" works the same way.
     let options = TerminalOptions {
-        viewport: Viewport::Inline(6),
+        viewport: Viewport::Inline(12),
     };
     // try_init_with_options: enables raw mode, skips the alternate
     // screen, and installs a panic hook that restores the terminal.
