@@ -702,6 +702,7 @@ version = "0.1.0"
 dependencies = [
  "hi-core",
  "ratatui",
+ "unicode-width",
 ]
 
 [[package]]

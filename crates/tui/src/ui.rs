@@ -2,8 +2,9 @@ use hi_core::Message;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Stylize, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{List, ListItem, ListState, Block, Borders, Paragraph, Widget, Wrap};
+use unicode_width::UnicodeWidthChar;
 use ratatui::Frame;
 
 use crate::app::App;
@@ -12,26 +13,30 @@ use crate::app::App;
 /// row. The transcript is NOT drawn here — it lives in the terminal's
 /// scrollback (see `message_into`).
 pub fn draw(frame: &mut Frame, app: &App) {
-    // The frame IS the 6-row inline viewport. Three fixed-height
-    // areas need no layout solver — plain struct arithmetic. The
-    // functional update syntax `..frame.area()` copies every field
-    // not named.
     let area = frame.area();
-    // The frame is a fixed 12-row inline viewport. Layout:
+    // A fixed 12-row viewport with two elastic consumers. Bottom-up:
+    // the status row is pinned, the input grows upward with its
+    // wrapped text (3 rows resting, up to 8), the menu takes rows
+    // above the input (0 when closed), and the streaming area keeps
+    // whatever remains — never fewer than 2 rows.
     //
-    //   resting:   [stream 8] [input 3] [status 1]
-    //   menu open: [stream 2] [menu n] [input 3] [status 1]
-    //
-    // A menu takes its rows from the *stream* (elastic, 8 → 2), so it
-    // sits directly above the input, hugging its top border. Input
-    // and status never move. Plain struct arithmetic; `..area` copies
-    // every field not named.
-    let menu_h = app.menu_height();
-    let stream_h = 8 - menu_h;
+    //   resting:    [stream 8] [input 3] [status 1]
+    //   menu open:  [stream 5] [menu 3] [input 3] [status 1]
+    //   long input: [stream 2] [input 8] [status 1]
+    let input_rows = crate::wrap::wrapped_row_count(&app.input, area.width as usize)
+        .clamp(1, 6) as u16;
+    let input_height = input_rows + 2; // rules
+    let menu_h = app.menu_height().min(9 - input_height);
+    let stream_h = 11 - input_height - menu_h;
     let stream_area = Rect { height: stream_h, ..area };
+    let menu_area = Rect {
+        y: area.y + stream_h,
+        height: menu_h,
+        ..area
+    };
     let input_area = Rect {
-        y: area.y + 8,
-        height: 3,
+        y: area.y + 11 - input_height,
+        height: input_height,
         ..area
     };
     let status_area = Rect {
@@ -42,11 +47,6 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_stream(frame, stream_area, app);
     draw_input(frame, input_area, app);
     if menu_h > 0 {
-        let menu_area = Rect {
-            y: area.y + stream_h,
-            height: menu_h,
-            ..area
-        };
         if app.picker.is_some() {
             draw_picker(frame, menu_area, app);
         } else {
@@ -82,15 +82,16 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
     // paragraph, and a moved value can't be used again.
     let inner = block.inner(area);
 
-    // as_str borrows the text — no clone needed for rendering.
-    frame.render_widget(Paragraph::new(app.input.as_str()).block(block), area);
-
-    // Park the real terminal cursor just past the typed text.
-    // inner.x is already the first writable column — inner() excludes
-    // the border, so no extra +1 (that double-counted it).
+    // Word-wrap the input into the elastic text rows and park the
+    // real cursor after the last visible cell of the last row.
+    // Widths are display columns — emoji count double.
+    let rows = crate::wrap::wrap(&app.input, inner.width as usize);
+    let text: Text = rows.iter().map(|row| Line::from(row.as_str())).collect();
+    frame.render_widget(Paragraph::new(text).block(block), area);
+    let last_row = rows.last().map(String::as_str).unwrap_or("");
     frame.set_cursor_position(Position::new(
-        inner.x + app.input.chars().count() as u16,
-        inner.y,
+        inner.x + crate::wrap::display_width(last_row) as u16,
+        inner.y + rows.len() as u16 - 1,
     ));
 }
 
@@ -161,8 +162,9 @@ fn draw_completion(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_stateful_widget(list, popup, &mut state);
 }
 /// The in-progress reply, rendered live in the viewport, dimmed to
-/// signal it is not final. Only the tail fits in two rows — the
-/// complete text is printed to scrollback when the turn ends.
+/// signal it is not final. Only the tail fits in the elastic stream
+/// rows — the complete text is printed to scrollback when the turn
+/// ends.
 fn draw_stream(frame: &mut Frame, area: Rect, app: &App) {
     let Some(turn) = app.turn.as_ref() else {
         return;
@@ -170,18 +172,22 @@ fn draw_stream(frame: &mut Frame, area: Rect, app: &App) {
     if turn.text.is_empty() && turn.error.is_none() {
         return;
     }
-    // Keep only as many trailing characters as fit the two wrapped
-    // rows. Counted in chars, not display columns — emoji drift is a
-    // known gap, queued for the input-polish milestone.
+    // Trim from the front until the tail fits the visible columns —
+    // counted in display columns (emoji are two), not characters.
     let capacity = area.width as usize * area.height as usize;
-    let count = turn.text.chars().count();
+    let mut start = 0;
+    let mut used = 0usize;
+    for (index, ch) in turn.text.char_indices().rev() {
+        let width = ch.width().unwrap_or(0);
+        if used + width > capacity {
+            start = index + ch.len_utf8();
+            break;
+        }
+        used += width;
+    }
     let mut lines: Vec<Line> = Vec::new();
     if !turn.text.is_empty() {
-        let tail: String = turn
-            .text
-            .chars()
-            .skip(count.saturating_sub(capacity))
-            .collect();
+        let tail: String = turn.text[start..].to_string();
         lines.push(Line::from(tail).style(Style::new().dim()));
     }
     if let Some(err) = &turn.error {

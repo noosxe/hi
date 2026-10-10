@@ -6,6 +6,7 @@
 
 mod app;
 mod commands;
+mod wrap;
 mod ui;
 
 pub mod catalog;

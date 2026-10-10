@@ -7,3 +7,4 @@ edition = "2024"
 hi-core = { path = "../core" }
 # ratatui re-exports its crossterm dependency, so one dep covers both
 ratatui = "0.30"
+unicode-width = "0.2"
