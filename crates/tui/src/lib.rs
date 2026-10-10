@@ -5,6 +5,7 @@
 //! simply never links any of this.
 
 mod app;
+mod commands;
 mod ui;
 
 pub mod catalog;

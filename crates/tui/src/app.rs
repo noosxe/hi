@@ -37,6 +37,9 @@ pub struct App {
     /// The open `/model` picker, if any. `Some` means it owns the
     /// keyboard.
     pub picker: Option<Picker>,
+    /// The `/` completion menu while composing a command. `Some`
+    /// means it is visible and consumes navigation keys.
+    pub completion: Option<Completion>,
     /// The turn in flight, if any. `Some` from Enter until TurnEnd.
     pub turn: Option<Turn>,
 }
@@ -61,6 +64,14 @@ pub struct Picker {
     pub selected: usize,
 }
 
+/// The `/` completion menu: filtered commands plus the highlighted
+/// row.
+#[derive(Clone)]
+pub struct Completion {
+    pub items: Vec<(&'static str, &'static str)>,
+    pub selected: usize,
+}
+
 impl App {
     pub fn new(
         provider: Arc<dyn Provider>,
@@ -78,6 +89,7 @@ impl App {
             catalog,
             config,
             picker: None,
+            completion: None,
             turn: None,
         }
     }
@@ -95,12 +107,21 @@ impl App {
             self.handle_picker_key(key);
             return;
         }
+        // While the `/` completion menu is open it consumes the
+        // navigation keys; everything else falls through to editing.
+        if self.completion.is_some() && self.handle_completion_key(key) {
+            return;
+        }
         match key.code {
-            KeyCode::Char(c) => self.input.push(c),
+            KeyCode::Char(c) => {
+                self.input.push(c);
+                self.sync_completion();
+            }
             KeyCode::Backspace => {
                 // `pop` removes and returns the last char; we only want
                 // the removal, so discard the return value explicitly.
                 let _ = self.input.pop();
+                self.sync_completion();
             }
             KeyCode::Enter => {
                 // One turn at a time for now: Enter while the assistant
@@ -112,13 +133,29 @@ impl App {
                 // Move the input out, leaving an empty String behind —
                 // no clone needed since we own the value anyway.
                 let msg = std::mem::take(&mut self.input);
-                if msg.trim().is_empty() {
+                let trimmed = msg.trim().to_string();
+                if let Some(command_text) = trimmed.strip_prefix('/') {
+                    // Exact name wins; otherwise the highlighted
+                    // completion speaks for the user.
+                    let highlighted = self
+                        .completion
+                        .as_ref()
+                        .and_then(|menu| menu.items.get(menu.selected))
+                        .map(|(name, _)| *name);
+                    let name = crate::commands::find_exact(command_text)
+                        .map(|command| command.name)
+                        .or(highlighted);
+                    self.completion = None;
+                    match name {
+                        Some(name) => self.run_command(name),
+                        None => self.messages.push(Message::System(format!(
+                            "unknown command: /{command_text} — type / to see commands"
+                        ))),
+                    }
                     return;
                 }
-                // Slash commands: `/model` opens the picker instead of
-                // sending a chat message. More commands will follow.
-                if msg.trim() == "/model" {
-                    self.open_picker();
+                self.completion = None;
+                if msg.trim().is_empty() {
                     return;
                 }
                 self.messages.push(Message::User(msg));
@@ -219,6 +256,92 @@ impl App {
         };
     }
 
+    /// Rebuild the `/` completion menu from the current input: open
+    /// while the text is a bare `/prefix` (no spaces yet — argument
+    /// parsing is a future problem), closed otherwise.
+    fn sync_completion(&mut self) {
+        let Some(typed) = self.input.strip_prefix('/') else {
+            self.completion = None;
+            return;
+        };
+        if typed.contains(' ') {
+            self.completion = None;
+            return;
+        }
+        let matches = crate::commands::matching(typed);
+        self.completion = if matches.is_empty() {
+            None
+        } else {
+            Some(Completion {
+                items: matches
+                    .iter()
+                    .map(|command| (command.name, command.description))
+                    .collect(),
+                selected: 0,
+            })
+        };
+    }
+
+    /// Key routing while the completion menu is open. Returns true
+    /// when the key was consumed; anything else falls through to
+    /// normal text editing, which re-syncs the menu afterwards.
+    fn handle_completion_key(&mut self, key: KeyEvent) -> bool {
+        // Clone the small menu out so `self` is free for the arms
+        // that need it (the same NLL dance as the picker's Enter).
+        let Some(completion) = self.completion.clone() else {
+            return false;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                // Dismiss the menu but keep the typed text.
+                self.completion = None;
+                true
+            }
+            KeyCode::Up => {
+                if let Some(menu) = self.completion.as_mut() {
+                    menu.selected = menu.selected.saturating_sub(1);
+                }
+                true
+            }
+            KeyCode::Down => {
+                if let Some(menu) = self.completion.as_mut() {
+                    if menu.selected + 1 < menu.items.len() {
+                        menu.selected += 1;
+                    }
+                }
+                true
+            }
+            KeyCode::Tab => {
+                if let Some((name, _)) = completion.items.get(completion.selected) {
+                    self.input = format!("/{name}");
+                    self.sync_completion();
+                }
+                true
+            }
+            KeyCode::Enter => {
+                self.completion = None;
+                self.input.clear();
+                if let Some((name, _)) = completion.items.get(completion.selected) {
+                    self.run_command(name);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Execute a slash command by name. One arm per registry entry —
+    /// a new registry entry without an arm lands here as an honest
+    /// "unknown command" instead of a silent nothing.
+    fn run_command(&mut self, name: &'static str) {
+        match name {
+            "model" => self.open_picker(),
+            other => self
+                .messages
+                .push(Message::System(format!("unknown command: /{other}"))),
+        }
+    }
+
     /// Drain every event the provider thread has delivered so far.
     /// Called once per frame. `try_recv` never blocks — it reports
     /// empty, ready, or disconnected — so the UI stays responsive
@@ -254,5 +377,106 @@ impl App {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hi_core::MockProvider;
+    use ratatui::crossterm::event::KeyEvent;
+
+    fn app() -> App {
+        App::new(
+            Arc::new(MockProvider::default()),
+            Status {
+                provider: "mock".into(),
+                model: "mock".into(),
+            },
+            Catalog::default(),
+            ModelsConfig::default(),
+        )
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn type_string(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn slash_alone_lists_every_command() {
+        let mut app = app();
+        type_string(&mut app, "/");
+        let completion = app.completion.as_ref().unwrap();
+        assert!(!completion.items.is_empty());
+        assert_eq!(completion.selected, 0);
+    }
+
+    #[test]
+    fn completion_filters_by_prefix() {
+        let mut app = app();
+        type_string(&mut app, "/mo");
+        let completion = app.completion.as_ref().unwrap();
+        assert!(completion.items.iter().all(|(name, _)| name.starts_with("mo")));
+        assert!(completion.items.iter().any(|(name, _)| *name == "model"));
+    }
+
+    #[test]
+    fn plain_text_keeps_completion_closed() {
+        let mut app = app();
+        type_string(&mut app, "hello");
+        assert!(app.completion.is_none());
+    }
+
+    #[test]
+    fn enter_on_completion_executes_the_command() {
+        let mut app = app();
+        type_string(&mut app, "/mod");
+        app.handle_key(key(KeyCode::Enter));
+        // Running /model opens the picker, closes the menu, clears input.
+        assert!(app.picker.is_some());
+        assert!(app.completion.is_none());
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn tab_completes_without_executing() {
+        let mut app = app();
+        type_string(&mut app, "/m");
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.input, "/model");
+        assert!(app.picker.is_none());
+    }
+
+    #[test]
+    fn esc_dismisses_the_menu_and_keeps_the_text() {
+        let mut app = app();
+        type_string(&mut app, "/model");
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.completion.is_none());
+        assert_eq!(app.input, "/model");
+    }
+
+    #[test]
+    fn dismissed_menu_still_dispatches_exact_command() {
+        let mut app = app();
+        type_string(&mut app, "/model");
+        app.handle_key(key(KeyCode::Esc));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.picker.is_some());
+    }
+
+    #[test]
+    fn unknown_command_reports_instead_of_sending() {
+        let mut app = app();
+        type_string(&mut app, "/nope");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(app.messages.last(), Some(Message::System(_))));
+        assert!(!app.messages.iter().any(|m| matches!(m, Message::User(_))));
     }
 }

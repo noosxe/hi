@@ -35,6 +35,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
         draw_input(frame, input_area, app);
     }
     draw_status(frame, status_area, app);
+
+    // The `/` completion menu overlays the upper rows — never while
+    // the model picker owns the screen.
+    if app.picker.is_none() {
+        draw_completion(frame, frame.area(), app);
+    }
 }
 
 /// The input area: top/bottom rules only, no side walls — pi-style.
@@ -90,6 +96,41 @@ fn draw_picker(frame: &mut Frame, area: Rect, app: &App) {
         .highlight_symbol("› ")
         .highlight_style(Style::new().bold());
     frame.render_stateful_widget(list, area, &mut state);
+}
+
+/// The `/` completion menu: anchored to the top of the viewport,
+/// echoing the typed text in its title. Commands grow over time; the
+/// list scrolls.
+fn draw_completion(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(completion) = app.completion.as_ref() else {
+        return;
+    };
+    let height = (completion.items.len() as u16 + 2).clamp(3, area.height);
+    let popup = Rect {
+        height,
+        width: area.width.min(64),
+        ..area
+    };
+    let items: Vec<ListItem> = completion
+        .items
+        .iter()
+        .map(|(name, description)| {
+            ListItem::from(Line::from(vec![
+                format!("/{name} ").bold(),
+                (*description).dim(),
+            ]))
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(completion.selected));
+    let list = List::new(items)
+        .block(Block::new().borders(Borders::ALL).title(format!(
+            " /{} ",
+            app.input.strip_prefix('/').unwrap_or("")
+        )))
+        .highlight_symbol("› ")
+        .highlight_style(Style::new().bold());
+    frame.render_stateful_widget(list, popup, &mut state);
 }
 /// The in-progress reply, rendered live in the viewport, dimmed to
 /// signal it is not final. Only the tail fits in two rows — the
