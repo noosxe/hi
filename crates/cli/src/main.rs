@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 
-use hi_core::{MockProvider, ModelsConfig, OpenAiCompatProvider, Provider};
+use hi_core::{MockProvider, ModelsConfig, OpenAiCompatProvider, Provider, Settings};
 use hi_tui::{Status, run};
 
 #[derive(Parser)]
@@ -71,10 +71,15 @@ fn main() -> ExitCode {
         };
     }
 
+    let settings = match Settings::load() {
+        Ok(settings) => settings,
+        Err(err) => return fail(&err),
+    };
     let selected = match hi_core::selection::resolve(
         &config,
         cli.provider.as_deref(),
         cli.model.as_deref(),
+        settings.default_model.as_deref(),
     ) {
         Ok(selected) => selected,
         Err(err) => return fail(&err),

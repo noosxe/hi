@@ -270,7 +270,7 @@ mod tests {
             ("alpha", "http://a/v1", &["shared"]),
         ]);
         assert_eq!(
-            resolve(&cfg, None, Some("shared")).unwrap(),
+            resolve(&cfg, None, Some("shared"), None).unwrap(),
             Selected {
                 provider: "alpha".into(),
                 model: "shared".into()
