@@ -2,7 +2,7 @@ use hi_core::Message;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Stylize, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Block, Borders, Paragraph, Widget, Wrap};
 use ratatui::Frame;
 
@@ -64,7 +64,18 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
     // While work is in flight, the top rule carries a right-aligned
     // activity title; quiet sessions render a plain rule.
     if let Some(activity) = app.activity_label() {
-        block = block.title_top(Line::from(format!("{activity}  ")).right_aligned().yellow());
+        // Left margin, content, right margin — then two unstyled
+        // rule characters: they overwrite the border seamlessly, so
+        // the rule reads as continuing past the menu's right edge.
+        block = block.title_top(
+            Line::from(vec![
+                Span::from(" "),
+                Span::from(activity).yellow(),
+                Span::from(" "),
+                Span::from("──"),
+            ])
+            .right_aligned(),
+        );
     }
     // Borrow what we need from `block` BEFORE the render call:
     // `.block(block)` below moves ownership of block into the
