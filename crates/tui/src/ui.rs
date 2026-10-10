@@ -64,7 +64,7 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
     // While work is in flight, the top rule carries a right-aligned
     // activity title; quiet sessions render a plain rule.
     if let Some(activity) = app.activity_label() {
-        block = block.title_top(Line::from(activity).right_aligned().yellow());
+        block = block.title_top(Line::from(format!("{activity}  ")).right_aligned().yellow());
     }
     // Borrow what we need from `block` BEFORE the render call:
     // `.block(block)` below moves ownership of block into the
