@@ -79,6 +79,18 @@ impl App {
                 self.messages.push(Message::User(msg));
                 self.start_turn();
             }
+            KeyCode::Esc => {
+                // Cancel the active turn: `take` drops the Turn, which
+                // drops the event Receiver, so the provider thread's
+                // next send fails and it returns — the same
+                // drop-is-cancellation mechanism as quitting.
+                // pi's behavior: partial output stays in the transcript.
+                if let Some(turn) = self.turn.take() {
+                    if !turn.text.is_empty() {
+                        self.messages.push(Message::Assistant(turn.text));
+                    }
+                }
+            }
             _ => {}
         }
     }
