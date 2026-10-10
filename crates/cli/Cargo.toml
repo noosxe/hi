@@ -1,0 +1,9 @@
+[package]
+name = "hi"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "wrap_help"] }
+hi-core = { path = "../core" }
+hi-tui = { path = "../tui" }
