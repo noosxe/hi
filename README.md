@@ -16,18 +16,19 @@ later.
 - pi-style `models.json` configuration with `$ENV` API-key interpolation
 - Failures keep partial output and add a red `error` line; the input stays live
 - A real CLI: `--provider`/`--model`, `--list-models`, `--mock`, `--help` — and Esc cancels a running turn
-- 20 tests, including a fake HTTP server that records requests
+- `/model` picker in the TUI: arrows to move, Enter switches this session, Ctrl-S saves the default
+- 43 tests, including a fake HTTP server that records requests
 
-Not yet: a saved default model (`defaultModel`), a `/model` picker,
-headless one-shot mode, extensions. The selection layer is built so
-each of those slots in without rework.
+Not yet: headless one-shot mode, an effort indicator, extensions.
+The selection and settings layers are built so each slots in without
+rework.
 
 ## Build & run
 
 ```sh
 nix develop          # Rust toolchain + cargo (or any Rust 1.85+, edition 2024)
 cargo run            # builds the `hi` binary; `hi --mock` needs no config
-cargo test           # 20 tests; no network needed
+cargo test           # 43 tests; no network needed
 ```
 
 
@@ -52,7 +53,8 @@ How hi picks a provider and model when you don't name both:
 1. `--provider P --model M` — used as given
 2. `--provider P` — the first model P offers (discovery included)
 3. `--model M` — the first provider whose configured list contains M
-4. nothing — the first provider (alphabetically) that offers any model
+4. `defaultModel` from `settings.json` — only when no flags are given
+5. nothing — the first provider (alphabetically) that offers any model
 
 In the TUI: **Enter** sends, **Esc** cancels the running turn (partial
 output stays in the transcript), **Ctrl-C** quits. A dim status row
@@ -60,9 +62,21 @@ under the input shows `cwd (branch)` on the left — the branch only
 when you're inside a git repository — and `(provider) model` on the
 right.
 
-A saved default (`defaultModel`) will slot in between flags and the
-autopick later; headless one-shot mode is planned as a second branch
-in the same binary.
+Type `/model` in the input to open the picker: **arrows** move,
+**Enter** switches the current session (safe even mid-turn — the
+running turn finishes on its original model), **Ctrl-S** saves the
+choice as the startup default, **Esc** closes.
+
+Ctrl-S writes `~/.config/hi/settings.json`:
+
+```jsonc
+{ "defaultModel": "zai/glm-5.3" }   // camelCase, unknown fields ignored
+```
+
+A missing settings file is normal; a stale or malformed
+`defaultModel` falls through to autopick rather than failing startup.
+Headless one-shot mode is planned as a second branch in the same
+binary; an effort preference will join `defaultModel` in settings.
 
 ## Configuration: `models.json`
 
