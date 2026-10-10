@@ -44,6 +44,9 @@ pub struct App {
     /// The `/` completion menu while composing a command. `Some`
     /// means it is visible and consumes navigation keys.
     pub completion: Option<Completion>,
+    /// Messages typed mid-turn, merged into one user message that
+    /// fires the moment the current reply finishes.
+    pub queued: Option<String>,
     /// The turn in flight, if any. `Some` from Enter until TurnEnd.
     pub turn: Option<Turn>,
 }
@@ -101,6 +104,7 @@ impl App {
             picker: None,
             completion: None,
             tick: 0,
+            queued: None,
             turn: None,
         }
     }
@@ -135,12 +139,6 @@ impl App {
                 self.sync_completion();
             }
             KeyCode::Enter => {
-                // One turn at a time for now: Enter while the assistant
-                // is streaming is a no-op and the typed input is kept.
-                // Queueing turns comes in a later milestone.
-                if self.turn.is_some() {
-                    return;
-                }
                 // Move the input out, leaving an empty String behind —
                 // no clone needed since we own the value anyway.
                 let msg = std::mem::take(&mut self.input);
@@ -169,6 +167,23 @@ impl App {
                 if msg.trim().is_empty() {
                     return;
                 }
+                // Turn already in flight: group this message into the
+                // queue. Everything queued merges into ONE user
+                // message (blank line between parts) that fires the
+                // moment the current reply finishes — the "also add
+                // tests" workflow.
+                if self.turn.is_some() {
+                    self.messages
+                        .push(Message::System(format!("queued: {msg}")));
+                    match self.queued.as_mut() {
+                        Some(queued) => {
+                            queued.push_str("\n\n");
+                            queued.push_str(&msg);
+                        }
+                        None => self.queued = Some(msg),
+                    }
+                    return;
+                }
                 self.messages.push(Message::User(msg));
                 self.start_turn();
             }
@@ -181,6 +196,15 @@ impl App {
                 if let Some(turn) = self.turn.take() {
                     if !turn.text.is_empty() {
                         self.messages.push(Message::Assistant(turn.text));
+                    }
+                }
+                // Cancel means cancel everything: hand the queued
+                // text back so nothing typed is lost.
+                if let Some(queued) = self.queued.take() {
+                    if self.input.is_empty() {
+                        self.input = queued;
+                    } else {
+                        self.input = format!("{queued}\n\n{}", self.input);
                     }
                 }
             }
@@ -376,8 +400,12 @@ impl App {
     pub fn activity_label(&self) -> Option<String> {
         let turn = self.turn.as_ref()?;
         let spinner = SPINNER[usize::from(self.tick) % SPINNER.len()];
+        let queued_note = match &self.queued {
+            Some(queued) => format!(" · {} queued", queued.matches("\n\n").count() + 1),
+            None => String::new(),
+        };
         Some(format!(
-            "{spinner} {}s · esc to cancel",
+            "{spinner} {}s{queued_note} · esc to cancel",
             turn.started_at.elapsed().as_secs()
         ))
     }
@@ -416,6 +444,12 @@ impl App {
                 if let Some(err) = turn.error {
                     self.messages.push(Message::Error(err));
                 }
+            }
+            // The reply finished — fire the queued message, if any,
+            // as the very next turn.
+            if let Some(queued) = self.queued.take() {
+                self.messages.push(Message::User(queued));
+                self.start_turn();
             }
         }
     }
@@ -543,6 +577,64 @@ mod tests {
         let label = app.activity_label().unwrap();
         assert!(label.contains("esc to cancel"), "{label}");
         assert!(label.contains('s'), "elapsed seconds: {label}");
+    }
+
+    #[test]
+    fn messages_sent_mid_turn_group_into_one() {
+        let mut app = app();
+        app.start_turn();
+        type_string(&mut app, "first part");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.queued.as_deref(), Some("first part"));
+        assert!(app.activity_label().unwrap().contains("1 queued"));
+        type_string(&mut app, "second part");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.queued.as_deref(), Some("first part\n\nsecond part"));
+        // Both sends are acknowledged in the transcript.
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| matches!(m, Message::System(s) if s.contains("first part")))
+        );
+        // And the activity title advertises the queue.
+        assert!(app.activity_label().unwrap().contains("2 queued"));
+    }
+
+    #[test]
+    fn queued_message_fires_when_the_turn_finishes() {
+        let mut app = app();
+        app.start_turn();
+        type_string(&mut app, "follow up");
+        app.handle_key(key(KeyCode::Enter));
+        // Drain the mock turn in real time (its reply is short).
+        for _ in 0..200 {
+            app.pump();
+            if app.turn.is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        // Both turns ran to completion inside the drain loop; the
+        // proof of dispatch is the queued text becoming a real user
+        // message in the transcript.
+        assert!(app.turn.is_none());
+        assert!(app.queued.is_none());
+        assert!(app
+            .messages
+            .iter()
+            .any(|m| matches!(m, Message::User(text) if text == "follow up")));
+    }
+
+    #[test]
+    fn esc_cancels_the_turn_and_restores_the_queue_to_the_input() {
+        let mut app = app();
+        app.start_turn();
+        type_string(&mut app, "saved text");
+        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.turn.is_none());
+        assert!(app.queued.is_none());
+        assert_eq!(app.input, "saved text");
     }
 }
 
