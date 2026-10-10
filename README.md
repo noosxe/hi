@@ -17,6 +17,7 @@ later.
 - Failures keep partial output and add a red `error` line; the input stays live
 - A real CLI: `--provider`/`--model`, `--list-models`, `--mock`, `--help` — and Esc cancels a running turn
 - `/model` picker in the TUI: arrows to move, Enter switches this session, Ctrl-S saves the default
+- Slash commands with completion: type `/` to see the menu, Tab completes, Enter runs
 - 43 tests, including a fake HTTP server that records requests
 
 Not yet: headless one-shot mode, an effort indicator, extensions.
