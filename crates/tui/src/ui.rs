@@ -60,7 +60,12 @@ pub fn draw(frame: &mut Frame, app: &App) {
 /// Shows whatever is currently being typed, with the real terminal
 /// cursor parked right after the text.
 fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
-    let block = Block::new().borders(Borders::TOP | Borders::BOTTOM);
+    let mut block = Block::new().borders(Borders::TOP | Borders::BOTTOM);
+    // While work is in flight, the top rule carries a right-aligned
+    // activity title; quiet sessions render a plain rule.
+    if let Some(activity) = app.activity_label() {
+        block = block.title_top(Line::from(activity).right_aligned().yellow());
+    }
     // Borrow what we need from `block` BEFORE the render call:
     // `.block(block)` below moves ownership of block into the
     // paragraph, and a moved value can't be used again.

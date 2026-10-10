@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
+use std::time::Instant;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -37,12 +38,18 @@ pub struct App {
     /// The open `/model` picker, if any. `Some` means it owns the
     /// keyboard.
     pub picker: Option<Picker>,
+    /// Render tick — advances once per frame to animate the
+    /// activity spinner.
+    pub tick: u8,
     /// The `/` completion menu while composing a command. `Some`
     /// means it is visible and consumes navigation keys.
     pub completion: Option<Completion>,
     /// The turn in flight, if any. `Some` from Enter until TurnEnd.
     pub turn: Option<Turn>,
 }
+
+/// Braille frames for the activity spinner, cycled once per frame.
+const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// One assistant reply being streamed by a provider thread.
 pub struct Turn {
@@ -52,6 +59,9 @@ pub struct Turn {
     /// Set when the provider reported a failure for this turn;
     /// `Some` turns the finalization into an error transcript entry.
     pub error: Option<String>,
+    /// When this turn started — feeds the elapsed time in the
+    /// activity title.
+    pub started_at: Instant,
     /// Events from the provider thread. Private on purpose: consumed
     /// only by `App::pump`, so raw events never leak into UI code.
     rx: Receiver<Event>,
@@ -90,6 +100,7 @@ impl App {
             config,
             picker: None,
             completion: None,
+            tick: 0,
             turn: None,
         }
     }
@@ -184,6 +195,7 @@ impl App {
         self.turn = Some(Turn {
             text: String::new(),
             error: None,
+            started_at: Instant::now(),
             rx,
         });
     }
@@ -357,11 +369,25 @@ impl App {
         }
     }
 
+
+    /// What the input's right-side title shows while work is in
+    /// flight; `None` renders a plain rule. New activity states
+    /// (context compaction, tool runs) become arms here.
+    pub fn activity_label(&self) -> Option<String> {
+        let turn = self.turn.as_ref()?;
+        let spinner = SPINNER[usize::from(self.tick) % SPINNER.len()];
+        Some(format!(
+            "{spinner} {}s · esc to cancel",
+            turn.started_at.elapsed().as_secs()
+        ))
+    }
     /// Drain every event the provider thread has delivered so far.
     /// Called once per frame. `try_recv` never blocks — it reports
     /// empty, ready, or disconnected — so the UI stays responsive
     /// even in the middle of a streaming turn.
     pub fn pump(&mut self) {
+        // One frame, one tick — this drives the activity spinner.
+        self.tick = self.tick.wrapping_add(1);
         let Some(turn) = self.turn.as_mut() else {
             return;
         };
@@ -506,6 +532,19 @@ mod tests {
         app.open_picker(); // empty catalog clamps to the 5-row minimum
         assert_eq!(app.menu_height(), 5);
     }
+
+    #[test]
+    fn activity_label_appears_only_for_active_turns() {
+        let mut app = app();
+        assert!(app.activity_label().is_none());
+        // A real (mock) turn: the provider thread streams in the
+        // background while we inspect the title.
+        app.start_turn();
+        let label = app.activity_label().unwrap();
+        assert!(label.contains("esc to cancel"), "{label}");
+        assert!(label.contains('s'), "elapsed seconds: {label}");
+    }
 }
+
 
 

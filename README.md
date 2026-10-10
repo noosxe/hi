@@ -63,6 +63,9 @@ under the input shows `cwd (branch)` on the left — the branch only
 when you're inside a git repository — and `(provider) model` on the
 right.
 
+While a turn is streaming, the input's top rule shows a spinner, the
+elapsed seconds, and a reminder that Esc cancels.
+
 Type `/model` in the input to open the picker: **arrows** move,
 **Enter** switches the current session (safe even mid-turn — the
 running turn finishes on its original model), **Ctrl-S** saves the
