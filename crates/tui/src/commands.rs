@@ -10,10 +10,20 @@ pub struct Command {
 
 /// The registry, sorted by name — the completion list inherits this
 /// order, so it stays stable.
-pub const COMMANDS: &[Command] = &[Command {
-    name: "model",
-    description: "pick a model for this session (ctrl-s saves the default)",
-}];
+pub const COMMANDS: &[Command] = &[
+    Command {
+        name: "exit",
+        description: "quit the session",
+    },
+    Command {
+        name: "model",
+        description: "pick a model for this session (ctrl-s saves the default)",
+    },
+    Command {
+        name: "quit",
+        description: "alias for /exit",
+    },
+];
 
 /// Commands whose name starts with `typed` (lowercased, without the
 /// leading `/`). An empty `typed` matches everything — typing `/`

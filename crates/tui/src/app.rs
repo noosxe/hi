@@ -386,6 +386,7 @@ impl App {
     /// "unknown command" instead of a silent nothing.
     fn run_command(&mut self, name: &'static str) {
         match name {
+            "exit" | "quit" => self.quit = true,
             "model" => self.open_picker(),
             other => self
                 .messages
@@ -560,8 +561,9 @@ mod tests {
         let mut app = app();
         assert_eq!(app.menu_height(), 0);
         type_string(&mut app, "/");
-        // One registry command: 3 rows (item + borders).
-        assert_eq!(app.menu_height(), 3);
+        // The whole registry is listed, capped at the 6-row menu zone.
+        let expected = (crate::commands::COMMANDS.len() as u16 + 2).clamp(3, 6);
+        assert_eq!(app.menu_height(), expected);
         app.completion = None;
         app.open_picker(); // empty catalog clamps to the 5-row minimum
         assert_eq!(app.menu_height(), 5);
@@ -577,6 +579,19 @@ mod tests {
         let label = app.activity_label().unwrap();
         assert!(label.contains("esc to cancel"), "{label}");
         assert!(label.contains('s'), "elapsed seconds: {label}");
+    }
+
+    #[test]
+    fn exit_and_quit_commands_stop_the_session() {
+        let mut first = app();
+        type_string(&mut first, "/exit");
+        first.handle_key(key(KeyCode::Enter));
+        assert!(first.quit);
+
+        let mut second = app();
+        type_string(&mut second, "/quit");
+        second.handle_key(key(KeyCode::Enter));
+        assert!(second.quit);
     }
 
     #[test]
