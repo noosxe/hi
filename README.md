@@ -15,19 +15,51 @@ later.
   - **OpenAI-compatible** — real HTTP, server-sent events, model discovery
 - pi-style `models.json` configuration with `$ENV` API-key interpolation
 - Failures keep partial output and add a red `error` line; the input stays live
-- 12 tests, including a fake HTTP server that records requests
+- A real CLI: `--provider`/`--model`, `--list-models`, `--mock`, `--help` — and Esc cancels a running turn
+- 20 tests, including a fake HTTP server that records requests
 
-Not yet: provider selection flags and a saved default model, a `/model`
-picker, Esc-to-cancel mid-turn, extensions. The core supports all of it;
-the TUI wiring is the next milestone.
+Not yet: a saved default model (`defaultModel`), a `/model` picker,
+headless one-shot mode, extensions. The selection layer is built so
+each of those slots in without rework.
 
 ## Build & run
 
 ```sh
 nix develop          # Rust toolchain + cargo (or any Rust 1.85+, edition 2024)
-cargo run -p hi-tui  # currently always uses the mock provider
-cargo test           # 12 tests; no network needed
+cargo run            # builds the `hi` binary; `hi --mock` needs no config
+cargo test           # 20 tests; no network needed
 ```
+
+
+## Usage
+
+```text
+A minimalist agent harness
+
+Usage: hi [OPTIONS]
+
+Options:
+      --provider <PROVIDER>  Provider name from models.json
+      --model <MODEL>        Model id to use (see --list-models)
+      --mock                 Use the built-in mock provider — no config, no network
+      --list-models          Print the selected provider's models and exit
+  -h, --help                 Print help
+  -V, --version              Print version
+```
+
+How hi picks a provider and model when you don't name both:
+
+1. `--provider P --model M` — used as given
+2. `--provider P` — the first model P offers (discovery included)
+3. `--model M` — the first provider whose configured list contains M
+4. nothing — the first provider (alphabetically) that offers any model
+
+In the TUI: **Enter** sends, **Esc** cancels the running turn (partial
+output stays in the transcript), **Ctrl-C** quits.
+
+A saved default (`defaultModel`) will slot in between flags and the
+autopick later; headless one-shot mode is planned as a second branch
+in the same binary.
 
 ## Configuration: `models.json`
 
@@ -135,8 +167,9 @@ The only protocol hi speaks (v0): OpenAI-compatible chat completions.
 ## Project layout
 
 ```
-crates/core   # events, messages, provider trait, config, mock + OpenAI providers
-crates/tui    # ratatui front end; polls core events, owns the terminal
+crates/core   # events, messages, provider trait, config, selection, providers
+crates/tui    # ratatui front end as a library: run(provider) draws and polls
+crates/cli    # the `hi` binary: clap flags, dispatch, exit codes
 ```
 
 Design notes worth keeping in mind:
