@@ -1,0 +1,191 @@
+# `hi-core` reference
+
+Files this doc describes: everything under `crates/core/src/` — `lib.rs`,
+`message.rs`, `event.rs`, `provider.rs`, `openai.rs`, `mock.rs`, `config.rs`,
+`selection.rs`, `settings.rs`, `thinking.rs`, `system_prompt.rs`,
+`test_support.rs`.
+
+Public surface re-exported from `crates/core/src/lib.rs`: `NAME`, `Event`,
+`Message`, `MockProvider`, `ModelsConfig`, `ModelConfig`, `ProviderConfig`,
+`OpenAiCompatProvider`, `Provider`, `spawn_turn`, `Settings`, `ThinkingLevel`.
+Note: `selection` is a public module (`hi_core::selection::{resolve, list_for,
+Selected}`), not re-exported at the root.
+
+## message.rs — the transcript entry type
+
+`enum Message { User(String), Assistant(String), Error(String), System(String) }`
+plus `Message::text(&self) -> &str`.
+
+**Invariants**
+- Enum, not struct-with-role: payload lives in the variant, `match` is
+  exhaustive. Adding a kind (e.g. `ToolUse`) must force consumers to adapt.
+- `Error` messages are displayed in the transcript but **never sent to the
+  model** — enforced by `wire_messages` filtering and by the test
+  `error_messages_are_never_sent_to_the_model` in `openai.rs`.
+- There are no tool variants yet; that is the designated growth axis.
+
+## event.rs — the turn event stream
+
+`enum Event { TurnStart, Token(String), TurnEnd, Error(String) }`, `Clone +
+PartialEq`. This is how a turn in progress talks to the UI.
+
+**Invariants (the single finalization path)**
+- A turn always emits `TurnStart` first and exactly one `TurnEnd` last.
+- `Token`s arrive in order; concatenating them reproduces the full reply.
+- On failure: partial `Token`s still stand, then exactly one `Error`, then
+  `TurnEnd`. Producers: see `OpenAiCompatProvider::respond`. Consumers
+  therefore need exactly one finalize code path (`App::pump` is the reference
+  consumer).
+
+## provider.rs — the abstraction + the turn thread
+
+```rust
+pub trait Provider: Send + Sync {
+    fn respond(&self, history: &[Message], tx: Sender<Event>);
+}
+pub fn spawn_turn(provider: Arc<dyn Provider>, history: &[Message]) -> Receiver<Event>
+```
+
+- `respond` runs **on its own thread** (spawned by `spawn_turn`), streams
+  `Event`s into `tx`, and returns when done.
+- `Send + Sync` are required because the provider is moved into an `Arc` and
+  used through `&self` from the turn thread.
+- **Cancellation contract: dropping the `Receiver` is the cancel signal.**
+  Sends start failing; a well-behaved provider returns promptly (mock and
+  openai both do; tested by `stops_when_receiver_is_dropped`).
+
+Adding a provider = implement `Provider` + construct it somewhere in
+`crates/cli` (see [cli.md](cli.md)). Nothing in core or tui needs to change.
+
+## openai.rs — the one wire protocol
+
+`OpenAiCompatProvider` (Clone) — any OpenAI-compatible endpoint. Everything
+here is **blocking `ureq`** by design (no async runtime in the project).
+
+Construction chain:
+- `new(base_url, api_key: Option<String>, model)`
+- `from_config(cfg: &ProviderConfig, model)` — resolves `apiKey` via env
+  interpolation (`$NAME` / `${NAME}` → env at construction time; missing var
+  → empty string → treated as no key)
+- `.with_system_prompt(Option<String>)` / `.with_thinking_level(Option<ThinkingLevel>)`
+  — builder-style, re-applied by the TUI whenever the model picker rebuilds
+  the provider.
+
+Wire behavior:
+- Turns: `POST {baseUrl}/chat/completions`, body `{model, messages,
+  stream: true}`, optional leading `role: "system"` message from the resolved
+  system prompt. `Authorization: Bearer <key>` **only when a key resolves
+  non-empty** (`authorized()` — some local servers reject the header).
+- Thinking kwargs: when the session level has an entry in the model's
+  `thinkingLevelMap`, that JSON object is merged **top-level** into the
+  request body (`stream()`). No map or no entry → nothing sent.
+- SSE parsing: `parse_data_line` classifies each line into
+  `DataLine::{Token, Done, Ignore, Malformed}`. `data: [DONE]` ends the
+  stream; a server closing without `[DONE]` is tolerated as complete.
+- Error mapping: `describe()` turns `ureq::Error::StatusCode(code)` into
+  `"chat request: server returned HTTP {code}"` (status code is usually the
+  whole diagnosis).
+
+Model listing (hybrid policy):
+- `list_models()` returns configured `models[].id` when non-empty (only
+  config entries can carry `contextWindow`/`reasoning`), otherwise
+  discovers live.
+- `discover_model_ids(base_url, api_key)` — `GET {baseUrl}/models`, overall
+  10s timeout, extracts `data[].id` **or** `models[].slug`, sorts +
+  dedups, and errors loudly when the JSON has neither shape (never fakes
+  "no models").
+- Timeouts live in one place: `bounded_agent()` — connect 15s, DNS resolve
+  10s, **no stream timeout** (turns think for minutes; the dropped receiver
+  is the cancel path).
+
+Debug safety: hand-written `Debug` prints `[set]` for the API key, never the
+value.
+
+## mock.rs — the no-network provider
+
+`MockProvider` (implements `Default`): canned reply, no network, no key.
+Streams `TurnStart` → `Token`s → `TurnEnd` in order; honors the dropped-
+receiver contract (`stops_when_receiver_is_dropped`). Ignores system prompts
+entirely. Used by `hi --mock` and by most TUI/core tests.
+
+## config.rs — `models.json`
+
+Path (identical on Linux/macOS): `$XDG_CONFIG_HOME/hi/models.json` when set
+and non-empty, else `~/.config/hi/models.json` (`config_dir()`,
+`models_path()`). Load errors are fatal at startup by design (the CLI tells
+the user to create one or use `--mock`).
+
+Types (serde, camelCase, **unknown fields ignored**):
+- `ModelsConfig { providers: BTreeMap<String, ProviderConfig> }` — the name
+  is just a lookup key; `BTreeMap` gives sorted iteration (autopick order).
+- `ProviderConfig { base_url ("baseUrl", required), api_key ("apiKey"),
+  models: Vec<ModelConfig> }`
+- `ModelConfig { id (required), name, reasoning, context_window
+  ("contextWindow", u32, informational), max_tokens ("maxTokens", u32),
+  thinking_level_map ("thinkingLevelMap", map of level name → arbitrary JSON
+  object) }`
+
+Credential resolution (`resolve_value`): `"$NAME"` / `"${NAME}"` read the
+environment once; missing variables become the empty string; anything else is
+a literal. Full details in [configuration.md](configuration.md).
+
+## selection.rs — which provider/model a session uses
+
+`resolve(config, provider: Option<&str>, model: Option<&str>,
+default_model: Option<&str>) -> Result<Selected, String>` where
+`Selected { provider, model }`. Precedence:
+
+1. Both flags → used as given (`--model` deliberately not validated: for
+   discovery providers the ids can only be known by asking the server).
+2. `--provider P` → first model P offers (configured list or live discovery).
+3. `--model M` → first provider **in sorted order whose configured list**
+   contains M; discovery-only providers cannot be selected this way.
+4. `defaultModel` from settings → only when **no** flags are given; stale or
+   malformed values fall through to autopick (never fail startup).
+5. Nothing → first provider in sorted order that offers any model; every
+   discovery failure is remembered and reported in the final error.
+
+`list_for(config, provider)` powers `--list-models`; errors name the causes
+(HTTP status, unrecognized JSON shape).
+
+## settings.rs — `settings.json`
+
+`Settings { default_model: Option<String> ("defaultModel"), thinking:
+Option<ThinkingLevel> }`, camelCase, unknown fields ignored. Path: next to
+`models.json` (`settings_path()`).
+
+- Missing file = `Settings::default()` (normal first-run state; tested).
+- Unparseable file = `Err` (surfaced, not silently ignored; tested).
+- `save()` creates parent dirs, writes pretty JSON + trailing newline.
+
+## thinking.rs — reasoning effort levels
+
+`enum ThinkingLevel { Off, Minimal, Low, Medium, High }`. `parse(name)` is
+case-insensitive; `name()` is the canonical lowercase form; serde uses the
+lowercase name. A level reaches the wire **only** via the model's
+`thinkingLevelMap` (see `openai.rs` above) — there is no provider knowledge
+in this file, the mapping is pure configuration.
+
+## system_prompt.rs — the prompt chain
+
+`DEFAULT_SYSTEM_PROMPT = "You are hi, a concise terminal assistant."`
+(one sentence — hi makes no tool promises).
+
+Resolution (`resolve()` / path-injected `resolve_from()`):
+1. default
+2. `SYSTEM.md` in the user config dir **replaces** it
+3. `SYSTEM.md` in the project's `.hi/` directory **replaces** that (closer to
+   the work wins)
+4. `APPEND_SYSTEM.md` user, then project, appended blank-line separated
+
+Whitespace-only files read as absent. The result travels as one leading
+`role: "system"` message. See [configuration.md](configuration.md) for paths.
+
+## test_support.rs — FakeApi (cfg(test) only)
+
+`FakeApi::start(response)` — minimal HTTP server on an ephemeral port
+(`127.0.0.1:0`), one accept loop, one connection per request (responses use
+`Connection: close`), records every raw request, answers each with the one
+canned response string. Helpers: `sse_response(&[frames])`,
+`json_response(body)`, `first_request()`. This is why the whole test suite
+needs no network. Usage patterns in [testing.md](testing.md).
