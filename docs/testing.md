@@ -12,6 +12,8 @@ cargo test           # full suite; NO network needed
 cargo run            # hi --mock needs no config
 ```
 
+CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI).
+
 Current count: **76 `#[test]` functions** (the README still says 43 — it
 lags; trust this file + `grep -c '#\[test\]' crates -r`). Per-module
 breakdown: selection 14, app 14, openai 10, status 7, system_prompt 6,

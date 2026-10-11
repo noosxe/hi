@@ -1,0 +1,7 @@
+# Single source of truth for the Rust channel. The nix dev shell
+# (`flake.nix`, `rust-bin.stable.latest`) and CI (`.github/workflows/ci.yml`,
+# `dtolnay/rust-toolchain@stable`) both track this channel; contributors
+# using rustup get it automatically.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
