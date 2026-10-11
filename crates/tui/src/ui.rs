@@ -1,11 +1,11 @@
 use hi_core::Message;
+use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
-use ratatui::style::{Stylize, Style};
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{List, ListItem, ListState, Block, Borders, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Widget, Wrap};
 use unicode_width::UnicodeWidthChar;
-use ratatui::Frame;
 
 use crate::app::App;
 
@@ -23,12 +23,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
     //   resting:    [stream 8] [input 3] [status 1]
     //   menu open:  [stream 5] [menu 3] [input 3] [status 1]
     //   long input: [stream 2] [input 8] [status 1]
-    let input_rows = crate::wrap::wrapped_row_count(&app.input, area.width as usize)
-        .clamp(1, 6) as u16;
+    let input_rows =
+        crate::wrap::wrapped_row_count(&app.input, area.width as usize).clamp(1, 6) as u16;
     let input_height = input_rows + 2; // rules
     let menu_h = app.menu_height().min(9 - input_height);
     let stream_h = 11 - input_height - menu_h;
-    let stream_area = Rect { height: stream_h, ..area };
+    let stream_area = Rect {
+        height: stream_h,
+        ..area
+    };
     let menu_area = Rect {
         y: area.y + stream_h,
         height: menu_h,
@@ -95,7 +98,6 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
     ));
 }
 
-
 /// The status row: cwd (branch) on the left, (provider) model on the
 /// right. All dim — decoration is never the star of the frame.
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
@@ -158,10 +160,11 @@ fn draw_completion(frame: &mut Frame, area: Rect, app: &App) {
     let mut state = ListState::default();
     state.select(Some(completion.selected));
     let list = List::new(items)
-        .block(Block::new().borders(Borders::ALL).title(format!(
-            " /{} ",
-            app.input.strip_prefix('/').unwrap_or("")
-        )))
+        .block(
+            Block::new()
+                .borders(Borders::ALL)
+                .title(format!(" /{} ", app.input.strip_prefix('/').unwrap_or(""))),
+        )
         .highlight_symbol("› ")
         .highlight_style(Style::new().bold());
     frame.render_stateful_widget(list, popup, &mut state);
@@ -221,9 +224,6 @@ pub fn message_into(msg: Message, buf: &mut Buffer) {
 /// Doubles as visual separation from whatever the terminal was
 /// showing before the app launched.
 pub fn welcome_into(buf: &mut Buffer) {
-    let line = Line::from(vec![
-        "hi".bold(),
-        " · say something, ctrl-c to quit".dim(),
-    ]);
+    let line = Line::from(vec!["hi".bold(), " · say something, ctrl-c to quit".dim()]);
     Paragraph::new(line).render(buf.area, buf);
 }

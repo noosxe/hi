@@ -137,8 +137,7 @@ impl ModelsConfig {
         let path = models_path().ok_or("could not determine config directory")?;
         let raw = std::fs::read_to_string(&path)
             .map_err(|err| format!("cannot read {}: {err}", path.display()))?;
-        serde_json::from_str(&raw)
-            .map_err(|err| format!("cannot parse {}: {err}", path.display()))
+        serde_json::from_str(&raw).map_err(|err| format!("cannot parse {}: {err}", path.display()))
     }
 }
 

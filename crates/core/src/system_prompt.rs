@@ -89,10 +89,7 @@ mod tests {
         let project = temp_dir("p-sys");
         fs::create_dir_all(project.join(".hi")).unwrap();
         fs::write(project.join(".hi/SYSTEM.md"), "project rules").unwrap();
-        assert_eq!(
-            resolve_from(Some(&user), Some(&project)),
-            "project rules"
-        );
+        assert_eq!(resolve_from(Some(&user), Some(&project)), "project rules");
     }
 
     #[test]

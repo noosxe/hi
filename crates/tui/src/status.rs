@@ -121,7 +121,11 @@ mod tests {
     fn detached_head_shows_short_sha() {
         let dir = temp_dir("detached");
         fs::create_dir_all(dir.join(".git")).unwrap();
-        fs::write(dir.join(".git/HEAD"), "0123456789abcdef0123456789abcdef01234567\n").unwrap();
+        fs::write(
+            dir.join(".git/HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
         assert_eq!(branch_from(&dir).as_deref(), Some("0123456"));
     }
 

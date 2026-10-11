@@ -82,7 +82,10 @@ mod tests {
 
     #[test]
     fn ascii_wraps_on_words() {
-        assert_eq!(wrap("hello brave world", 6), vec!["hello ", "brave ", "world"]);
+        assert_eq!(
+            wrap("hello brave world", 6),
+            vec!["hello ", "brave ", "world"]
+        );
     }
 
     #[test]

@@ -113,7 +113,7 @@ impl App {
             catalog,
             config,
             system_prompt,
-        thinking,
+            thinking,
             picker: None,
             completion: None,
             tick: 0,
@@ -206,10 +206,10 @@ impl App {
                 // next send fails and it returns — the same
                 // drop-is-cancellation mechanism as quitting.
                 // pi's behavior: partial output stays in the transcript.
-                if let Some(turn) = self.turn.take() {
-                    if !turn.text.is_empty() {
-                        self.messages.push(Message::Assistant(turn.text));
-                    }
+                if let Some(turn) = self.turn.take()
+                    && !turn.text.is_empty()
+                {
+                    self.messages.push(Message::Assistant(turn.text));
                 }
                 // Cancel means cancel everything: hand the queued
                 // text back so nothing typed is lost.
@@ -324,7 +324,6 @@ impl App {
         }
     }
 
-
     /// Rebuild the `/` completion menu from the current input: open
     /// while the text is a bare `/prefix` (no spaces yet — argument
     /// parsing is a future problem), closed otherwise.
@@ -373,10 +372,10 @@ impl App {
                 true
             }
             KeyCode::Down => {
-                if let Some(menu) = self.completion.as_mut() {
-                    if menu.selected + 1 < menu.items.len() {
-                        menu.selected += 1;
-                    }
+                if let Some(menu) = self.completion.as_mut()
+                    && menu.selected + 1 < menu.items.len()
+                {
+                    menu.selected += 1;
                 }
                 true
             }
@@ -411,7 +410,6 @@ impl App {
                 .push(Message::System(format!("unknown command: /{other}"))),
         }
     }
-
 
     /// What the input's right-side title shows while work is in
     /// flight; `None` renders a plain rule. New activity states
@@ -518,7 +516,12 @@ mod tests {
         let mut app = app();
         type_string(&mut app, "/mo");
         let completion = app.completion.as_ref().unwrap();
-        assert!(completion.items.iter().all(|(name, _)| name.starts_with("mo")));
+        assert!(
+            completion
+                .items
+                .iter()
+                .all(|(name, _)| name.starts_with("mo"))
+        );
         assert!(completion.items.iter().any(|(name, _)| *name == "model"));
     }
 
@@ -654,10 +657,11 @@ mod tests {
         // message in the transcript.
         assert!(app.turn.is_none());
         assert!(app.queued.is_none());
-        assert!(app
-            .messages
-            .iter()
-            .any(|m| matches!(m, Message::User(text) if text == "follow up")));
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| matches!(m, Message::User(text) if text == "follow up"))
+        );
     }
 
     #[test]
@@ -672,6 +676,3 @@ mod tests {
         assert_eq!(app.input, "saved text");
     }
 }
-
-
-

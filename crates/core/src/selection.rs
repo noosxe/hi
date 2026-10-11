@@ -38,10 +38,11 @@ pub fn resolve(
     // The saved default only speaks when flags are silent, and a
     // stale preference must never brick startup: fall through to the
     // flag/autopick paths instead of erroring.
-    if provider.is_none() && model.is_none() {
-        if let Some(selected) = default_model.and_then(|saved| from_saved(config, saved)) {
-            return Ok(selected);
-        }
+    if provider.is_none()
+        && model.is_none()
+        && let Some(selected) = default_model.and_then(|saved| from_saved(config, saved))
+    {
+        return Ok(selected);
     }
     match (provider, model) {
         (Some(name), Some(id)) => {
@@ -117,7 +118,6 @@ pub fn resolve(
     }
 }
 
-
 /// Parse and validate a saved `"provider/model"` preference. `None`
 /// when malformed or naming a provider the config no longer has —
 /// the model id itself is *not* checked, because discovery providers
@@ -127,13 +127,10 @@ fn from_saved(config: &ModelsConfig, saved: &str) -> Option<Selected> {
     if provider.is_empty() || model.is_empty() {
         return None;
     }
-    config
-        .providers
-        .contains_key(provider)
-        .then(|| Selected {
-            provider: provider.to_string(),
-            model: model.to_string(),
-        })
+    config.providers.contains_key(provider).then(|| Selected {
+        provider: provider.to_string(),
+        model: model.to_string(),
+    })
 }
 /// Which provider's models to print for `--list-models`: the explicit
 /// pick, else the first provider that answers with any model.
