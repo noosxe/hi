@@ -6,8 +6,8 @@
 
 mod app;
 mod commands;
-mod wrap;
 mod ui;
+mod wrap;
 
 pub mod catalog;
 pub mod status;
@@ -46,7 +46,7 @@ pub fn run(
     // try_init_with_options: enables raw mode, skips the alternate
     // screen, and installs a panic hook that restores the terminal.
     let mut terminal = ratatui::try_init_with_options(options)?;
-    terminal.insert_before(1, |buf| ui::welcome_into(buf))?;
+    terminal.insert_before(1, ui::welcome_into)?;
 
     let mut app = App::new(provider, status, catalog, config, system_prompt, thinking);
     let result = event_loop(&mut terminal, &mut app);
@@ -72,10 +72,7 @@ pub fn run(
     result
 }
 
-fn event_loop(
-    terminal: &mut ratatui::DefaultTerminal,
-    app: &mut App,
-) -> std::io::Result<()> {
+fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<()> {
     let mut printed = 0;
 
     while !app.quit {
@@ -83,10 +80,10 @@ fn event_loop(
         // either way. `poll` (unlike the blocking `read` we had
         // before) is what lets provider events arrive and render with
         // zero keyboard input — roughly 20 frames per second.
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                app.handle_key(key);
-            }
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(key) = event::read()?
+        {
+            app.handle_key(key);
         }
 
         // Deliver whatever the provider thread streamed this frame;

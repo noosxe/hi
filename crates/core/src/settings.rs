@@ -97,7 +97,8 @@ mod tests {
 
     #[test]
     fn save_then_load_round_trips() {
-        let dir = std::env::temp_dir().join(format!("hi-settings-{}-roundtrip", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("hi-settings-{}-roundtrip", std::process::id()));
         let path = dir.join("nested/settings.json");
         let original = Settings {
             default_model: Some("local/llama".into()),

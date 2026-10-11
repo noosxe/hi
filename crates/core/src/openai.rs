@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use crate::config::{ModelConfig, ProviderConfig};
 use crate::event::Event;
 use crate::message::Message;
-use crate::thinking::ThinkingLevel;
 use crate::provider::Provider;
+use crate::thinking::ThinkingLevel;
 
 /// A provider backed by any OpenAI-compatible HTTP endpoint.
 #[derive(Clone)]
@@ -56,7 +56,10 @@ impl std::fmt::Debug for OpenAiCompatProvider {
             .field("api_key", &self.api_key.as_ref().map(|_| "[set]"))
             .field("model", &self.model)
             .field("configured_models", &self.configured_models.len())
-            .field("system_prompt", &self.system_prompt.as_ref().map(|_| "[set]"))
+            .field(
+                "system_prompt",
+                &self.system_prompt.as_ref().map(|_| "[set]"),
+            )
             .field("thinking_level", &self.thinking_level.map(|l| l.name()))
             .finish()
     }
@@ -113,9 +116,7 @@ impl OpenAiCompatProvider {
     }
 
     /// The current model's `thinkingLevelMap`, if it has one.
-    fn thinking_level_map(
-        &self,
-    ) -> Option<&std::collections::BTreeMap<String, serde_json::Value>> {
+    fn thinking_level_map(&self) -> Option<&std::collections::BTreeMap<String, serde_json::Value>> {
         self.configured_models
             .iter()
             .find(|model| model.id == self.model)
@@ -176,18 +177,14 @@ impl OpenAiCompatProvider {
         // Merge the active thinking level's kwargs (from the model's
         // `thinkingLevelMap`) into the top-level body. Models without
         // a map, or levels without an entry, send nothing.
-        if let Some(level) = &self.thinking_level {
-            if let Some(kwargs) = self
+        if let Some(level) = &self.thinking_level
+            && let Some(kwargs) = self
                 .thinking_level_map()
                 .and_then(|map| map.get(level.name()))
-            {
-                if let (Some(body), Some(kwargs)) =
-                    (payload.as_object_mut(), kwargs.as_object())
-                {
-                    for (key, value) in kwargs {
-                        body.insert(key.clone(), value.clone());
-                    }
-                }
+            && let (Some(body), Some(kwargs)) = (payload.as_object_mut(), kwargs.as_object())
+        {
+            for (key, value) in kwargs {
+                body.insert(key.clone(), value.clone());
             }
         }
         let url = self.endpoint("chat/completions");
@@ -246,7 +243,8 @@ pub(crate) fn discover_model_ids(
     api_key: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let request = bounded_agent().get(&url)
+    let request = bounded_agent()
+        .get(&url)
         .config()
         .timeout_global(Some(Duration::from_secs(10)))
         .build();
@@ -254,7 +252,9 @@ pub(crate) fn discover_model_ids(
         Some(key) => request.header("Authorization", format!("Bearer {key}")),
         None => request,
     };
-    let response = request.call().map_err(|err| describe("model discovery", err))?;
+    let response = request
+        .call()
+        .map_err(|err| describe("model discovery", err))?;
     let value: serde_json::Value = response
         .into_body()
         .read_json()
@@ -330,7 +330,12 @@ fn parse_data_line(line: &str) -> DataLine {
     };
     // First choice, its delta content if present. Role-only and empty
     // deltas happen (openers, keep-alives) and are not tokens.
-    match chunk.choices.into_iter().next().and_then(|c| c.delta.content) {
+    match chunk
+        .choices
+        .into_iter()
+        .next()
+        .and_then(|c| c.delta.content)
+    {
         Some(content) if !content.is_empty() => DataLine::Token(content),
         _ => DataLine::Ignore,
     }
@@ -442,7 +447,10 @@ mod tests {
         assert_eq!(parse_data_line(": keep-alive"), DataLine::Ignore);
         assert_eq!(parse_data_line(""), DataLine::Ignore);
         // Garbage payload must not be silently dropped.
-        assert!(matches!(parse_data_line("data: {not json"), DataLine::Malformed(_)));
+        assert!(matches!(
+            parse_data_line("data: {not json"),
+            DataLine::Malformed(_)
+        ));
     }
 
     #[test]
@@ -517,10 +525,7 @@ mod tests {
         let provider = OpenAiCompatProvider::from_config(&cfg, "test-model")
             .with_system_prompt(Some("You are terse.".into()))
             .with_thinking_level(Some(ThinkingLevel::High));
-        let rx = spawn_turn(
-            Arc::new(provider),
-            &[Message::User("hi there".into())],
-        );
+        let rx = spawn_turn(Arc::new(provider), &[Message::User("hi there".into())]);
         let events: Vec<Event> = rx.iter().collect();
 
         assert_eq!(events.first(), Some(&Event::TurnStart));
@@ -537,7 +542,11 @@ mod tests {
 
         let request = api.first_request();
         assert!(request.starts_with("POST /v1/chat/completions"));
-        assert!(request.to_ascii_lowercase().contains("authorization: bearer sekrit"));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer sekrit")
+        );
         // send_json pretty-prints, so compare the body without
         // whitespace: collapse it all, then look for compact pairs.
         let compact: String = request.split_whitespace().collect();
@@ -548,7 +557,10 @@ mod tests {
         // before any user content.
         assert!(compact.contains("\"role\":\"system\""));
         assert!(compact.contains("Youareterse."));
-        assert!(compact.find("\"role\":\"system\"").unwrap() < compact.find("\"role\":\"user\"").unwrap());
+        assert!(
+            compact.find("\"role\":\"system\"").unwrap()
+                < compact.find("\"role\":\"user\"").unwrap()
+        );
         // The thinking level's kwargs merged into the request body.
         assert!(compact.contains("\"thinking\":{\"type\":\"enabled\"}"));
     }
@@ -573,8 +585,7 @@ mod tests {
         let api = FakeApi::start(
             "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         );
-        let provider =
-            OpenAiCompatProvider::new(api.base_url.clone(), Some("bad".into()), "m");
+        let provider = OpenAiCompatProvider::new(api.base_url.clone(), Some("bad".into()), "m");
         let rx = spawn_turn(Arc::new(provider), &[]);
         let events: Vec<Event> = rx.iter().collect();
 
@@ -591,7 +602,10 @@ mod tests {
     fn extracts_ids_from_both_response_shapes() {
         let openai: serde_json::Value =
             serde_json::from_str(r#"{"data":[{"id":"b"},{"id":"a"}]}"#).unwrap();
-        assert_eq!(extract_model_ids(&openai), vec!["b".to_string(), "a".to_string()]);
+        assert_eq!(
+            extract_model_ids(&openai),
+            vec!["b".to_string(), "a".to_string()]
+        );
 
         let catalog: serde_json::Value =
             serde_json::from_str(r#"{"models":[{"slug":"glm-5.3"},{"id":"glm-4.6"}]}"#).unwrap();
@@ -625,5 +639,4 @@ mod tests {
             vec!["glm-4.6".to_string(), "glm-5.3".to_string()]
         );
     }
-
 }

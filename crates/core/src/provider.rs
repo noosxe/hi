@@ -1,7 +1,7 @@
 //! The provider abstraction: a backend that can produce assistant turns.
 
 use std::sync::Arc;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
 use crate::event::Event;

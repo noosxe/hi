@@ -61,7 +61,9 @@ fn main() -> ExitCode {
     let config = match ModelsConfig::load() {
         Ok(config) => config,
         Err(err) => {
-            return fail(&format!("{err}\n  create one (see the README) or run with --mock"));
+            return fail(&format!(
+                "{err}\n  create one (see the README) or run with --mock"
+            ));
         }
     };
 
@@ -115,7 +117,10 @@ fn main() -> ExitCode {
         Err(err) => return fail(&err),
     };
     let entry = &config.providers[&selected.provider];
-    let provider = Arc::new(OpenAiCompatProvider::from_config(entry, selected.model.clone()));
+    let provider = Arc::new(OpenAiCompatProvider::from_config(
+        entry,
+        selected.model.clone(),
+    ));
     let status = Status {
         provider: selected.provider,
         model: selected.model,
