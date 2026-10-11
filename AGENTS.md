@@ -17,7 +17,10 @@ Always work inside the **nix dev shell** (`nix develop`): do not expect the
 Rust compiler or any other non-standard tool to exist on the host machine.
 When a task needs a new tool (formatter, linter, debugger, language server,
 etc.), add it to the dev shell in `flake.nix` instead of assuming it is
-preinstalled or installing it globally.
+preinstalled or installing it globally. This rule governs **local
+development only** — CI runs on plain GitHub Actions runners (see issue
+#7), kept on the same toolchain channel as `flake.nix` so local and CI
+builds match.
 
 ## Documentation
 
