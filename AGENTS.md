@@ -49,6 +49,13 @@ a later pass.
   anything about this repo, and web search / current upstream docs for
   anything about external tools, libraries, or APIs. Versions and behavior
   drift; memory of them does not count as evidence.
+- **All changes land via pull requests** — `main` is protected; work happens
+  on short-lived branches, one focused change per PR.
+- **Stay focused**: one task at a time, per the current issue/PR. Do not pull
+  adjacent work into the current change — file non-blocking side missions as
+  GitHub issues for later instead of doing them inline. Scope may grow only
+  for work that blocks the current task, and separable blockers become their
+  own PR first.
 - The event contract (single finalization path: `TurnStart` … `TurnEnd`,
   errors as `Event::Error` before `TurnEnd`) and the dropped-`Receiver`
   cancellation contract are load-bearing — see
