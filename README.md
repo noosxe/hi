@@ -244,3 +244,7 @@ Design notes worth keeping in mind:
   itself to the OS and burns a core for hours.
 - Errors are plain `String`s for now — descriptive and user-facing;
   a dedicated error type arrives when it earns its keep.
+
+## License
+
+Dual-licensed under either the [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) license (`SPDX: MIT OR Apache-2.0`) — choose whichever you prefer. All dependencies are permissively licensed.
