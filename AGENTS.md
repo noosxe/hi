@@ -56,6 +56,10 @@ a later pass.
   GitHub issues for later instead of doing them inline. Scope may grow only
   for work that blocks the current task, and separable blockers become their
   own PR first.
+- **Merge hygiene & explicit starts**: when the maintainer says a PR is
+  merged, clean up the merged branch (local and remote), switch to `main`,
+  and sync — that and nothing else. Never start a new task, issue, or PR
+  without an explicit go, even when the next step looks obvious.
 - The event contract (single finalization path: `TurnStart` … `TurnEnd`,
   errors as `Event::Error` before `TurnEnd`) and the dropped-`Receiver`
   cancellation contract are load-bearing — see
