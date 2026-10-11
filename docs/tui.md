@@ -96,7 +96,10 @@ to `settings.json` as `defaultModel`, Esc closes.
   refresh is polish for later.
 - `compose_status(left, right, width)` — one row, filler between, clips on
   narrow terminals, never panics.
-- An effort (thinking level) indicator will join the right side later.
+- Thinking display: when a level is set, `draw_status` appends
+  `· thinking:<level>` to the right label (e.g.
+  `(zai) glm-4.6 · thinking:high`); `Status::label()` itself stays
+  provider/model only.
 
 ## ui.rs — drawing (the only file allowed to draw)
 

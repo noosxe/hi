@@ -83,8 +83,8 @@ A credential *source*, not necessarily a literal:
 - `defaultModel` applies **only when no `--provider`/`--model` flags are
   given** (precedence in [core.md](core.md) → selection.rs).
 - `thinking` reaches the wire only through the selected model's
-  `thinkingLevelMap`; the status row will show the active level (indicator
-  display not yet built).
+  `thinkingLevelMap`; the active level is shown in the status row
+  (`(provider) model · thinking:high`).
 
 ## System prompt files
 

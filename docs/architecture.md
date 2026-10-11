@@ -100,8 +100,9 @@ Works today (see also README "What works today"):
   hybrid listing policy
 - Model selection precedence (flags → saved default → autopick), `/model`
   picker with Ctrl-S save, `/exit` + `/quit` commands, `/` completion
-- Thinking levels (`off`…`high`) mapped to request kwargs per model via
-  `thinkingLevelMap`
+- Thinking levels (`off`…`high`): settings key → per-model `thinkingLevelMap`
+  kwargs merged into the request body; the active level is shown in the
+  status row.
 - System-prompt override chain (user + project `.hi/` markdown files)
 - 76 `#[test]` functions, no network needed (see [testing.md](testing.md))
 
@@ -112,6 +113,4 @@ Deliberately not yet built:
   the extension wishlist (see [decisions.md](decisions.md)).
 - **Session persistence** — history is in-memory only, one process lifetime.
 - **Headless one-shot mode** — planned as a second branch in `crates/cli`.
-- **Effort indicator in the status row** — settings layer already has the
-  `thinking` key; display is missing.
 - **Extensions** — direction decided (Luau), nothing implemented.
