@@ -88,6 +88,20 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
     let mut block = ratatui::widgets::Block::default().borders(Borders::TOP | Borders::BOTTOM);
     // While work is in flight, the top rule carries a right-aligned
     // activity title; quiet sessions render a plain rule.
+    if let Some(note) = &app.note {
+        // Transient paste note (AD-0011): left-aligned on the same
+        // rule, error-tinted — the honest red a failed clipboard read
+        // deserves, gone at the next keypress.
+        block = block.title_top(
+            Line::from(vec![
+                Span::from(" "),
+                Span::from(format!("· {note}")).style(THEME.fg(Fg::Error)),
+                Span::from(" "),
+                Span::from("──"),
+            ])
+            .left_aligned(),
+        );
+    }
     if let Some(activity) = app.activity_label() {
         // Left margin, content, right margin — then two unstyled
         // rule characters: they overwrite the border seamlessly, so

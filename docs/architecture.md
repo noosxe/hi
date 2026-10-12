@@ -117,6 +117,10 @@ Works today (see also README "What works today"):
   escape-in-cell emission into scrollback, text-note fallback
   elsewhere (see [tui.md](tui.md), [decisions.md](decisions.md)
   AD-0010)
+- Paste: Ctrl-V stages a clipboard image at a temp file and inserts
+  the path as text — nothing sends until Enter, and context entry
+  stays `read`'s job (see [tui.md](tui.md),
+  [decisions.md](decisions.md) AD-0011)
 - `mock` + `hi_core::OpenAiCompatProvider` behind the one `Provider` trait
 - pi-style `models.json` with `$ENV` key interpolation, model discovery,
   hybrid listing policy
@@ -139,7 +143,7 @@ Works today (see also README "What works today"):
   selected by bundle (`--tools`, default `coding`), results clamped by one
   truncation contract, prompt notes woven into the system prompt (see
   [decisions.md](decisions.md), AD-0004)
-- 250 `#[test]` functions, no network needed (see [testing.md](testing.md))
+- 260 `#[test]` functions, no network needed (see [testing.md](testing.md))
 
 Deliberately not yet built:
 

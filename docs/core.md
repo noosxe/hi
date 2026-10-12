@@ -80,9 +80,10 @@ The harness ships tools, not just a loop. One file per tool under
 output contract), `walk.rs` (gitignore-aware directory walking for
 grep/find), `image_resize.rs` (read's attachment ladder —
 [decisions.md](decisions.md) AD-0009), and `image_util.rs`
-(presentation-side helpers the TUI's kitty renderer uses: header-only
-`dimensions` and `to_png` with a structural chunk-walk —
-[decisions.md](decisions.md) AD-0010).
+(presentation-side helpers: header-only `dimensions`, `to_png` with a
+structural chunk-walk for the kitty renderer — AD-0010 — and
+`from_rgba`, pixels → PNG for clipboard pastes —
+[decisions.md](decisions.md) AD-0011).
 
 - **The seven built-ins**: `read` (line-numbered, `offset`/`limit` paging;
   image files — png/jpeg/webp/gif, magic-byte sniffed, never extension-guessed — are

@@ -433,3 +433,62 @@ here, and we do not build it.
 variant away), sixel, halfblocks/ASCII art, pasted attachments
 (#41), animation.**
 
+---
+
+## AD-0011 — paste stages a reference; context entry stays `read`'s job (2026-10-15)
+
+**Status:** implemented (issue #41). Ruled on the thread: design A
+(reference staging, pi-parity) over design B (attachment chips that
+reshape `Message::User`).
+
+**The requirement:** a pasted image must never send itself. The design
+that honors it with the smallest blast radius is pi's own: Ctrl-V
+writes the clipboard image to `temp_dir()/hi-clipboard-*.png` and
+inserts the **path as inert text** into the input. Enter is the
+explicit send — and even then, the image reaches the model only when
+`read` runs on that path, through every rail already built: the
+`vision`/`images` gates, the resize ladder (AD-0009), honest
+not-attached notes, and kitty rendering in the transcript (AD-0010).
+A staged paste and an attached file are the same thing, by
+construction.
+
+**Rejected:** staged attachment chips with a `Message::User` reshape —
+a core protocol change (serde back-compat, new user-image wire parts,
+session JSONL bloated with base64 blobs, transcript rendering) to
+duplicate semantics `read` already owns.
+
+**The mechanics:**
+
+- **Clipboard access is arboard, off-thread.** One crate covers
+  macOS/Windows/X11/Wayland (with `wayland-data-control`), collapsing
+  pi's wl-paste/xclip/PowerShell subprocess matrix. The read runs on a
+  one-shot thread per press and reports through a channel the frame
+  loop drains — arboard's X11 backend can stall, and the UI must
+  never block on the clipboard. WSL's PowerShell fallback is a
+  non-goal (WSLg bridges the clipboard).
+- **arboard hands back raw RGBA**, never an encoded format — so core
+  gained `image_util::from_rgba` (pixels → PNG, shape-checked in u64
+  math). The only core touch; the TUI never encodes images itself.
+- **Order is pi's**: image first, then text (a screenshot must not be
+  shadowed by a stale X11 selection). Failure is a transient note in
+  the composer's title, cleared by the next keypress — a failed paste
+  is not an event, so it never enters the transcript or the session.
+- **Bracketed paste** came free in the same PR and fixed a latent
+  bug: without it, a terminal paste arrives as raw keystrokes and
+  every newline submits the input mid-paste. Enabled at startup,
+  `Event::Paste` appends verbatim (line endings normalized), disabled
+  at teardown.
+- **Paths collide with the command dispatcher** — found by test, not
+  by review: `/tmp/hi-clipboard-….png` entered alone was eaten as an
+  unknown `/tmp/...` command. The rule is now: a leading `/` dispatches
+  a command only when the rest contains no `/` (command names never
+  do; paths always do). Typo'd commands keep their teaching error.
+- **Staged files are never auto-deleted** (pi leaves its too): OS
+  temp hygiene owns cleanup, and the model may legitimately re-read
+  the path later in the session.
+
+**Non-goals:** Finder-style file-path pastes (pi's
+`readClipboardFilePaths` needs a native clipboard API arboard does
+not expose), attachment chips, pasted-image preview in the composer,
+WSL PowerShell fallback.
+
