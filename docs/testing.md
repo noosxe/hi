@@ -14,11 +14,10 @@ cargo run            # hi --mock needs no config
 
 CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI).
 
-Current count: **76 `#[test]` functions** (the README still says 43 — it
-lags; trust this file + `grep -c '#\[test\]' crates -r`). Per-module
-breakdown: selection 14, app 14, openai 10, status 7, system_prompt 6,
-settings 5, wrap 6, commands 4, config 4, mock 2, catalog 2, thinking 2.
-
+Current count: **88 `#[test]` functions** (the README's count gets refreshed in passing;
+trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: selection 14,
+app 14, openai 13, agent 9, status 7, system_prompt 6, wrap 6, settings 5, commands 4,
+config 4, mock 2, catalog 2, thinking 2.
 ## The central tool: `FakeApi` (`crates/core/src/test_support.rs`, cfg(test))
 
 A minimal HTTP server on an ephemeral port:
@@ -27,10 +26,16 @@ A minimal HTTP server on an ephemeral port:
   connection per request (responses carry `Connection: close`), answers every
   request with the one canned raw-HTTP response string, records each request
   verbatim; `base_url` is ready to drop into a `ProviderConfig`.
-- `first_request()` — the recorded first request (assert on the JSON body,
+- `first_request()` / `request(n)` — the recorded requests, verbatim (assert on JSON body,
   headers, absence of `Authorization`, …).
+- `start_sequence(responses)` — like `start`, but each request consumes the next response
+  (last one repeats): the agent loop's multi-round conversations need round-specific
+  answers.
 - `sse_response(&[frames])` / `json_response(body)` — build raw HTTP
   responses with correct `Content-Length`.
+- `ScriptedProvider` / `EchoTool` — a provider that replays scripted event rounds and
+  records the history each round received, plus an echo tool; together they test the agent
+  loop without any wire noise.
 
 Usage pattern (see any test in `openai.rs` or `selection.rs`):
 
@@ -71,8 +76,8 @@ assert!(api.first_request().contains("\"stream\":true"));
 | settings round-trip, missing/junk file, camelCase | `settings.rs` |
 | thinking level parse/serde | `thinking.rs` |
 | system prompt chain, whitespace-only files | `system_prompt.rs` |
-| SSE parsing, streaming end-to-end, discovery shapes, thinking kwargs on the wire, auth-header rules, error contract | `openai.rs` |
-| event ordering, receiver-drop cancellation | `mock.rs`, `openai.rs` |
+| tool registry rules, gate decisions (deny/mutate), loop rounds + cap, scripted replay | `agent.rs`, `tool.rs` |
+| SSE parsing, streaming end-to-end, discovery shapes, thinking kwargs on the wire, tool-call fragments + wire replay, auth-header rules, error contract | `openai.rs` |
 | git branch detection (HEAD ref, detached, worktree `.git` file, walk-up, no repo), status composition | `tui/status.rs` |
 | slash matching, exact dispatch, registry hygiene | `tui/commands.rs` |
 | catalog flattening, empty catalog | `tui/catalog.rs` |

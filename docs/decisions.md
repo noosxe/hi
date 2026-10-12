@@ -98,6 +98,28 @@ host; the Lua host wraps these seams rather than replacing them. The only
 extension wants that could land without tools are status-bar segments and
 slash commands.
 
+## AD-0003 — Tool system: separate variants, loop-owned stream, closure gate
+
+**Status:** implemented (issue #2).
+
+- `Message::ToolCall(ToolCall)` / `Message::ToolResult(ToolResult)` are separate
+  transcript entries, not fields on `Assistant` — rendering, wire replay, and tests treat
+  them as first-class, and `arguments` is kept as raw JSON text (the model's exact
+  words; the tool owns its schema).
+- The agent loop (`spawn_agent_turn`) owns the event stream: consumers see one
+  `TurnStart`/one `TurnEnd` per user message regardless of how many provider rounds or
+  tool executions happened. Round framing is an implementation detail.
+- Execution is sequential in proposal order — determinism over parallelism; background
+  tasks are #5's concern. Every proposed call produces exactly one result;
+  deny/unknown/invalid-JSON are error *results*, never `Event::Error`.
+- The interception seam is a plain `dyn Fn(&ToolCall) -> ToolDecision` (`ToolGate`). The
+  smallest thing that satisfies allow/deny/mutate; the Lua host (#6) backs this seam from
+  outside core, so core stays runtime-free (AD-0001's swappable-host rule).
+- Wire mapping: consecutive `Assistant` text + `ToolCall` history entries merge into ONE
+  assistant message (OpenAI's shape); results ride as `role:"tool"` + `tool_call_id`.
+  Streamed calls arrive as index-keyed fragments and surface as `Event::ToolCall`s after
+  the message's text tokens.
+
 ## Open items (parked)
 
 - Prototype the Luau↔tokio-style scheduler bridge (coroutines driving host

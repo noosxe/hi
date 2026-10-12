@@ -11,7 +11,10 @@
 //! on its own thread, so a blocking HTTP client is the simplest tool
 //! that keeps the UI responsive — no async runtime anywhere.
 
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
@@ -22,6 +25,7 @@ use crate::event::Event;
 use crate::message::Message;
 use crate::provider::Provider;
 use crate::thinking::ThinkingLevel;
+use crate::tool::{ToolCall, ToolRegistry, ToolResult};
 
 /// A provider backed by any OpenAI-compatible HTTP endpoint.
 #[derive(Clone)]
@@ -45,6 +49,9 @@ pub struct OpenAiCompatProvider {
     /// The session's thinking level; kwargs merge only when the
     /// current model's `thinkingLevelMap` has an entry for it.
     thinking_level: Option<ThinkingLevel>,
+    /// Tools the model may call. An empty registry omits the request's
+    /// `tools` field entirely (see `ChatRequest`).
+    tools: Arc<ToolRegistry>,
 }
 
 impl std::fmt::Debug for OpenAiCompatProvider {
@@ -61,6 +68,7 @@ impl std::fmt::Debug for OpenAiCompatProvider {
                 &self.system_prompt.as_ref().map(|_| "[set]"),
             )
             .field("thinking_level", &self.thinking_level.map(|l| l.name()))
+            .field("tools", &self.tools.len())
             .finish()
     }
 }
@@ -81,6 +89,7 @@ impl OpenAiCompatProvider {
             agent: bounded_agent(),
             system_prompt: None,
             thinking_level: None,
+            tools: Arc::new(ToolRegistry::new()),
         }
     }
 
@@ -99,6 +108,7 @@ impl OpenAiCompatProvider {
             agent: bounded_agent(),
             system_prompt: None,
             thinking_level: None,
+            tools: Arc::new(ToolRegistry::new()),
         }
     }
 
@@ -115,6 +125,13 @@ impl OpenAiCompatProvider {
         self
     }
 
+    /// Attach the tool registry the model may call from. An empty
+    /// registry (the default) sends no `tools` field — identical wire
+    /// behavior to not calling this.
+    pub fn with_tools(mut self, tools: Arc<ToolRegistry>) -> Self {
+        self.tools = tools;
+        self
+    }
     /// The current model's `thinkingLevelMap`, if it has one.
     fn thinking_level_map(&self) -> Option<&std::collections::BTreeMap<String, serde_json::Value>> {
         self.configured_models
@@ -161,16 +178,14 @@ impl OpenAiCompatProvider {
     fn stream(&self, history: &[Message], tx: &Sender<Event>) -> Result<(), String> {
         let mut messages = Vec::new();
         if let Some(system) = &self.system_prompt {
-            messages.push(WireMessage {
-                role: "system",
-                content: system,
-            });
+            messages.push(WireMessage::text("system", system));
         }
         messages.extend(wire_messages(history));
         let chat_request = ChatRequest {
             model: &self.model,
             messages,
             stream: true,
+            tools: self.tools.definitions(),
         };
         let mut payload = serde_json::to_value(&chat_request)
             .map_err(|err| format!("cannot serialize request: {err}"))?;
@@ -196,24 +211,39 @@ impl OpenAiCompatProvider {
         // The body reader is a plain `Read`; buffering turns it into
         // lines, which is exactly what SSE frames are.
         let buffered = BufReader::new(response.into_body().into_reader());
+        // Tool-call fragments stream in pieces and accumulate here,
+        // surfacing as `Event::ToolCall`s at stream end — after the
+        // text tokens, mirroring the protocol's own ordering (a
+        // message's content precedes its tool_calls).
+        let mut partials: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
         for line in buffered.lines() {
             let line = line.map_err(|err| format!("reading stream: {err}"))?;
-            match parse_data_line(&line) {
-                DataLine::Token(token) => {
-                    if tx.send(Event::Token(token)).is_err() {
-                        // Receiver dropped mid-stream: that is the
-                        // cancellation signal. Stop quietly — nobody
-                        // is listening for a final event.
+            for datum in parse_data_line(&line) {
+                match datum {
+                    DataLine::Token(token) => {
+                        if tx.send(Event::Token(token)).is_err() {
+                            // Receiver dropped mid-stream: that is the
+                            // cancellation signal. Stop quietly — nobody
+                            // is listening for a final event.
+                            return Ok(());
+                        }
+                    }
+                    DataLine::ToolFragments(fragments) => {
+                        for fragment in fragments {
+                            accumulate_fragment(&mut partials, fragment);
+                        }
+                    }
+                    DataLine::Done => {
+                        emit_tool_calls(partials, tx);
                         return Ok(());
                     }
+                    DataLine::Malformed(why) => return Err(why),
                 }
-                DataLine::Done => return Ok(()),
-                DataLine::Ignore => {}
-                DataLine::Malformed(why) => return Err(why),
             }
         }
         // Server closed without `[DONE]`: tolerate it and treat the
-        // stream as complete.
+        // stream as complete — same finalization as `[DONE]`.
+        emit_tool_calls(partials, tx);
         Ok(())
     }
 }
@@ -307,78 +337,205 @@ fn describe(action: &str, err: ureq::Error) -> String {
 }
 
 /// The outcome of one SSE line. Frames are `data: <payload>`;
-/// comments (`: ping`), event names, and blank lines are noise.
+/// comments (`: ping`), event names, and blank lines are noise. One
+/// chunk can carry a text delta, tool-call deltas, or both — the Vec
+/// keeps that defensive parsing free of special cases.
 #[derive(Debug, PartialEq)]
 enum DataLine {
     Token(String),
+    ToolFragments(Vec<ToolCallDelta>),
     Done,
-    Ignore,
     Malformed(String),
 }
 
-fn parse_data_line(line: &str) -> DataLine {
+fn parse_data_line(line: &str) -> Vec<DataLine> {
     let Some(payload) = line.strip_prefix("data:") else {
-        return DataLine::Ignore;
+        return Vec::new();
     };
     let payload = payload.trim();
     if payload == "[DONE]" {
-        return DataLine::Done;
+        return vec![DataLine::Done];
     }
     let chunk: StreamChunk = match serde_json::from_str(payload) {
         Ok(chunk) => chunk,
-        Err(err) => return DataLine::Malformed(format!("malformed stream payload: {err}")),
+        Err(err) => {
+            return vec![DataLine::Malformed(format!(
+                "malformed stream payload: {err}"
+            ))];
+        }
     };
-    // First choice, its delta content if present. Role-only and empty
-    // deltas happen (openers, keep-alives) and are not tokens.
-    match chunk
-        .choices
-        .into_iter()
-        .next()
-        .and_then(|c| c.delta.content)
+    // First choice only. Role-only and empty deltas happen (openers,
+    // keep-alives) and are not tokens.
+    let Some(choice) = chunk.choices.into_iter().next() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if let Some(content) = choice.delta.content
+        && !content.is_empty()
     {
-        Some(content) if !content.is_empty() => DataLine::Token(content),
-        _ => DataLine::Ignore,
+        out.push(DataLine::Token(content));
     }
+    if !choice.delta.tool_calls.is_empty() {
+        out.push(DataLine::ToolFragments(choice.delta.tool_calls));
+    }
+    out
 }
 
-/// One OpenAI chat request. `&'a str` borrows instead of cloning —
-/// the payload is built, sent, and dropped within one call.
+/// One OpenAI chat request. Borrowed strings (`&'a str`,
+/// `Cow<'a, str>`) instead of clones — the payload is built, sent, and
+/// dropped within one call.
 #[derive(Serialize)]
 struct ChatRequest<'a> {
     model: &'a str,
     messages: Vec<WireMessage<'a>>,
     stream: bool,
+    /// Tool definitions offered to the model. Empty ⇒ the field is
+    /// omitted entirely: servers vary on whether they accept an empty
+    /// array, and a session without tools should look exactly like a
+    /// session without tool support.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<serde_json::Value>,
 }
 
+/// One message on the wire. The optional fields make one struct cover
+/// every role hi sends — `skip_serializing_if` keeps each role's JSON
+/// exactly the shape its protocol role prescribes.
 #[derive(Serialize)]
 struct WireMessage<'a> {
     role: &'static str,
-    content: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<Cow<'a, str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<WireToolCall<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "tool_call_id")]
+    tool_call_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
 }
 
-/// Map the harness's history onto the wire. `Message::Error` and
-/// `Message::System` entries are local annotations — replaying them
-/// to the model as conversation turns would be meaningless, so they
-/// are dropped.
+impl<'a> WireMessage<'a> {
+    fn text(role: &'static str, content: &'a str) -> Self {
+        Self {
+            role,
+            content: Some(Cow::Borrowed(content)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    fn tool_result(result: &'a ToolResult) -> Self {
+        Self {
+            role: "tool",
+            content: Some(Cow::Borrowed(&result.content)),
+            tool_calls: None,
+            tool_call_id: Some(&result.call_id),
+            name: Some(&result.name),
+        }
+    }
+}
+
+/// One entry of an assistant message's `tool_calls` array.
+#[derive(Serialize)]
+struct WireToolCall<'a> {
+    id: &'a str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: WireFunction<'a>,
+}
+
+#[derive(Serialize)]
+struct WireFunction<'a> {
+    name: &'a str,
+    arguments: &'a str,
+}
+
+/// An assistant wire message under construction. Consecutive
+/// `Message::Assistant` text and `Message::ToolCall` entries merge into
+/// ONE assistant message, because that is the OpenAI shape — a
+/// message's text and its tool_calls live together. Replaying them as
+/// separate assistant turns would read as phantom messages.
+struct AssistantGroup<'a> {
+    text: Option<Cow<'a, str>>,
+    calls: Vec<WireToolCall<'a>>,
+}
+
+impl<'a> AssistantGroup<'a> {
+    fn flush(&mut self, out: &mut Vec<WireMessage<'a>>) {
+        if self.text.is_none() && self.calls.is_empty() {
+            return;
+        }
+        // `take` the pieces so the group can keep being reused within
+        // one `wire_messages` scan.
+        let text = self.text.take();
+        let calls = std::mem::take(&mut self.calls);
+        out.push(WireMessage {
+            role: "assistant",
+            content: text,
+            tool_calls: if calls.is_empty() { None } else { Some(calls) },
+            tool_call_id: None,
+            name: None,
+        });
+    }
+}
+
+/// Map the harness's history onto the wire.
+///
+/// Grouping rules, chosen to round-trip exactly what the agent loop
+/// built:
+/// - `Message::Error` and `Message::System` entries are local
+///   annotations — replaying them as conversation turns would be
+///   meaningless, so they are dropped.
+/// - `Assistant` text and `ToolCall`s merge into one assistant message
+///   (see `AssistantGroup`).
+/// - Each `ToolResult` follows as its own `role: "tool"` message,
+///   pointing at its call via `tool_call_id`.
 fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
-    history
-        .iter()
-        .filter_map(|msg| {
-            let role = match msg {
-                Message::Error(_) | Message::System(_) => return None,
-                Message::User(_) => "user",
-                Message::Assistant(_) => "assistant",
-            };
-            Some(WireMessage {
-                role,
-                content: msg.text(),
-            })
-        })
-        .collect()
+    let mut out: Vec<WireMessage<'_>> = Vec::new();
+    let mut group = AssistantGroup {
+        text: None,
+        calls: Vec::new(),
+    };
+    for message in history {
+        match message {
+            Message::User(text) => {
+                group.flush(&mut out);
+                out.push(WireMessage::text("user", text));
+            }
+            Message::Error(_) | Message::System(_) => {}
+            Message::Assistant(text) => match &mut group.text {
+                // Merge consecutive assistant texts (rare, but history
+                // is caller-built — never lose a word).
+                Some(existing) => {
+                    let merged = format!("{existing}{text}");
+                    *existing = Cow::Owned(merged);
+                }
+                None => group.text = Some(Cow::Borrowed(text)),
+            },
+            Message::ToolCall(call) => {
+                group.calls.push(WireToolCall {
+                    id: &call.id,
+                    kind: "function",
+                    function: WireFunction {
+                        name: &call.name,
+                        arguments: &call.arguments,
+                    },
+                });
+            }
+            Message::ToolResult(result) => {
+                // The assistant message carrying the calls must precede
+                // its results on the wire.
+                group.flush(&mut out);
+                out.push(WireMessage::tool_result(result));
+            }
+        }
+    }
+    group.flush(&mut out);
+    out
 }
 
-/// One streamed chunk. Only `choices[0].delta.content` matters to hi;
-/// everything else (ids, finish reasons, usage) is ignored by serde.
+/// One streamed chunk. `choices[0]` is all hi reads; ids, finish
+/// reasons, and usage are ignored by serde.
 #[derive(Deserialize)]
 struct StreamChunk {
     #[serde(default)]
@@ -395,6 +552,82 @@ struct StreamChoice {
 struct Delta {
     #[serde(default)]
     content: Option<String>,
+    /// OpenAI streams a tool call in index-keyed fragments: the first
+    /// chunk carries `id` and `function.name`, later chunks append
+    /// `function.arguments` pieces — never the whole call at once.
+    #[serde(default)]
+    tool_calls: Vec<ToolCallDelta>,
+}
+
+#[derive(Deserialize, Default, Debug, PartialEq)]
+struct ToolCallDelta {
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<ToolCallFunctionDelta>,
+}
+
+#[derive(Deserialize, Default, Debug, PartialEq)]
+struct ToolCallFunctionDelta {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+/// Accumulator for one in-flight streamed tool call.
+#[derive(Default)]
+struct PartialToolCall {
+    id: Option<String>,
+    name: String,
+    arguments: String,
+}
+
+/// Fold one streamed fragment into the accumulator map, keyed by the
+/// fragment's `index` — the protocol's own ordering key for parallel
+/// calls streaming interleaved.
+fn accumulate_fragment(partials: &mut BTreeMap<usize, PartialToolCall>, delta: ToolCallDelta) {
+    let entry = partials.entry(delta.index).or_default();
+    if entry.id.is_none() {
+        entry.id = delta.id;
+    }
+    if let Some(function) = delta.function {
+        if let Some(name) = function.name {
+            entry.name.push_str(&name);
+        }
+        if let Some(arguments) = function.arguments {
+            entry.arguments.push_str(&arguments);
+        }
+    }
+}
+
+/// Turn accumulated fragments into finished calls, in index order. A
+/// call whose server never sent an id gets `call_{index}` — every
+/// result still needs something to point back at.
+fn finalize_tool_calls(partials: BTreeMap<usize, PartialToolCall>) -> Vec<ToolCall> {
+    partials
+        .into_iter()
+        .map(|(index, partial)| ToolCall {
+            id: partial.id.unwrap_or_else(|| format!("call_{index}")),
+            name: partial.name,
+            arguments: partial.arguments,
+        })
+        .collect()
+}
+
+/// Surface accumulated calls as `Event::ToolCall`s, in index order —
+/// after the assistant message's text tokens, mirroring the protocol's
+/// own field order.
+fn emit_tool_calls(partials: BTreeMap<usize, PartialToolCall>, tx: &Sender<Event>) {
+    for call in finalize_tool_calls(partials) {
+        // A failed send is the dropped-receiver cancellation, not an
+        // error to report.
+        if tx.send(Event::ToolCall(call)).is_err() {
+            return;
+        }
+    }
 }
 
 /// Pull model ids out of a `/models` response. The OpenAI shape is
@@ -428,28 +661,30 @@ fn extract_model_ids(value: &serde_json::Value) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::provider::spawn_turn;
-    use crate::test_support::{FakeApi, json_response, sse_response};
+    use crate::test_support::{EchoTool, FakeApi, json_response, sse_response};
+    use crate::{Event, spawn_agent_turn};
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     #[test]
     fn parses_sse_data_lines() {
         assert_eq!(
             parse_data_line("data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}"),
-            DataLine::Token("Hi".into())
+            vec![DataLine::Token("Hi".into())]
         );
-        assert_eq!(parse_data_line("data: [DONE]"), DataLine::Done);
+        assert_eq!(parse_data_line("data: [DONE]"), vec![DataLine::Done]);
         // Role-only opener chunk: no content, not a token.
         assert_eq!(
             parse_data_line("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}"),
-            DataLine::Ignore
+            Vec::new()
         );
         // SSE comments and stray lines are noise.
-        assert_eq!(parse_data_line(": keep-alive"), DataLine::Ignore);
-        assert_eq!(parse_data_line(""), DataLine::Ignore);
+        assert_eq!(parse_data_line(": keep-alive"), Vec::new());
+        assert_eq!(parse_data_line(""), Vec::new());
         // Garbage payload must not be silently dropped.
         assert!(matches!(
-            parse_data_line("data: {not json"),
-            DataLine::Malformed(_)
+            parse_data_line("data: {not json").as_slice(),
+            [DataLine::Malformed(_)]
         ));
     }
 
@@ -563,6 +798,132 @@ mod tests {
         );
         // The thinking level's kwargs merged into the request body.
         assert!(compact.contains("\"thinking\":{\"type\":\"enabled\"}"));
+    }
+
+    #[test]
+    fn fragments_accumulate_into_calls_in_index_order() {
+        let mut partials: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
+        // Call 1 streams in pieces; call 0 arrives interleaved between
+        // call 1's fragments.
+        for delta in [
+            r#"{"index":1,"id":"call_b","function":{"name":"write","arguments":"{\"pa"}}"#,
+            r#"{"index":0,"id":"call_a","function":{"name":"read","arguments":"{}"}}"#,
+            r#"{"index":1,"function":{"arguments":"th\":\"x\"}"}}"#,
+        ] {
+            let delta: ToolCallDelta = serde_json::from_str(delta).unwrap();
+            accumulate_fragment(&mut partials, delta);
+        }
+        let calls = finalize_tool_calls(partials);
+        assert_eq!(calls.len(), 2);
+        // Index order, fragments concatenated, ids kept.
+        assert_eq!(calls[0].id, "call_a");
+        assert_eq!(calls[0].name, "read");
+        assert_eq!(calls[0].arguments, "{}");
+        assert_eq!(calls[1].id, "call_b");
+        assert_eq!(calls[1].name, "write");
+        assert_eq!(calls[1].arguments, r#"{"path":"x"}"#);
+
+        // A call whose server never sent an id gets a synthesized one.
+        let mut partials: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
+        let delta: ToolCallDelta =
+            serde_json::from_str(r#"{"index":2,"function":{"name":"go","arguments":"{}"}}"#)
+                .unwrap();
+        accumulate_fragment(&mut partials, delta);
+        assert_eq!(finalize_tool_calls(partials)[0].id, "call_2");
+    }
+
+    #[test]
+    fn streamed_tool_calls_surface_after_text_tokens() {
+        let api = FakeApi::start(sse_response(&[
+            "{\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}",
+            "{\"choices\":[{\"delta\":{\"content\":\"Let me look. \"}}]}",
+            "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"p\\\":\"}}]}}]}",
+            "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"src\\\"}\"}}]}}]}",
+            "[DONE]",
+        ]));
+        let provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "m");
+        let events: Vec<Event> = spawn_turn(Arc::new(provider), &[Message::User("look".into())])
+            .iter()
+            .collect();
+
+        assert_eq!(events.first(), Some(&Event::TurnStart));
+        assert_eq!(events.last(), Some(&Event::TurnEnd));
+        // Text first, then the assembled call, then the turn closes.
+        assert_eq!(events[1], Event::Token("Let me look. ".into()));
+        assert_eq!(
+            events[2],
+            Event::ToolCall(ToolCall {
+                id: "call_1".into(),
+                name: "read".into(),
+                arguments: r#"{"p":"src"}"#.into(),
+            })
+        );
+        assert_eq!(events[3], Event::TurnEnd);
+    }
+
+    #[test]
+    fn tools_and_results_round_trip_on_the_wire() {
+        // Round 1 asks for the tool; round 2 settles.
+        let api = FakeApi::start_sequence(vec![
+            sse_response(&[
+                "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_x\",\"function\":{\"name\":\"echo\",\"arguments\":\"{}\"}}]}}]}",
+                "[DONE]",
+            ]),
+            sse_response(&[
+                "{\"choices\":[{\"delta\":{\"content\":\"done\"}}]}",
+                "[DONE]",
+            ]),
+        ]);
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).unwrap();
+        let registry = Arc::new(registry);
+        let provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "m")
+            .with_tools(Arc::clone(&registry));
+        let events: Vec<Event> = spawn_agent_turn(
+            Arc::new(provider),
+            registry,
+            None,
+            &[Message::User("go".into())],
+            4,
+        )
+        .iter()
+        .collect();
+
+        assert!(!events.iter().any(|event| matches!(event, Event::Error(_))));
+        assert_eq!(events.last(), Some(&Event::TurnEnd));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::ToolCall(_)))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::ToolResult(r) if !r.is_error))
+        );
+
+        // Request 1 offered the tool.
+        let compact: String = api.request(0).unwrap().split_whitespace().collect();
+        // `json!` sorts keys alphabetically, so `function` precedes
+        // `type` here — stable order is what matters, not key order.
+        assert!(compact.contains("\"tools\":[{\"function\":"));
+        assert!(compact.contains("\"type\":\"function\""));
+        assert!(compact.contains("\"name\":\"echo\""));
+
+        // Request 2 replayed the exchange in OpenAI's shapes: one
+        // assistant message carrying the call, then a tool message
+        // pointing back at it.
+        let compact: String = api.request(1).unwrap().split_whitespace().collect();
+        // Key order is alphabetical on the wire (`to_value` routes
+        // through serde_json's sorted map), so assert content, not
+        // order: the assistant message carries the call, and the tool
+        // message points back at it via `tool_call_id`.
+        assert!(compact.contains("\"tool_calls\":["));
+        assert!(compact.contains("\"id\":\"call_x\""));
+        assert!(compact.contains("\"role\":\"tool\""));
+        assert!(compact.contains("\"tool_call_id\":\"call_x\""));
+        assert!(compact.contains("\"content\":\"echo{}\""));
+        assert!(compact.contains("\"tools\":["));
     }
 
     #[test]

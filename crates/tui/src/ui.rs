@@ -216,6 +216,18 @@ pub fn message_into(msg: Message, buf: &mut Buffer) {
         Message::Assistant(text) => Line::from(vec!["assistant ".dim(), text.into()]),
         Message::Error(text) => Line::from(vec!["error ".red(), text.into()]),
         Message::System(text) => Line::from(text).style(Style::new().dim()),
+        Message::ToolCall(call) => Line::from(vec![
+            "tool ".dim(),
+            format!("{}({})", call.name, call.arguments).yellow(),
+        ]),
+        Message::ToolResult(result) => Line::from(vec![
+            if result.is_error {
+                "result ".red()
+            } else {
+                "result ".dim()
+            },
+            result.content.into(),
+        ]),
     };
     Paragraph::new(line).render(buf.area, buf);
 }

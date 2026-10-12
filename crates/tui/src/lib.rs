@@ -22,7 +22,7 @@ use ratatui::crossterm::event::{self, Event};
 use ratatui::{TerminalOptions, Viewport};
 
 use crate::app::App;
-use hi_core::{ModelsConfig, Provider, ThinkingLevel};
+use hi_core::{ModelsConfig, Provider, ThinkingLevel, ToolRegistry};
 
 /// Run the interactive interface until the user quits.
 pub fn run(
@@ -32,6 +32,7 @@ pub fn run(
     config: ModelsConfig,
     system_prompt: Option<String>,
     thinking: Option<ThinkingLevel>,
+    tools: Arc<ToolRegistry>,
 ) -> std::io::Result<()> {
     // Inline mode: NO alternate screen. The terminal keeps its normal
     // buffer and scrollback — we manage only the bottom 12 rows (an
@@ -48,7 +49,15 @@ pub fn run(
     let mut terminal = ratatui::try_init_with_options(options)?;
     terminal.insert_before(1, ui::welcome_into)?;
 
-    let mut app = App::new(provider, status, catalog, config, system_prompt, thinking);
+    let mut app = App::new(
+        provider,
+        status,
+        catalog,
+        config,
+        system_prompt,
+        thinking,
+        tools,
+    );
     let result = event_loop(&mut terminal, &mut app);
 
     // Teardown, in order:
