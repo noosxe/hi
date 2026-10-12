@@ -290,6 +290,9 @@ impl App {
                     let settings = Settings {
                         default_model: Some(item.clone()),
                         thinking: None,
+                        // Ctrl-S persists only the model choice; the tool
+                        // bundle stays whatever the user configured.
+                        default_tools: None,
                     };
                     match settings.save() {
                         Ok(()) => self
@@ -326,11 +329,15 @@ impl App {
         self.provider = Arc::new(
             OpenAiCompatProvider::from_config(entry, model)
                 .with_system_prompt(self.system_prompt.clone())
-                .with_thinking_level(self.thinking),
+                .with_thinking_level(self.thinking)
+                // The /model switch must not drop the tool registry from
+                // the wire — re-attach exactly what startup attached.
+                .with_tools(Arc::clone(&self.tools)),
         );
         self.status = Status {
             provider: provider.to_string(),
             model: model.to_string(),
+            tool_count: self.status.tool_count,
         };
     }
 
@@ -539,6 +546,7 @@ mod tests {
             Status {
                 provider: "mock".into(),
                 model: "mock".into(),
+                tool_count: 0,
             },
             Catalog::default(),
             ModelsConfig::default(),

@@ -74,13 +74,17 @@ A credential *source*, not necessarily a literal:
 ```jsonc
 {
   "defaultModel": "zai/glm-5.3",   // "provider/model"; stale/malformed falls through to autopick
-  "thinking": "high"               // off | minimal | low | medium | high; optional
+  "thinking": "high",              // off | minimal | low | medium | high; optional
+  "defaultTools": "coding"         // none | read-only | coding | all; --tools overrides per run
 }
 ```
 
 - Missing file = defaults (normal first-run state). Unparseable file = error
   (surfaced, not ignored) — only `models.json` gets the
   "create one" startup hint.
+- `defaultTools` picks the built-in tool bundle (`none`, `read-only`,
+  `coding`, `all`); the `--tools` flag wins per run, and an unknown value
+  fails startup loudly in both places.
 - `defaultModel` applies **only when no `--provider`/`--model` flags are
   given** (precedence in [core.md](core.md) → selection.rs).
 - `thinking` reaches the wire only through the selected model's

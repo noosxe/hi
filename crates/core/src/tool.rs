@@ -93,6 +93,12 @@ pub trait Tool: Send + Sync {
     fn annotations(&self) -> ToolAnnotations {
         ToolAnnotations::default()
     }
+    /// One model-facing usage hint, woven into the system prompt when the
+    /// tool is registered ("use read instead of cat"). `None` contributes
+    /// nothing. Defaults to `None`.
+    fn prompt_note(&self) -> Option<String> {
+        None
+    }
     /// Run the tool. `arguments` is the raw JSON text (validated as
     /// parseable JSON by dispatch, but *not* schema-checked — the tool
     /// owns its schema). `Ok` is a success result, `Err` an error
@@ -163,6 +169,21 @@ impl ToolRegistry {
                 })
             })
             .collect()
+    }
+
+    /// Prompt contributions from registered tools, one bullet per tool that
+    /// has one, in wire (sorted) order. The system prompt weaves this in so
+    /// tool metadata teaches the model, not just the harness.
+    pub fn prompt_notes(&self) -> String {
+        let mut notes = String::new();
+        for tool in self.tools.values() {
+            if let Some(note) = tool.prompt_note() {
+                notes.push_str("- ");
+                notes.push_str(&note);
+                notes.push('\n');
+            }
+        }
+        notes
     }
 }
 

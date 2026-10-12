@@ -113,11 +113,15 @@ Works today (see also README "What works today"):
 - Headless mode: `hi -p "prompt"` (piped stdin prepended) runs one turn
   through the same loop and prints the final text — errors on stderr,
   empty stdout, non-zero exit; `--no-session` for ephemeral runs
-- 99 `#[test]` functions, no network needed (see [testing.md](testing.md))
+- Built-in tools: read/bash/edit/write/grep/find/ls ship in `core/tools/`,
+  selected by bundle (`--tools`, default `coding`), results clamped by one
+  truncation contract, prompt notes woven into the system prompt (see
+  [decisions.md](decisions.md), AD-0004)
+- 155 `#[test]` functions, no network needed (see [testing.md](testing.md))
 
 Deliberately not yet built:
 
-- **Built-in tools** — the tool *system* is in (registry, gate, loop); no tools are shipped
-  yet, so sessions still run with an empty registry. Subagents (#4), background tasks (#5),
-  and the Lua host (#6) build on it.
+- **Subagents, background tasks, the Luau extension host** — the loop, the
+  tool seam, and the tool set they need are in place. Subagents (#4),
+  background tasks (#5), and the Lua host (#6) build on them.
 - **Extensions** — direction decided (Luau), nothing implemented.
