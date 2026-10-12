@@ -14,9 +14,10 @@ cargo run            # hi --mock needs no config
 
 CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI).
 
-Current count: **224 `#[test]` functions** (the README's count gets refreshed in passing;
-trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 59
-(grep 8, walk 7, truncate 7, read 11, edit 6, bundle 5, bash 5, find 4, write 3, ls 3),
+Current count: **231 `#[test]` functions** (the README's count gets refreshed in passing;
+trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 66
+(grep 8, walk 7, truncate 7, read 12, image_resize 6, edit 6, bundle 5, bash 5, find 4,
+write 3, ls 3),
 markdown 19, selection 14, app 17, openai 21, ui 13, agent 10, status 8, session 12,
 system_prompt 6, wrap 6, settings 11, headless 5, picker 4, commands 4, config 5,
 theme 3, mock 2, catalog 2, thinking 2, cli 1.
@@ -92,7 +93,7 @@ assert!(api.first_request().contains("\"stream\":true"));
 | `/resume` opens/filters/switches, Esc closes untouched, refused mid-turn | `tui/app.rs` |
 | selection flags' clap conflict matrix (pi's rules; `--name` pairs with start/fork only) | `cli/main.rs` |
 | wire identity: UA format + presence on chat/discovery, gated attribution (host-exact OpenRouter), cache-key body field, byte-stable prefix across turns; `HI_TELEMETRY`-beats-setting resolution | `core/openai.rs`, `core/settings.rs` |
-| images in read: magic-byte sniffing (never extensions), attach/withhold/oversize policy notes, base64 round-trip; synthetic user carrier + image-only placeholder on the wire; carrier determinism under the byte-stable prefix; image session round-trip + pre-image files load; `vision`/`images` flag parsing | `core/tools/read.rs`, `core/openai.rs`, `core/session.rs`, `core/config.rs`, `core/settings.rs`, `tui/ui.rs` |
+| images in read: magic-byte sniffing (never extensions), attach/withhold policy notes, base64 round-trip; the resize ladder — byte-identical pass-through, dimension scaling, JPEG transcode under budget, unshrinkable refusal, raw/decode guards; synthetic user carrier + image-only placeholder on the wire; carrier determinism under the byte-stable prefix; image session round-trip + pre-image files load; `vision`/`images` flag parsing | `core/tools/read.rs`, `core/tools/image_resize.rs`, `core/openai.rs`, `core/session.rs`, `core/config.rs`, `core/settings.rs`, `tui/ui.rs` |
 | slash matching, exact dispatch, registry hygiene | `tui/commands.rs` |
 | catalog flattening, empty catalog | `tui/catalog.rs` |
 | queueing, Esc-cancel + queue restore, completion keys, unknown commands | `tui/app.rs` |

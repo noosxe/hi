@@ -1,18 +1,14 @@
 //! `read` — file contents, line-numbered, paged with `offset`/`limit`.
 //! Image files (png/jpeg/webp/gif, magic-byte sniffed) are attached
-//! for the model when the startup policy allows it.
+//! for the model when the startup policy allows it, after the
+//! [`super::image_resize`] ladder fits them to a universal budget
+//! (AD-0009).
 
 use super::truncate;
 use super::{args_object, is_probably_binary, opt_str, opt_usize, resolve_path};
 use crate::tool::{ImageBlock, Tool, ToolAnnotations, ToolOutput};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::path::PathBuf;
-
-/// Above this, an image is noted but not attached — the wire ceiling
-/// is far higher, but models rasterize to a fixed input size anyway,
-/// so past ~5 MB the bytes are cost without detail (downscaling is
-/// issue #43).
-pub(crate) const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
 pub struct ReadTool {
     cwd: PathBuf,
@@ -38,10 +34,10 @@ impl ReadTool {
     }
 
     /// Build the image result: a metadata note for the model, plus the
-    /// attachment when policy and size allow. The note always tells
-    /// the truth about what happened — attached, disabled, or too
-    /// large — so a non-vision model never wonders where its image
-    /// went.
+    /// attachment when policy and the resize ladder allow. The note
+    /// always tells the truth about what happened — attached, disabled,
+    /// resized, transcoded, undecodable — so a model never wonders
+    /// where its image went or why it looks different.
     fn read_image(&self, mime: &'static str, bytes: &[u8]) -> ToolOutput {
         let note = format!(
             "Read image file [{mime}, {}]",
@@ -53,21 +49,30 @@ impl ReadTool {
                 images: Vec::new(),
             };
         }
-        if bytes.len() > MAX_IMAGE_BYTES {
-            return ToolOutput {
-                content: format!(
-                    "{note} (not attached: {} exceeds the 5 MB attachment limit)",
-                    human_size(bytes.len() as u64)
-                ),
+        // The ladder runs once, here — before the image enters
+        // history. History stores the resized bytes, so replays are
+        // byte-stable (AD-0007) and the work is never redone.
+        match super::image_resize::process(bytes, mime) {
+            Ok(processed) => {
+                let mut detail = String::new();
+                if let Some((ow, oh, w, h)) = processed.resized {
+                    detail.push_str(&format!(", resized {ow}×{oh} → {w}×{h}"));
+                }
+                if let Some(from) = processed.converted_from {
+                    detail.push_str(&format!(", converted from {from}"));
+                }
+                ToolOutput {
+                    content: format!("{note}{detail} (attached)"),
+                    images: vec![ImageBlock {
+                        data: STANDARD.encode(&processed.bytes),
+                        mime_type: processed.mime_type.into(),
+                    }],
+                }
+            }
+            Err(err) => ToolOutput {
+                content: format!("{note} (not attached: {})", err.note()),
                 images: Vec::new(),
-            };
-        }
-        ToolOutput {
-            content: format!("{note} (attached)"),
-            images: vec![ImageBlock {
-                data: STANDARD.encode(bytes),
-                mime_type: mime.into(),
-            }],
+            },
         }
     }
 }
@@ -89,7 +94,7 @@ pub(crate) fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-fn human_size(bytes: u64) -> String {
+pub(crate) fn human_size(bytes: u64) -> String {
     let kb = bytes as f64 / 1024.0;
     if kb < 1024.0 {
         format!("{kb:.1} KB")
@@ -320,11 +325,20 @@ mod tests {
         let err = tool(&root).execute(r#"{"path":"nope.txt"}"#).unwrap_err();
         assert!(err.contains("cannot read"), "got: {err}");
     }
+    /// A real 1×1 PNG: small enough that the resize ladder must pass
+    /// it through byte-identical.
+    fn tiny_png_bytes() -> Vec<u8> {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+            .unwrap()
+    }
+
     #[test]
     fn images_are_attached_when_policy_allows() {
         let root = temp_root("image");
-        let bytes: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
-        std::fs::write(root.join("shot.png"), bytes).unwrap();
+        let bytes = tiny_png_bytes();
+        std::fs::write(root.join("shot.png"), &bytes).unwrap();
         let out = tool(&root)
             .allow_images(true)
             .execute_with_images(r#"{"path":"shot.png"}"#)
@@ -335,9 +349,37 @@ mod tests {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(&out.images[0].data)
             .unwrap();
-        assert_eq!(decoded, bytes);
+        assert_eq!(decoded, bytes, "a fitting image is attached untouched");
         assert!(out.content.contains("Read image file [image/png"));
         assert!(out.content.contains("(attached)"));
+    }
+
+    #[test]
+    fn oversized_screenshots_are_resized_with_an_honest_note() {
+        let root = temp_root("bigshot");
+        let img = image::DynamicImage::new_rgb8(2200, 1500);
+        let mut bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        std::fs::write(root.join("shot.png"), &bytes).unwrap();
+        let out = tool(&root)
+            .allow_images(true)
+            .execute_with_images(r#"{"path":"shot.png"}"#)
+            .unwrap();
+        assert_eq!(out.images.len(), 1);
+        assert!(
+            out.content
+                .contains("Read image file [image/png")
+                .then_some(())
+                .is_some()
+        );
+        assert!(
+            out.content
+                .contains(", resized 2200×1500 → 2000×1363 (attached)")
+        );
     }
 
     #[test]
@@ -361,19 +403,17 @@ mod tests {
     }
 
     #[test]
-    fn oversized_images_are_noted_not_attached() {
-        let root = temp_root("big");
-        let bytes = vec![0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
-            .into_iter()
-            .chain(std::iter::repeat_n(0u8, MAX_IMAGE_BYTES))
-            .collect::<Vec<_>>();
-        std::fs::write(root.join("big.png"), &bytes).unwrap();
+    fn corrupt_image_bytes_are_noted_not_attached() {
+        // Magic bytes pass the sniff; the decoder refuses what's inside.
+        let root = temp_root("corrupt");
+        let bytes = [0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3];
+        std::fs::write(root.join("broken.png"), bytes).unwrap();
         let out = tool(&root)
             .allow_images(true)
-            .execute_with_images(r#"{"path":"big.png"}"#)
+            .execute_with_images(r#"{"path":"broken.png"}"#)
             .unwrap();
         assert!(out.images.is_empty());
-        assert!(out.content.contains("exceeds the 5 MB attachment limit"));
+        assert!(out.content.contains("could not be decoded"));
     }
 
     #[test]

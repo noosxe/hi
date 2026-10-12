@@ -20,6 +20,7 @@ mod bash;
 mod edit;
 mod find;
 mod grep;
+mod image_resize;
 mod ls;
 mod read;
 mod truncate;
