@@ -6,6 +6,8 @@
 
 mod app;
 mod commands;
+mod markdown;
+mod theme;
 mod ui;
 mod wrap;
 
@@ -107,17 +109,31 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io
         app.pump();
 
         // Anything appended to the transcript but not yet printed goes
-        // into the scrollback, above the viewport. Once printed, the
-        // terminal owns the line — we never redraw history.
+        // into the scrollback above the viewport; once printed, the
+        // terminal owns the rows and we never redraw history. Display
+        // blocks are derived from the message stream (a call pairs with
+        // its result); a trailing unpaired call stays in the live area
+        // as the pending execution until its result lands.
+        let mut printed_any = false;
         while printed < app.messages.len() {
-            let msg = app.messages[printed].clone();
-            // Re-read the width per message: a resize mid-burst must
-            // not measure new rows against the old width.
+            let (blocks, pending) = ui::derive_blocks(&app.messages[printed..]);
+            if blocks.is_empty() {
+                break; // only the pending execution — wait for its result
+            }
+            // Re-read the width per batch: a resize mid-burst must not
+            // measure rows against the old width.
             let width = terminal.size()?.width;
-            let rows = ui::message_rows(msg, width);
-            let height = rows.len().clamp(1, u16::MAX as usize) as u16;
-            terminal.insert_before(height, |buf| ui::rows_into(rows, buf))?;
-            printed += 1;
+            for block in &blocks {
+                let mut rows = ui::block_rows(block, width);
+                if printed_any {
+                    // One blank row between blocks (pi's outputPad).
+                    rows.insert(0, ratatui::text::Line::raw(""));
+                }
+                let height = rows.len().clamp(1, u16::MAX as usize) as u16;
+                terminal.insert_before(height, |buf| ui::rows_into(rows, buf))?;
+                printed_any = true;
+            }
+            printed = app.messages.len() - usize::from(pending.is_some());
         }
 
         // Redraw the managed region (live streaming area + input).

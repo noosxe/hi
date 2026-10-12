@@ -46,7 +46,7 @@ finalize:
 
 Rendering: the live area shows `turn.text` while in flight; finalized
 messages are printed **above** the viewport into native scrollback
-(`ui::message_into`) and are never redrawn by ratatui.
+(`ui::block_rows` + `ui::rows_into`) and are never redrawn by ratatui.
 
 ## Tool rounds (the agent loop)
 

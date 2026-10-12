@@ -1,14 +1,16 @@
-use hi_core::Message;
+use hi_core::{Message, ToolCall, ToolResult};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Borders, List, ListItem, ListState, Paragraph, Widget};
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
+use crate::markdown::markdown_rows;
+use crate::theme::{Bg, Fg, THEME};
 
 /// Render the managed region: streaming area, input, and the status
 /// row. The transcript is NOT drawn here — it lives in the terminal's
@@ -64,7 +66,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
 /// Shows whatever is currently being typed, with the real terminal
 /// cursor parked right after the text.
 fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
-    let mut block = Block::new().borders(Borders::TOP | Borders::BOTTOM);
+    let mut block = ratatui::widgets::Block::default().borders(Borders::TOP | Borders::BOTTOM);
     // While work is in flight, the top rule carries a right-aligned
     // activity title; quiet sessions render a plain rule.
     if let Some(activity) = app.activity_label() {
@@ -127,7 +129,7 @@ fn draw_picker(frame: &mut Frame, area: Rect, app: &App) {
     state.select(Some(picker.selected));
     let list = List::new(items)
         .block(
-            Block::new()
+            ratatui::widgets::Block::default()
                 .borders(Borders::ALL)
                 .title(" model — enter: use · ctrl-s: default · esc: close "),
         )
@@ -162,7 +164,7 @@ fn draw_completion(frame: &mut Frame, area: Rect, app: &App) {
     state.select(Some(completion.selected));
     let list = List::new(items)
         .block(
-            Block::new()
+            ratatui::widgets::Block::default()
                 .borders(Borders::ALL)
                 .title(format!(" /{} ", app.input.strip_prefix('/').unwrap_or(""))),
         )
@@ -175,6 +177,17 @@ fn draw_completion(frame: &mut Frame, area: Rect, app: &App) {
 /// rows — the complete text is printed to scrollback when the turn
 /// ends.
 fn draw_stream(frame: &mut Frame, area: Rect, app: &App) {
+    // A running tool replaces the streaming text with its live pending
+    // block — pi inline: the pending execution occupies the live region
+    // and lands in history complete, colored by its outcome.
+    if let Some(exec) = pending_tool(&app.messages) {
+        render_tail(
+            &block_rows(&TranscriptBlock::Tool(exec), area.width),
+            area,
+            frame,
+        );
+        return;
+    }
     let Some(turn) = app.turn.as_ref() else {
         return;
     };
@@ -194,64 +207,132 @@ fn draw_stream(frame: &mut Frame, area: Rect, app: &App) {
         }
         used += width;
     }
-    let mut lines: Vec<Line> = Vec::new();
+    let mut rows: Vec<Line<'static>> = Vec::new();
     if !turn.text.is_empty() {
-        let tail: String = turn.text[start..].to_string();
-        lines.push(Line::from(tail).style(Style::new().dim()));
+        // pi streams markdown in place, undimmed.
+        rows.extend(markdown_rows(&turn.text[start..], area.width, Style::new()));
     }
     if let Some(err) = &turn.error {
-        lines.push(Line::from(err.clone()).red());
+        rows.extend(markdown_rows(err, area.width, THEME.fg(Fg::Error)));
     }
-    let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-    frame.render_widget(paragraph, area);
+    render_tail(&rows, area, frame);
 }
 
-/// Tool-call and tool-result bodies are capped to this many wrapped
-/// rows plus a marker row. Without the cap, a full tool result (up to
-/// 2000 lines under the truncation contract) would paste thousands of
-/// rows into scrollback. The full output still lives in the session
-/// file; #33 replaces this with expandable blocks.
-const TOOL_PREVIEW_ROWS: usize = 10;
+/// Draw the last rows of pre-wrapped content into the live area.
+fn render_tail(rows: &[Line<'static>], area: Rect, frame: &mut Frame) {
+    let height = area.height as usize;
+    let skip = rows.len().saturating_sub(height);
+    let visible: Vec<Line<'static>> = rows.iter().skip(skip).take(height).cloned().collect();
+    // No `Wrap`: the rows are already wrapped to the area's width.
+    frame.render_widget(Paragraph::new(Text::from(visible)), area);
+}
 
-/// Compose a transcript message into wrapped terminal rows — one
-/// `Line` per scrollback row. The label sits on the first row and
-/// shrinks that row's wrap capacity; continuation rows get the full
-/// width. Measuring and rendering share this function, so the row
-/// count a caller passes to `Terminal::insert_before` always matches
-/// what `rows_into` draws.
-pub fn message_rows(msg: Message, width: u16) -> Vec<Line<'static>> {
+/// Tool result bodies preview this many source lines, then a marker
+/// row. Without the cap, a full tool result (up to 2000 lines under
+/// the truncation contract) would paste thousands of rows into
+/// scrollback. Full output lives in the session file; expansion is a
+/// fullscreen-mode feature hi hasn't built (pi's inline mode also
+/// shows the collapsed preview).
+const TOOL_PREVIEW_LINES: usize = 10;
+
+/// Call arguments collapse to this many chars (pi's COLLAPSED_ARGS_CHARS).
+const ARGS_PREVIEW_CHARS: usize = 100;
+
+/// A transcript display unit. Messages render one way each; a tool
+/// execution merges its call and result into one pi-style block.
+#[derive(Clone, Debug)]
+pub enum TranscriptBlock {
+    Message(Message),
+    Tool(ToolExec),
+}
+
+/// One tool execution: the call plus, once it finishes, its result. A
+/// block with a call but no result is still running — the live pending
+/// surface in the managed region.
+#[derive(Clone, Debug)]
+pub struct ToolExec {
+    pub call: Option<ToolCall>,
+    pub result: Option<ToolResult>,
+}
+
+/// Derive display blocks from the message stream. Calls pair with their
+/// results (the agent loop guarantees call-then-result order); a
+/// trailing unpaired call comes back separately as the live pending
+/// execution instead of a block. Resumed sessions pair up the same way.
+pub fn derive_blocks(messages: &[Message]) -> (Vec<TranscriptBlock>, Option<ToolExec>) {
+    let mut blocks: Vec<TranscriptBlock> = Vec::new();
+    let mut open: Option<ToolExec> = None;
+    for message in messages {
+        match message {
+            Message::ToolCall(call) => {
+                if let Some(exec) = open.take() {
+                    // An abandoned call followed by a new one: flush it.
+                    blocks.push(TranscriptBlock::Tool(exec));
+                }
+                open = Some(ToolExec {
+                    call: Some(call.clone()),
+                    result: None,
+                });
+            }
+            Message::ToolResult(result) => {
+                if let Some(mut exec) = open.take() {
+                    exec.result = Some(result.clone());
+                    blocks.push(TranscriptBlock::Tool(exec));
+                } else {
+                    // Orphan result (denied before the call surfaced, or
+                    // a crash): self-contained — the result carries the
+                    // tool's name and is_error.
+                    blocks.push(TranscriptBlock::Tool(ToolExec {
+                        call: None,
+                        result: Some(result.clone()),
+                    }));
+                }
+            }
+            other => blocks.push(TranscriptBlock::Message(other.clone())),
+        }
+    }
+    (blocks, open)
+}
+
+/// The still-running execution, if the transcript ends in an unpaired
+/// call.
+pub fn pending_tool(messages: &[Message]) -> Option<ToolExec> {
+    derive_blocks(messages).1
+}
+
+/// Compose a transcript block into wrapped, styled rows — one `Line`
+/// per scrollback row, in the pi-dark palette. Measuring and rendering
+/// share this function, so the row count a caller passes to
+/// `Terminal::insert_before` always matches what `rows_into` draws.
+pub fn block_rows(block: &TranscriptBlock, width: u16) -> Vec<Line<'static>> {
     let width = width.max(1) as usize;
-    match msg {
-        Message::User(text) => labeled_rows("you ", Style::new().dim(), text, Style::new(), width),
-        Message::Assistant(text) => {
-            labeled_rows("assistant ", Style::new().dim(), text, Style::new(), width)
+    match block {
+        TranscriptBlock::Message(Message::User(text)) => padded_block(
+            markdown_rows(text, width as u16, THEME.fg(Fg::UserText)),
+            width,
+            THEME.bg(Bg::UserMessage),
+        ),
+        TranscriptBlock::Message(Message::Assistant(text)) => {
+            // Plain markdown, terminal-default text, no fill (pi).
+            markdown_rows(text, width as u16, Style::new())
         }
-        Message::Error(text) => {
-            labeled_rows("error ", Style::new().red(), text, Style::new(), width)
+        TranscriptBlock::Message(Message::System(text)) => {
+            wrap_plain(text, width, THEME.fg(Fg::Dim))
         }
-        Message::System(text) => labeled_rows("", Style::new(), text, Style::new().dim(), width),
-        Message::ToolCall(call) => {
-            let body = format!("{}({})", call.name, call.arguments);
-            let mut rows = labeled_rows(
-                "tool ",
-                Style::new().dim(),
-                body,
-                Style::new().yellow(),
-                width,
-            );
-            cap_tool_rows(&mut rows);
-            rows
+        TranscriptBlock::Message(Message::Error(text)) => {
+            wrap_plain(text, width, THEME.fg(Fg::Error))
         }
-        Message::ToolResult(result) => {
-            let label = if result.is_error {
-                Style::new().red()
-            } else {
-                Style::new().dim()
-            };
-            let mut rows = labeled_rows("result ", label, result.content, Style::new(), width);
-            cap_tool_rows(&mut rows);
-            rows
+        // derive_blocks routes tool messages to TranscriptBlock::Tool;
+        // if one ever lands here, render defensively instead of panicking.
+        TranscriptBlock::Message(Message::ToolCall(call)) => wrap_plain(
+            &format!("{}({})", call.name, call.arguments),
+            width,
+            THEME.fg(Fg::Dim),
+        ),
+        TranscriptBlock::Message(Message::ToolResult(result)) => {
+            wrap_plain(&result.content, width, THEME.fg(Fg::Dim))
         }
+        TranscriptBlock::Tool(exec) => tool_rows(exec, width),
     }
 }
 
@@ -259,56 +340,136 @@ pub fn message_rows(msg: Message, width: u16) -> Vec<Line<'static>> {
 /// via `Terminal::insert_before`; after this runs, the rows are
 /// terminal-owned history — scrolling them is the emulator's job.
 pub fn rows_into(rows: Vec<Line<'static>>, buf: &mut Buffer) {
-    // The rows are already wrapped to the buffer's width, so this is a
-    // plain placement pass — no `Wrap`, no reflow, no surprises.
+    // The rows are already wrapped and styled to the buffer's width, so
+    // this is a plain placement pass — no `Wrap`, no reflow.
     Paragraph::new(Text::from(rows)).render(buf.area, buf);
 }
 
-/// Word-wrap `body` into row strings: the first row reserves the
-/// label's columns, later rows the full width. Source newlines split
-/// first, so a message's own line breaks survive wrapping.
-fn wrap_body(label: &str, body: &str, width: usize) -> Vec<String> {
-    let first_cap = width.saturating_sub(label.width()).max(1);
-    let mut rows: Vec<String> = Vec::new();
-    for segment in body.split('\n') {
-        let cap = if rows.is_empty() { first_cap } else { width };
-        rows.extend(crate::wrap::wrap(segment, cap));
+/// Plain-text wrap in one style (system and error lines are not
+/// markdown; pi renders diagnostics as colored text, no labels).
+fn wrap_plain(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    for source in text.split('\n') {
+        for piece in crate::wrap::wrap(source, width.max(1)) {
+            rows.push(Line::from(Span::styled(piece, style)));
+        }
+    }
+    if rows.is_empty() {
+        rows.push(Line::from(Span::styled(String::new(), style)));
     }
     rows
 }
 
-/// Build message rows: the label prefixes the first row, the wrapped
-/// body follows in `body_style`.
-fn labeled_rows(
-    label: &'static str,
-    label_style: Style,
-    body: String,
-    body_style: Style,
-    width: usize,
-) -> Vec<Line<'static>> {
-    wrap_body(label, &body, width)
-        .into_iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let mut spans = Vec::with_capacity(2);
-            if i == 0 && !label.is_empty() {
-                spans.push(Span::styled(label.to_string(), label_style));
-            }
-            spans.push(Span::styled(row, body_style));
-            Line::from(spans)
-        })
-        .collect()
+/// Extend rows into a solid pi-style block: every span patched with the
+/// fill (so every cell carries the background), each row padded to the
+/// full width inside it, one blank fill row above and below (pi's
+/// paddingY), one space of side padding (paddingX).
+fn padded_block(rows: Vec<Line<'static>>, width: usize, fill: Style) -> Vec<Line<'static>> {
+    let mut out = Vec::with_capacity(rows.len() + 2);
+    out.push(fill_row(width, fill));
+    for row in rows {
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(row.spans.len() + 2);
+        spans.push(Span::styled(" ".to_string(), fill));
+        spans.extend(row.spans);
+        let used: usize = spans.iter().map(|s| s.content.width()).sum();
+        if used < width {
+            spans.push(Span::styled(" ".repeat(width - used), fill));
+        }
+        for span in &mut spans {
+            span.style = span.style.patch(fill);
+        }
+        out.push(Line::from(spans));
+    }
+    out.push(fill_row(width, fill));
+    out
 }
 
-/// Keep tool rows to the preview budget, collapsing the rest into one
-/// dim marker row — pi's collapsed-preview pattern for scrollback.
-fn cap_tool_rows(rows: &mut Vec<Line<'static>>) {
-    if rows.len() <= TOOL_PREVIEW_ROWS {
-        return;
+fn fill_row(width: usize, fill: Style) -> Line<'static> {
+    Line::from(Span::styled(" ".repeat(width), fill))
+}
+
+/// Tool block: bold tool name with the collapsed args preview over the
+/// output preview, in a fill tinted by execution state — pi's
+/// ToolExecutionComponent: pending while running, then success or error.
+fn tool_rows(exec: &ToolExec, width: usize) -> Vec<Line<'static>> {
+    let fill = match &exec.result {
+        None => THEME.bg(Bg::ToolPending),
+        Some(result) if result.is_error => THEME.bg(Bg::ToolError),
+        Some(_) => THEME.bg(Bg::ToolSuccess),
+    };
+    let name = exec
+        .call
+        .as_ref()
+        .map(|call| call.name.clone())
+        .or_else(|| exec.result.as_ref().map(|r| r.name.clone()))
+        .unwrap_or_default();
+    let mut title_segs = vec![crate::markdown::Seg::new(
+        name,
+        THEME.fg(Fg::ToolTitle).bold(),
+    )];
+    if let Some(args) = exec.call.as_ref().map(|call| args_preview(&call.arguments))
+        && !args.is_empty()
+    {
+        title_segs.push(crate::markdown::Seg::new(
+            format!(" {args}"),
+            THEME.fg(Fg::Muted),
+        ));
     }
-    let hidden = rows.len() - TOOL_PREVIEW_ROWS;
-    rows.truncate(TOOL_PREVIEW_ROWS);
-    rows.push(Line::from(format!("\u{2026} {hidden} more lines").dim()));
+    let inner_width = width.saturating_sub(2).max(1);
+    let mut inner: Vec<Line<'static>> = crate::markdown::wrap_segments(&title_segs, inner_width)
+        .into_iter()
+        .map(crate::markdown::segs_into_line)
+        .collect();
+    if let Some(result) = &exec.result {
+        let total = result.content.lines().count();
+        for line in result.content.lines().take(TOOL_PREVIEW_LINES) {
+            for piece in crate::wrap::wrap(line, inner_width) {
+                inner.push(Line::from(Span::styled(piece, THEME.fg(Fg::ToolOutput))));
+            }
+        }
+        if total > TOOL_PREVIEW_LINES {
+            let hidden = total - TOOL_PREVIEW_LINES;
+            inner.push(Line::from(Span::styled(
+                format!("... ({hidden} more lines)"),
+                THEME.fg(Fg::Muted),
+            )));
+        }
+    }
+    padded_block(inner, width, fill)
+}
+
+/// Collapse call arguments to pi's `key=value key2=value2` preview,
+/// truncated with `...` at [`ARGS_PREVIEW_CHARS`]. Malformed JSON falls
+/// back to the trimmed raw text; empty arguments render no preview.
+/// (pi preserves source order via `marked`; serde's maps sort keys — a
+/// cosmetic divergence.)
+fn args_preview(arguments: &str) -> String {
+    let collapse = |text: String| -> String {
+        if text.chars().count() > ARGS_PREVIEW_CHARS {
+            let cut: String = text.chars().take(ARGS_PREVIEW_CHARS - 3).collect();
+            format!("{cut}...")
+        } else {
+            text
+        }
+    };
+    match serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(arguments) {
+        Ok(map) if !map.is_empty() => {
+            let joined = map
+                .into_iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            collapse(joined)
+        }
+        _ => {
+            let raw = arguments.trim().to_string();
+            if raw.is_empty() {
+                String::new()
+            } else {
+                collapse(raw)
+            }
+        }
+    }
 }
 
 /// One-row welcome banner, printed above the viewport on startup.
@@ -322,7 +483,7 @@ pub fn welcome_into(buf: &mut Buffer) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hi_core::ToolResult;
+    use ratatui::layout::Rect;
 
     /// All cell symbols of one buffer row, trailing blanks trimmed.
     fn text_of(buf: &Buffer, y: u16, width: u16) -> String {
@@ -333,95 +494,215 @@ mod tests {
             .to_string()
     }
 
-    #[test]
-    fn long_reply_wraps_at_word_boundaries() {
-        // 10 label columns + 12 wrap columns: "alpha beta " fits, "gamma" wraps.
-        let width = 22;
-        let rows = message_rows(Message::Assistant("alpha beta gamma".into()), width);
-        assert_eq!(rows.len(), 2);
-        let buf = &mut Buffer::empty(Rect::new(0, 0, width, rows.len() as u16));
-        rows_into(rows, buf);
-        assert_eq!(text_of(buf, 0, width), "assistant alpha beta");
-        assert_eq!(text_of(buf, 1, width), "gamma");
+    fn tool_call(args: &str) -> ToolCall {
+        ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: args.into(),
+        }
+    }
+
+    fn tool_result(content: &str, is_error: bool) -> ToolResult {
+        ToolResult {
+            call_id: "c1".into(),
+            name: "bash".into(),
+            content: content.into(),
+            is_error,
+        }
     }
 
     #[test]
-    fn continuation_rows_have_no_label() {
-        let width = 20;
-        let rows = message_rows(
-            Message::User("one two three four five six seven".into()),
-            width,
+    fn user_block_fills_its_background() {
+        let rows = block_rows(
+            &TranscriptBlock::Message(Message::User("hi there".into())),
+            20,
         );
-        assert!(rows.len() > 1);
-        let buf = &mut Buffer::empty(Rect::new(0, 0, width, rows.len() as u16));
+        // paddingY: one fill row above and below the content.
+        assert_eq!(rows.len(), 3);
+        let buf = &mut Buffer::empty(Rect::new(0, 0, 20, 3));
         rows_into(rows, buf);
-        assert!(text_of(buf, 0, width).starts_with("you "));
-        assert!(!text_of(buf, 1, width).starts_with("you "));
+        let fill = THEME.bg(Bg::UserMessage).bg.unwrap();
+        for x in 0..20 {
+            // Top and bottom rows are solid fill; the content row carries
+            // the fill in its padding columns too.
+            assert_eq!(buf[(x, 0)].bg, fill, "row 0 col {x}");
+            assert_eq!(buf[(x, 2)].bg, fill, "row 2 col {x}");
+            assert_eq!(buf[(x, 1)].bg, fill, "row 1 col {x}");
+        }
+        assert_eq!(text_of(buf, 1, 20), " hi there");
     }
 
     #[test]
-    fn source_newlines_become_row_breaks() {
-        let rows = message_rows(Message::User("a\nb".into()), 40);
-        assert_eq!(rows.len(), 2);
-    }
-
-    #[test]
-    fn oversized_words_hard_split() {
-        let width = 10;
-        let rows = message_rows(Message::User("abcdefgh".into()), width);
-        assert_eq!(rows.len(), 2);
-        let buf = &mut Buffer::empty(Rect::new(0, 0, width, 2));
+    fn assistant_block_has_no_fill() {
+        let rows = block_rows(
+            &TranscriptBlock::Message(Message::Assistant("plain reply".into())),
+            30,
+        );
+        assert_eq!(rows.len(), 1);
+        let buf = &mut Buffer::empty(Rect::new(0, 0, 30, 1));
         rows_into(rows, buf);
-        assert_eq!(text_of(buf, 0, width), "you abcdef");
-        assert_eq!(text_of(buf, 1, width), "gh");
+        assert_eq!(text_of(buf, 0, 30), "plain reply");
+        assert_eq!(buf[(0, 0)].bg, ratatui::style::Color::Reset);
     }
 
     #[test]
-    fn tool_result_is_capped_with_a_marker_row() {
+    fn assistant_markdown_renders_headings() {
+        let rows = block_rows(
+            &TranscriptBlock::Message(Message::Assistant("# Plan".into())),
+            30,
+        );
+        assert!(
+            rows[0].spans[0]
+                .style
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn system_and_error_render_without_labels() {
+        let system = block_rows(
+            &TranscriptBlock::Message(Message::System("note".into())),
+            20,
+        );
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0].spans[0].style.fg, THEME.fg(Fg::Dim).fg);
+        let error = block_rows(&TranscriptBlock::Message(Message::Error("boom".into())), 20);
+        assert_eq!(error.len(), 1);
+        assert_eq!(error[0].spans[0].style.fg, THEME.fg(Fg::Error).fg);
+    }
+
+    #[test]
+    fn calls_pair_with_results_in_order() {
+        let messages = vec![
+            Message::User("run it".into()),
+            Message::ToolCall(tool_call("{}")),
+            Message::ToolResult(tool_result("out", false)),
+        ];
+        let (blocks, pending) = derive_blocks(&messages);
+        assert!(pending.is_none());
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(
+            blocks[0],
+            TranscriptBlock::Message(Message::User(_))
+        ));
+        match &blocks[1] {
+            TranscriptBlock::Tool(exec) => {
+                assert_eq!(exec.call.as_ref().unwrap().name, "bash");
+                assert_eq!(exec.result.as_ref().unwrap().content, "out");
+            }
+            _ => panic!("expected tool block"),
+        }
+    }
+
+    #[test]
+    fn trailing_unpaired_call_is_the_pending_execution() {
+        let messages = vec![Message::ToolCall(tool_call("{}"))];
+        let (blocks, pending) = derive_blocks(&messages);
+        assert!(blocks.is_empty());
+        let pending = pending.unwrap();
+        assert_eq!(pending.call.unwrap().name, "bash");
+        assert!(pending.result.is_none());
+    }
+
+    #[test]
+    fn orphan_result_renders_self_contained() {
+        let (blocks, pending) = derive_blocks(&[Message::ToolResult(tool_result("nope", true))]);
+        assert!(pending.is_none());
+        match &blocks[0] {
+            TranscriptBlock::Tool(exec) => {
+                assert!(exec.call.is_none());
+                assert!(exec.result.as_ref().unwrap().is_error);
+            }
+            _ => panic!("expected tool block"),
+        }
+    }
+
+    #[test]
+    fn tool_state_selects_the_fill() {
+        let pending = block_rows(
+            &TranscriptBlock::Tool(ToolExec {
+                call: Some(tool_call("{}")),
+                result: None,
+            }),
+            20,
+        );
+        assert_eq!(pending[0].spans[0].style.bg, THEME.bg(Bg::ToolPending).bg);
+        let success = block_rows(
+            &TranscriptBlock::Tool(ToolExec {
+                call: Some(tool_call("{}")),
+                result: Some(tool_result("ok", false)),
+            }),
+            20,
+        );
+        assert_eq!(success[0].spans[0].style.bg, THEME.bg(Bg::ToolSuccess).bg);
+        let failure = block_rows(
+            &TranscriptBlock::Tool(ToolExec {
+                call: Some(tool_call("{}")),
+                result: Some(tool_result("bad", true)),
+            }),
+            20,
+        );
+        assert_eq!(failure[0].spans[0].style.bg, THEME.bg(Bg::ToolError).bg);
+    }
+
+    #[test]
+    fn tool_title_carries_name_and_collapsed_args() {
+        let rows = block_rows(
+            &TranscriptBlock::Tool(ToolExec {
+                call: Some(tool_call("{\"cmd\":\"ls -la\"}")),
+                result: Some(tool_result("file.txt", false)),
+            }),
+            40,
+        );
+        // paddingY row, title row, body row, paddingY row.
+        assert_eq!(rows.len(), 4);
+        let title: String = rows[1]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(title.trim(), "bash cmd=\"ls -la\"");
+        let body: String = rows[2]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(body.trim(), "file.txt");
+    }
+
+    #[test]
+    fn long_args_collapse_with_ellipsis() {
+        let long = "x".repeat(300);
+        let preview = args_preview(&format!("{{\"path\":\"{long}\"}}"));
+        assert_eq!(preview.chars().count(), ARGS_PREVIEW_CHARS);
+        assert!(preview.ends_with("..."));
+        assert_eq!(args_preview(""), "");
+    }
+
+    #[test]
+    fn tool_result_previews_ten_lines_with_marker() {
         let content: String = (0..50).map(|i| format!("line{i}\n")).collect();
-        let rows = message_rows(
-            Message::ToolResult(ToolResult {
-                call_id: "c1".into(),
-                name: "bash".into(),
-                content,
-                is_error: false,
+        let rows = block_rows(
+            &TranscriptBlock::Tool(ToolExec {
+                call: Some(tool_call("{}")),
+                result: Some(tool_result(&content, false)),
             }),
             40,
         );
-        assert_eq!(rows.len(), TOOL_PREVIEW_ROWS + 1);
-        let height = rows.len() as u16;
-        let buf = &mut Buffer::empty(Rect::new(0, 0, 40, height));
-        rows_into(rows, buf);
-        let marker = text_of(buf, height - 1, 40);
-        assert!(marker.contains("41 more lines"), "marker: {marker}");
+        // pad, title, 10 preview lines, marker, pad.
+        assert_eq!(rows.len(), 1 + 1 + TOOL_PREVIEW_LINES + 1 + 1);
+        let marker: String = rows[rows.len() - 2]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(marker.contains("... (40 more lines)"), "marker: {marker}");
     }
 
     #[test]
-    fn error_result_keeps_red_label() {
-        let rows = message_rows(
-            Message::ToolResult(ToolResult {
-                call_id: "c2".into(),
-                name: "bash".into(),
-                content: "boom".into(),
-                is_error: true,
-            }),
-            40,
-        );
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].spans[0].style, Style::new().red());
-    }
-
-    #[test]
-    fn system_rows_have_no_label() {
-        let rows = message_rows(Message::System("note".into()), 40);
-        assert_eq!(rows.len(), 1);
-        let buf = &mut Buffer::empty(Rect::new(0, 0, 40, 1));
-        rows_into(rows, buf);
-        assert_eq!(text_of(buf, 0, 40), "note");
-    }
-
-    #[test]
-    fn degenerate_width_yields_one_row() {
-        assert_eq!(message_rows(Message::Assistant(String::new()), 0).len(), 1);
+    fn degenerate_width_yields_rows() {
+        let rows = block_rows(&TranscriptBlock::Message(Message::User("hello".into())), 0);
+        assert!(!rows.is_empty());
     }
 }
