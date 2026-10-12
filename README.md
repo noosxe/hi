@@ -19,10 +19,10 @@ later.
 - A real CLI: `--provider`/`--model`, `--list-models`, `--mock`, `--help` — and Esc cancels a running turn
 - `/model` picker in the TUI: arrows to move, Enter switches this session, Ctrl-S saves the default
 - Slash commands with completion: type `/` to see the menu, Tab completes, Enter runs
-- Session transcripts persist per project (JSONL, append-only); `hi --continue` resumes the newest one
+- Session transcripts persist per project (JSONL, append-only); `hi --continue` resumes the newest, `hi -r` opens a picker, `hi --session <id>` and `hi --fork <id>` select and branch deterministically — headless too
 - Headless one-shot mode: `hi -p "prompt"` (or `git diff | hi -p "review"`) prints the final reply and exits
 - Built-in agent tools: the model can read, search, list, write, edit, and run commands — the `coding` bundle by default, `--tools read-only|none|all` to change
-- 189 tests, including a fake HTTP server that records requests
+- 201 tests, including a fake HTTP server that records requests
 
 Not yet: JSONL event output for scripts, subagents, background tasks, extensions.
 The selection and settings layers are built so each slots in without
@@ -33,7 +33,7 @@ rework.
 ```sh
 nix develop          # Rust toolchain + cargo (or any Rust 1.85+, edition 2024)
 cargo run            # builds the `hi` binary; `hi --mock` needs no config
-cargo test           # 189 tests; no network needed
+cargo test           # 201 tests; no network needed
 ```
 
 

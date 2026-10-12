@@ -1,13 +1,15 @@
 # `hi-tui` reference
 
 Files this doc describes: `crates/tui/src/lib.rs`, `app.rs`, `commands.rs`,
-`catalog.rs`, `status.rs`, `ui.rs`, `markdown.rs`, `theme.rs`, `wrap.rs`.
+`catalog.rs`, `status.rs`, `ui.rs`, `markdown.rs`, `theme.rs`, `picker.rs`,
+`wrap.rs`.
 
 Module map: `lib.rs` (terminal lifecycle + event loop), `app.rs` (all state +
 input handling), `commands.rs` (slash registry), `catalog.rs` (picker menu
 data), `status.rs` (status-bar facts), `ui.rs` (widgets/drawing),
 `markdown.rs` (markdown → themed rows), `theme.rs` (role-indirected palette),
-`wrap.rs` (text wrapping). Public exports: `run`, `Catalog`, `Status`.
+`picker.rs` (session picker), `wrap.rs` (text wrapping). Public exports:
+`run`, `pick_session`, `Catalog`, `Status`.
 
 ## lib.rs — terminal lifecycle and the frame clock
 
@@ -64,14 +66,15 @@ Behaviors (each pinned by a test in `app.rs`):
 
 ```rust
 pub struct Command { pub name: &'static str, pub description: &'static str }
-pub const COMMANDS: &[Command]  // sorted: exit, model, quit
+pub const COMMANDS: &[Command]  // sorted: exit, model, quit, resume
 pub fn matching(typed: &str) -> Vec<&'static Command>   // case-insensitive prefix
 pub fn find_exact(name: &str) -> Option<&'static Command>
 ```
 
 Adding a command = one entry in `COMMANDS` **plus** one arm in
 `App::run_command`. The completion menu inherits both order and descriptions.
-`/exit` and `/quit` (alias) stop the session; `/model` opens the picker.
+`/exit` and `/quit` (alias) stop the session; `/model` opens the picker;
+`/resume` opens the session picker (see [picker.rs](#pickerrs--session-selection)).
 
 ## catalog.rs — what the `/model` picker offers
 
@@ -160,6 +163,33 @@ Inline content is collected as styled segments and wrapped by
 line breaks. User and assistant messages render as markdown (ruling ② of
 #33); system and error lines stay plain text (`System` dim, `Error` in the
 error color — pi renders diagnostics as colored text, no labels).
+
+## picker.rs — session selection
+
+The session picker exists twice, over one composition. `picker_lines` builds
+the rows — title, the visible `age · name-or-id · first user message` rows
+around the selection, the filter line, the key hint — and both consumers
+render exactly that:
+
+- `pick_session(summaries)` — the standalone `--resume` chooser. It owns a
+  short inline-viewport terminal before the main TUI boots (pi's
+  startup-TUI pattern), restores the terminal, and returns the chosen file
+  (`None` on Esc). The CLI owns everything around it: listing, what Esc
+  means, the resumed-from note.
+- `/resume` in-session — `app.session_picker` takes over the keyboard and
+  the whole live area (status row stays), reusing `picker_lines`. Type
+  filters by name/id/preview, Enter swaps the live session: the file
+  reopens for appending, the transcript is replaced (same resumed-from
+  note the startup path uses), and the print cursor resets so the event
+  loop renders the new history below the old scrollback — inline mode's
+  history is terminal-owned, so nothing is redrawn. Refused mid-turn:
+  switching under a streaming reply would interleave two sessions'
+  provider events.
+
+Row helpers are pure and unit-tested: `age` (s/m/h/d buckets), `row_text`
+(name wins over the id's first eight chars; first line of the first user
+message as preview), `filter_matches` (case-insensitive over id, name,
+preview).
 
 ## theme.rs — the palette behind roles
 

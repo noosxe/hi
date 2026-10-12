@@ -65,6 +65,26 @@ pub struct App {
     pub thinking: Option<ThinkingLevel>,
     /// The turn in flight, if any. `Some` from Enter until TurnEnd.
     pub turn: Option<Turn>,
+    /// The open `/resume` session picker. `Some` means it owns the
+    /// keyboard and the whole live area above the status row.
+    pub session_picker: Option<SessionPicker>,
+    /// How much of `messages` the scrollback already shows; the event
+    /// loop advances it. A session switch resets it so the new history
+    /// prints below the old conversation.
+    pub(crate) printed: usize,
+    /// Session-storage root override — tests point this at a temp
+    /// directory; production uses the real data dir (`None`).
+    pub session_root: Option<std::path::PathBuf>,
+}
+
+/// The open `/resume` chooser: this project's sessions, their loaded
+/// first-message previews, the filter text, and the highlighted row —
+/// an index into `summaries`; the visible subset is derived per frame.
+pub struct SessionPicker {
+    pub summaries: Vec<hi_core::session::SessionSummary>,
+    pub previews: Vec<Option<String>>,
+    pub filter: String,
+    pub selected: usize,
 }
 
 /// Braille frames for the activity spinner, cycled once per frame.
@@ -134,6 +154,9 @@ impl App {
             tick: 0,
             queued: None,
             turn: None,
+            session_picker: None,
+            printed: 0,
+            session_root: None,
         }
     }
 
@@ -148,6 +171,12 @@ impl App {
         // When the picker is open, it owns the keyboard.
         if self.picker.is_some() {
             self.handle_picker_key(key);
+            return;
+        }
+        // The session picker likewise: it takes over everything above
+        // the status row while open.
+        if self.session_picker.is_some() {
+            self.handle_session_picker_key(key);
             return;
         }
         // While the `/` completion menu is open it consumes the
@@ -436,10 +465,136 @@ impl App {
         match name {
             "exit" | "quit" => self.quit = true,
             "model" => self.open_picker(),
+            "resume" => self.open_session_picker(),
             other => self
                 .messages
                 .push(Message::System(format!("unknown command: /{other}"))),
         }
+    }
+
+    /// Open the `/resume` picker over this project's sessions. Refused
+    /// mid-turn: switching under a streaming reply would interleave
+    /// two sessions' provider events.
+    fn open_session_picker(&mut self) {
+        if self.turn.is_some() {
+            self.messages.push(Message::System(
+                "cannot switch sessions while a turn is running — esc first".into(),
+            ));
+            return;
+        }
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let listed = match self.session_root.as_deref() {
+            Some(root) => hi_core::session::sessions_in_root(root, &cwd),
+            None => hi_core::session::sessions_in(&cwd),
+        };
+        let summaries = match listed {
+            Ok(list) if !list.is_empty() => list,
+            Ok(_) => {
+                self.messages.push(Message::System(
+                    "no previous sessions in this directory".into(),
+                ));
+                return;
+            }
+            Err(err) => {
+                self.messages.push(Message::Error(err));
+                return;
+            }
+        };
+        let previews = summaries
+            .iter()
+            .map(|summary| crate::picker::preview_of(&summary.path))
+            .collect();
+        self.session_picker = Some(SessionPicker {
+            summaries,
+            previews,
+            filter: String::new(),
+            selected: 0,
+        });
+    }
+
+    /// The summaries passing the current filter, in listing order.
+    pub fn session_picker_visible(&self) -> Vec<usize> {
+        let Some(picker) = &self.session_picker else {
+            return Vec::new();
+        };
+        (0..picker.summaries.len())
+            .filter(|index| {
+                crate::picker::filter_matches(
+                    &picker.filter,
+                    &picker.summaries[*index],
+                    picker.previews[*index].as_deref(),
+                )
+            })
+            .collect()
+    }
+
+    /// Keyboard owner while the session picker is open.
+    fn handle_session_picker_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.session_picker = None,
+            KeyCode::Up => {
+                if let Some(picker) = self.session_picker.as_mut() {
+                    picker.selected = picker.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                let visible = self.session_picker_visible();
+                if let Some(picker) = self.session_picker.as_mut()
+                    && picker.selected + 1 < visible.len()
+                {
+                    picker.selected += 1;
+                }
+            }
+            KeyCode::Enter => {
+                let visible = self.session_picker_visible();
+                let Some(picker) = self.session_picker.take() else {
+                    return;
+                };
+                if let Some(index) = visible.get(picker.selected) {
+                    let path = picker.summaries[*index].path.clone();
+                    self.switch_session(&path);
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(picker) = self.session_picker.as_mut() {
+                    let _ = picker.filter.pop();
+                }
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(picker) = self.session_picker.as_mut() {
+                    picker.filter.push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Swap the live session for another file: reopen it for
+    /// appending, replace the transcript (with the same resumed-from
+    /// note the startup path uses), and reset the print cursor so the
+    /// event loop renders the new history below the old scrollback.
+    fn switch_session(&mut self, path: &std::path::Path) {
+        let opened = Session::resume(path).and_then(|session| {
+            let loaded = hi_core::session::load(path)?;
+            Ok((session, loaded))
+        });
+        let (session, loaded) = match opened {
+            Ok(opened) => opened,
+            Err(err) => {
+                self.messages.push(Message::Error(err));
+                return;
+            }
+        };
+        let count = loaded.messages.len();
+        let mut messages = loaded.messages;
+        messages.insert(
+            0,
+            Message::System(format!("resumed {count} messages from {}", path.display())),
+        );
+        self.messages = messages;
+        self.session = Some(session);
+        self.printed = 0;
+        self.queued = None;
     }
 
     /// What the input's right-side title shows while work is in
@@ -539,6 +694,7 @@ mod tests {
     use super::*;
     use hi_core::MockProvider;
     use ratatui::crossterm::event::KeyEvent;
+    use std::path::PathBuf;
 
     fn app() -> App {
         App::new(
@@ -742,5 +898,116 @@ mod tests {
         assert!(app.turn.is_none());
         assert!(app.queued.is_none());
         assert_eq!(app.input, "saved text");
+    }
+
+    // ---- /resume: the in-session session picker ----
+
+    /// A temp session root with one recorded session for the process
+    /// cwd (the picker lists the *current* project only).
+    fn picker_root(tag: &str, id: &str, name: Option<&str>, first_user: &str) -> PathBuf {
+        use hi_core::session;
+        let root = std::env::temp_dir().join(format!("hi-picker-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cwd = std::env::current_dir().unwrap();
+        let dir = root.join(session::project_key(&cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut header = serde_json::json!({
+            "type": "session",
+            "version": 1,
+            "id": id,
+            "cwd": cwd.to_string_lossy(),
+            "createdAt": 1,
+            "provider": "mock",
+            "model": "mock",
+        });
+        if let Some(name) = name {
+            header["name"] = serde_json::json!(name);
+        }
+        let message = serde_json::json!({
+            "type": "message",
+            "message": { "user": first_user },
+        });
+        std::fs::write(
+            dir.join(format!("0001_{id}.jsonl")),
+            format!("{header}\n{message}\n"),
+        )
+        .unwrap();
+        root
+    }
+
+    #[test]
+    fn resume_opens_the_picker_and_esc_closes_it() {
+        let mut app = app();
+        app.session_root = Some(picker_root("open", "11111111-aaaa", Some("work"), "hello"));
+        app.run_command("resume");
+        let picker = app.session_picker.as_ref().expect("picker open");
+        assert_eq!(picker.summaries.len(), 1);
+        assert_eq!(picker.summaries[0].header.name.as_deref(), Some("work"));
+        assert_eq!(picker.previews[0].as_deref(), Some("hello"));
+        assert_eq!(app.session_picker_visible().len(), 1);
+
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.session_picker.is_none());
+        // Closing changes nothing about the live session.
+        assert!(app.session.is_none());
+        assert!(app.messages.is_empty());
+    }
+
+    #[test]
+    fn resume_filters_by_name_and_enter_switches_sessions() {
+        let mut app = app();
+        let root = picker_root("switch", "22222222-aaaa", Some("keeper"), "keep me");
+        let cwd = std::env::current_dir().unwrap();
+        // A second session the filter must hide.
+        let project_dir = hi_core::session::project_key(&cwd);
+        std::fs::write(
+            root.join(project_dir).join("0002_33333333-bbbb.jsonl"),
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "type": "session", "version": 1, "id": "33333333-bbbb",
+                    "cwd": cwd.to_string_lossy(), "createdAt": 2,
+                    "provider": "mock", "model": "mock",
+                }),
+                serde_json::json!({ "type": "message", "message": { "user": "unrelated notes" } }),
+            ),
+        )
+        .unwrap();
+
+        app.session_root = Some(root);
+        app.run_command("resume");
+        app.handle_key(key(KeyCode::Char('k'))); // "keeper" only — the other session's id, name, and preview have no k
+        assert_eq!(app.session_picker_visible().len(), 1);
+
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.session_picker.is_none());
+        // Transcript replaced: the resumed-from note, then the file's history.
+        assert_eq!(app.messages.len(), 2);
+        assert!(
+            matches!(&app.messages[0], Message::System(note) if note.contains("resumed 1 messages"))
+        );
+        assert_eq!(app.messages[1], Message::User("keep me".into()));
+        // The print cursor reset so the event loop redraws the new history.
+        assert_eq!(app.printed, 0);
+        // And the live append handle now points at the chosen file.
+        let resumed = app.session.as_ref().expect("session handle").path();
+        assert!(resumed.ends_with("0001_22222222-aaaa.jsonl"));
+    }
+
+    #[test]
+    fn resume_is_refused_mid_turn() {
+        let mut app = app();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.turn = Some(Turn {
+            text: String::new(),
+            error: None,
+            started_at: std::time::Instant::now(),
+            rx,
+        });
+        app.run_command("resume");
+        assert!(app.session_picker.is_none());
+        assert!(
+            matches!(app.messages.last(), Some(Message::System(note)) if note.contains("esc first"))
+        );
     }
 }

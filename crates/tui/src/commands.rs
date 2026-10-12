@@ -23,6 +23,10 @@ pub const COMMANDS: &[Command] = &[
         name: "quit",
         description: "alias for /exit",
     },
+    Command {
+        name: "resume",
+        description: "switch to another session from this directory",
+    },
 ];
 
 /// Commands whose name starts with `typed` (lowercased, without the

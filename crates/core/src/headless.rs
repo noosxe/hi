@@ -235,7 +235,7 @@ mod tests {
     fn run_appends_the_turn_to_an_open_session() {
         let root = std::env::temp_dir().join(format!("hi-headless-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let session = Session::start_in(&root, Path::new("/p"), "prov", "mod", None).unwrap();
+        let session = Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
         let path = session.path().to_path_buf();
 
         let provider = Arc::new(ScriptedProvider::new(vec![vec![

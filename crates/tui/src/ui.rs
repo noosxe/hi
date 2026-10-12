@@ -17,6 +17,25 @@ use crate::theme::{Bg, Fg, THEME};
 /// scrollback (see `message_into`).
 pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
+    // The `/resume` session picker takes over the live area — input,
+    // menus, and stream all yield; the status row stays for context.
+    if app.session_picker.is_some() {
+        let picker_area = Rect {
+            height: area.height.saturating_sub(1),
+            ..area
+        };
+        draw_session_picker(frame, picker_area, app);
+        draw_status(
+            frame,
+            Rect {
+                y: area.y + area.height - 1,
+                height: 1,
+                ..area
+            },
+            app,
+        );
+        return;
+    }
     // A fixed 12-row viewport with two elastic consumers. Bottom-up:
     // the status row is pinned, the input grows upward with its
     // wrapped text (3 rows resting, up to 8), the menu takes rows
@@ -493,6 +512,25 @@ fn args_preview(arguments: &str) -> String {
 pub fn welcome_into(buf: &mut Buffer) {
     let line = Line::from(vec!["hi".bold(), " · say something, ctrl-c to quit".dim()]);
     Paragraph::new(line).render(buf.area, buf);
+}
+
+/// The `/resume` chooser: title, the visible session rows around the
+/// selection, the filter line, and the key hint. Composition is
+/// shared with the standalone `--resume` picker (`picker_lines`), so
+/// both look — and test — the same.
+fn draw_session_picker(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(picker) = &app.session_picker else {
+        return;
+    };
+    let lines = crate::picker::picker_lines(
+        &picker.summaries,
+        &picker.previews,
+        &picker.filter,
+        picker.selected,
+        area.height as usize,
+        std::time::SystemTime::now(),
+    );
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 #[cfg(test)]

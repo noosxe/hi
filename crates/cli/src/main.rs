@@ -38,7 +38,12 @@ struct Cli {
     tools: Option<String>,
 
     /// Use the built-in mock provider — no config, no network
-    #[arg(long, conflicts_with_all = ["provider", "model", "list_models"])]
+    #[arg(
+        long,
+        conflicts_with_all = [
+            "provider", "model", "list_models", "continue_last", "resume_picker", "session", "fork",
+        ]
+    )]
     mock: bool,
 
     /// Print the selected provider's models and exit
@@ -46,8 +51,38 @@ struct Cli {
     list_models: bool,
 
     /// Resume the most recent session for this directory
-    #[arg(long = "continue", conflicts_with = "mock")]
-    resume: bool,
+    #[arg(
+        long = "continue",
+        conflicts_with_all = ["mock", "no_session", "resume_picker", "session", "fork", "name"]
+    )]
+    continue_last: bool,
+
+    /// Pick a session to resume (arrow list with type-to-filter)
+    #[arg(
+        short = 'r',
+        long = "resume",
+        conflicts_with_all = ["mock", "no_session", "continue_last", "session", "fork"]
+    )]
+    resume_picker: bool,
+
+    /// Open a session by file path or (partial) id
+    #[arg(
+        long,
+        conflicts_with_all = ["mock", "no_session", "continue_last", "resume_picker", "fork", "name"]
+    )]
+    session: Option<String>,
+
+    /// Fork a session (path or id) into a new file for this directory
+    #[arg(
+        long,
+        conflicts_with_all = ["mock", "no_session", "continue_last", "resume_picker", "session"]
+    )]
+    fork: Option<String>,
+
+    /// Name the new session (fresh start or fork)
+    #[arg(short = 'n', long, conflicts_with_all = ["continue_last", "session"])]
+    name: Option<String>,
+
     /// Run one prompt headlessly: print the final reply and exit
     #[arg(short = 'p', long)]
     print: bool,
@@ -57,7 +92,10 @@ struct Cli {
     prompt: Option<String>,
 
     /// Run without loading or saving a session file
-    #[arg(long, conflicts_with = "resume")]
+    #[arg(
+        long,
+        conflicts_with_all = ["continue_last", "resume_picker", "session", "fork"]
+    )]
     no_session: bool,
 }
 
@@ -154,14 +192,23 @@ fn main() -> ExitCode {
     // reopens the newest one for this directory; --no-session skips the
     // disk entirely. Failures degrade to a warning — chat never depends
     // on the disk.
-    let (messages, session) = open_session(
-        cli.no_session,
-        cli.resume,
+    let opened = open_session(
+        &cli,
+        true,
         &cwd,
         &target.status.provider,
         &target.status.model,
         target.thinking.as_ref().map(|level| level.name()),
     );
+    // Backing out of a picker or prompt means "nothing to do", not
+    // failure — the same contract as pi's "No session selected".
+    let opened = match opened {
+        Ok(opened) => opened,
+        Err(err) => return fail(&err),
+    };
+    let Some((messages, session)) = opened else {
+        return ExitCode::SUCCESS;
+    };
     let init = SessionInit {
         system_prompt: target.system_prompt,
         thinking: target.thinking,
@@ -286,14 +333,23 @@ fn print_mode(cli: &Cli) -> ExitCode {
         Ok(cwd) => cwd,
         Err(err) => return fail(&format!("cannot determine current directory: {err}")),
     };
-    let (mut history, session) = open_session(
-        cli.no_session,
-        cli.resume,
+    let opened = open_session(
+        cli,
+        false,
         &cwd,
         &status.provider,
         &status.model,
         thinking.as_ref().map(|level| level.name()),
     );
+    // `Ok(None)` cannot happen headless (the picker refuses first); the
+    // arm exists so both dispatch sites share one open_session contract.
+    let opened = match opened {
+        Ok(opened) => opened,
+        Err(err) => return fail(&err),
+    };
+    let Some((mut history, session)) = opened else {
+        return ExitCode::SUCCESS;
+    };
 
     match headless::run(
         provider,
@@ -323,29 +379,116 @@ fn read_piped_stdin() -> Option<String> {
     Some(piped)
 }
 
-/// Open (or skip) the session file for this run — shared by the TUI and
-/// headless paths. `no_session` wins; failures degrade to a warning and
-/// an in-memory-only run.
+/// What a run opens with: the transcript to seed from and the file to
+/// append to. `None` session = not persisting.
+type OpenedSession = (Vec<Message>, Option<Session>);
+
+/// Resolve the session-selection flags into an open session — shared by
+/// the TUI and headless paths. Selection failures (`--session` with no
+/// match, cross-project under `--print`, the picker under `--print`)
+/// are hard errors; plain disk failures degrade to a warning and an
+/// in-memory-only run, as they always have. `Ok(None)` means the user
+/// backed out of a picker or prompt — nothing to do, exit 0.
 fn open_session(
-    no_session: bool,
-    resume: bool,
+    cli: &Cli,
+    interactive: bool,
     cwd: &Path,
     provider: &str,
     model: &str,
     thinking: Option<&str>,
-) -> (Vec<Message>, Option<Session>) {
-    if no_session {
-        return (Vec::new(), None);
+) -> Result<Option<OpenedSession>, String> {
+    let name = cli.name.as_deref();
+    if cli.no_session {
+        return Ok(Some((Vec::new(), None)));
     }
-    let opened = if resume {
-        open_resumed(cwd)
-    } else {
-        Session::start(provider, model, thinking).map(|session| (Vec::new(), Some(session)))
-    };
-    opened.unwrap_or_else(|warning| {
-        eprintln!("hi: {warning}");
-        (Vec::new(), None)
-    })
+    // --fork: copy, then run in the copy. The original is never opened
+    // for write, and the copy carries this directory in its header.
+    if let Some(arg) = cli.fork.as_deref() {
+        let source = match hi_core::session::resolve(cwd, arg)? {
+            hi_core::session::SessionRef::Local(path)
+            | hi_core::session::SessionRef::Global { path, .. } => path,
+            hi_core::session::SessionRef::NotFound => {
+                return Err(format!("no session found matching '{arg}'"));
+            }
+        };
+        let session = Session::fork_from(&source, cwd, name)?;
+        let messages = hi_core::session::load(session.path())?.messages;
+        return Ok(Some((messages, Some(session))));
+    }
+    // --session: open by path or id. Another project's file is offered
+    // as a fork interactively (pi's prompt) and refused with the fork
+    // hint headlessly — never silently appended to.
+    if let Some(arg) = cli.session.as_deref() {
+        return match hi_core::session::resolve(cwd, arg)? {
+            hi_core::session::SessionRef::Local(path) => open_resumed(&path).map(Some),
+            hi_core::session::SessionRef::Global { path, cwd: other } => {
+                if !interactive {
+                    Err(format!(
+                        "session '{arg}' belongs to another project ({other}) — run `hi --fork '{arg}'` in this directory to copy it"
+                    ))
+                } else if confirm(&format!(
+                    "session found in different project: {other}\nfork it into the current directory?"
+                ))? {
+                    let session = Session::fork_from(&path, cwd, name)?;
+                    let messages = hi_core::session::load(session.path())?.messages;
+                    Ok(Some((messages, Some(session))))
+                } else {
+                    Ok(None) // declined — the original is untouched
+                }
+            }
+            hi_core::session::SessionRef::NotFound => {
+                Err(format!("no session found matching '{arg}'"))
+            }
+        };
+    }
+    // --resume: the interactive picker. Headless has no menu; the
+    // deterministic selectors are --session and --continue.
+    if cli.resume_picker {
+        if !interactive {
+            return Err(
+                "--resume needs a terminal — use --session <id|path> or --continue under --print"
+                    .into(),
+            );
+        }
+        let summaries = hi_core::session::sessions_in(cwd)?;
+        if summaries.is_empty() {
+            return Err("no previous sessions in this directory".into());
+        }
+        return match hi_tui::pick_session(&summaries) {
+            Some(path) => open_resumed(&path).map(Some),
+            None => Ok(None),
+        };
+    }
+    if cli.continue_last {
+        return Ok(Some(open_resumed(cwd).unwrap_or_else(|warning| {
+            eprintln!("hi: {warning}");
+            (Vec::new(), None)
+        })));
+    }
+    // Fresh start, optionally named.
+    Ok(Some(
+        Session::start(provider, model, thinking, name)
+            .map(|session| (Vec::new(), Some(session)))
+            .unwrap_or_else(|warning| {
+                eprintln!("hi: {warning}");
+                (Vec::new(), None)
+            }),
+    ))
+}
+
+/// A y/N stdin prompt — the cross-project fork offer (interactive mode
+/// only; callers check first). Anything but y/yes is no.
+fn confirm(question: &str) -> Result<bool, String> {
+    use std::io::Write;
+    print!("{question} [y/N] ");
+    std::io::stdout()
+        .flush()
+        .map_err(|err| format!("cannot write prompt: {err}"))?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|err| format!("cannot read answer: {err}"))?;
+    Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
 /// Reopen the newest session file for `cwd` and prepare it for
@@ -384,4 +527,28 @@ fn launch(
 fn fail(message: &str) -> ExitCode {
     eprintln!("hi: {message}");
     ExitCode::FAILURE
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_selection_flags_follow_pi_conflict_rules() {
+        // The selectors are mutually exclusive.
+        assert!(Cli::try_parse_from(["hi", "--continue", "--session", "a"]).is_err());
+        assert!(Cli::try_parse_from(["hi", "--resume", "--fork", "a"]).is_err());
+        assert!(Cli::try_parse_from(["hi", "--session", "a", "--fork", "b"]).is_err());
+        assert!(Cli::try_parse_from(["hi", "--no-session", "--resume"]).is_err());
+        assert!(Cli::try_parse_from(["hi", "--mock", "--continue"]).is_err());
+        // --name pairs with fresh starts and forks, not with reopening.
+        assert!(Cli::try_parse_from(["hi", "--name", "n", "--session", "a"]).is_err());
+        assert!(Cli::try_parse_from(["hi", "--name", "n", "--continue"]).is_err());
+        assert!(Cli::try_parse_from(["hi", "--fork", "a", "--name", "n"]).is_ok());
+        // Headless selection: --session/--fork parse; --resume parses
+        // too but is refused at dispatch (ruling: the error belongs to
+        // open_session, where it can carry context).
+        assert!(Cli::try_parse_from(["hi", "--session", "a", "--print", "q"]).is_ok());
+        assert!(Cli::try_parse_from(["hi", "--resume", "--print", "q"]).is_ok());
+    }
 }
