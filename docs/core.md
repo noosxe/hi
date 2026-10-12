@@ -1,7 +1,7 @@
 # `hi-core` reference
 
 Files this doc describes: everything under `crates/core/src/` — `lib.rs`,
-`message.rs`, `event.rs`, `tool.rs`, `agent.rs`, `session.rs`, `provider.rs`, `openai.rs`, `mock.rs`, `config.rs`,
+`message.rs`, `event.rs`, `tool.rs`, `agent.rs`, `session.rs`, `headless.rs`, `provider.rs`, `openai.rs`, `mock.rs`, `config.rs`,
 `selection.rs`, `settings.rs`, `thinking.rs`, `system_prompt.rs`,
 `test_support.rs`.
 
@@ -84,6 +84,25 @@ reader tolerates a torn final line and rejects malformation anywhere else.
   (`{"toolCall":{…}}`), so tool traffic round-trips losslessly.
 - Persistence is best-effort by contract: callers degrade to a transcript
   note when the disk fails — chat never blocks on I/O.
+
+## headless.rs — one-shot runs for scripts
+
+`hi --print` is the scripting interface: prompt in, final assistant text
+out, process exits. The drain lives here so it is testable without a
+terminal — the CLI only assembles the prompt, session, and exit code.
+
+- `headless::run(provider, registry, gate, history, prompt, session)` —
+  pushes the prompt, drains the same agent loop the TUI uses, updates
+  `history` with every finalized message, appends to the session
+  (best-effort: an append failure drops persistence, never the turn),
+  and returns `Ok(final_text)` or `Err(reason)`.
+- Error contract (pi's): `Err` means the CLI prints the reason to
+  stderr and exits non-zero with stdout left empty — partial output
+  survives only in the transcript and session file.
+- `headless::combine_prompt(stdin, arg)` — piped stdin first, positional
+  argument second, joined by one newline; both empty is a usage error.
+- `--mode json` (JSONL event stream) is deliberately not here yet —
+  issue #18.
 
 ## provider.rs — the abstraction + the turn thread
 

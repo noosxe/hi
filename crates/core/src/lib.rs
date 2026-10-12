@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod config;
 pub mod event;
+pub mod headless;
 pub mod message;
 pub mod mock;
 pub mod openai;
