@@ -14,14 +14,20 @@ use std::path::{Path, PathBuf};
 pub struct Status {
     pub provider: String,
     pub model: String,
+    /// How many built-in tools launched with the session (0 = none).
+    pub tool_count: usize,
 }
 
 impl Status {
-    /// The rendered right-hand text, e.g. `(zai) glm-5.3-flash`.
-    /// An effort indicator will join this later, alongside
-    /// `defaultModel` in settings.
+    /// The rendered right-hand text, e.g. `(zai) glm-5.3-flash`, with the
+    /// tool count when the session launched with a bundle.
     pub fn label(&self) -> String {
-        format!("({}) {}", self.provider, self.model)
+        let base = format!("({}) {}", self.provider, self.model);
+        if self.tool_count > 0 {
+            format!("{base} · {} tools", self.tool_count)
+        } else {
+            base
+        }
     }
 }
 
@@ -168,8 +174,19 @@ mod tests {
         let status = Status {
             provider: "zai".into(),
             model: "glm-5.3-flash".into(),
+            tool_count: 0,
         };
         assert_eq!(status.label(), "(zai) glm-5.3-flash");
+    }
+
+    #[test]
+    fn status_label_shows_the_tool_count_when_a_bundle_runs() {
+        let status = Status {
+            provider: "zai".into(),
+            model: "glm-5.3-flash".into(),
+            tool_count: 7,
+        };
+        assert_eq!(status.label(), "(zai) glm-5.3-flash · 7 tools");
     }
 
     #[test]

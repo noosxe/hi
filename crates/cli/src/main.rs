@@ -1,7 +1,5 @@
 //! The `hi` binary: flags, dispatch, exit codes.
 //!
-//! Thin on purpose. It decides *what* runs — mock, TUI, model listing —
-//! while hi-core does the resolving and hi-tui does the drawing. A
 //! Thin on purpose. It decides *what* runs — mock, TUI, headless
 //! (`--print`), model listing — while hi-core resolves and hi-tui draws.
 
@@ -14,7 +12,7 @@ use clap::Parser;
 
 use hi_core::{
     Message, MockProvider, ModelsConfig, OpenAiCompatProvider, Provider, Session, Settings,
-    ThinkingLevel, ToolRegistry, headless,
+    ThinkingLevel, ToolBundle, ToolRegistry, headless,
 };
 use hi_tui::{Catalog, SessionInit, Status, run};
 
@@ -33,6 +31,11 @@ struct Cli {
     /// Model id to use (see --list-models)
     #[arg(long)]
     model: Option<String>,
+
+    /// Built-in tool bundle: none | read-only | coding | all
+    /// (default: coding, or defaultTools in settings.json)
+    #[arg(long)]
+    tools: Option<String>,
 
     /// Use the built-in mock provider — no config, no network
     #[arg(long, conflicts_with_all = ["provider", "model", "list_models"])]
@@ -60,6 +63,14 @@ struct Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+
+    // Validate before any dispatch: the mock paths never resolve a target,
+    // so a bad --tools value must still fail loudly there.
+    if let Some(raw) = cli.tools.as_deref()
+        && let Err(err) = ToolBundle::parse(raw)
+    {
+        return fail(&err);
+    }
 
     if cli.list_models {
         let config = match ModelsConfig::load() {
@@ -92,6 +103,7 @@ fn main() -> ExitCode {
             Status {
                 provider: "mock".into(),
                 model: "mock".into(),
+                tool_count: 0,
             },
             Catalog::default(),
             ModelsConfig::default(),
@@ -106,7 +118,11 @@ fn main() -> ExitCode {
         );
     }
 
-    let target = match resolve_target(cli.provider.as_deref(), cli.model.as_deref()) {
+    let target = match resolve_target(
+        cli.provider.as_deref(),
+        cli.model.as_deref(),
+        cli.tools.as_deref(),
+    ) {
         Ok(target) => target,
         Err(err) => return fail(&err),
     };
@@ -149,7 +165,7 @@ fn main() -> ExitCode {
     let init = SessionInit {
         system_prompt: target.system_prompt,
         thinking: target.thinking,
-        tools: Arc::new(ToolRegistry::new()),
+        tools: target.tools,
         messages,
         session,
     };
@@ -165,9 +181,16 @@ struct Target {
     config: ModelsConfig,
     system_prompt: Option<String>,
     thinking: Option<ThinkingLevel>,
+    /// The registry built from the selected bundle, handed to SessionInit
+    /// and headless runs.
+    tools: Arc<ToolRegistry>,
 }
 
-fn resolve_target(provider_flag: Option<&str>, model_flag: Option<&str>) -> Result<Target, String> {
+fn resolve_target(
+    provider_flag: Option<&str>,
+    model_flag: Option<&str>,
+    tools_flag: Option<&str>,
+) -> Result<Target, String> {
     let config = ModelsConfig::load()
         .map_err(|err| format!("{err}\n  create one (see the README) or run with --mock"))?;
     let settings = Settings::load()?;
@@ -178,24 +201,47 @@ fn resolve_target(provider_flag: Option<&str>, model_flag: Option<&str>) -> Resu
         settings.default_model.as_deref(),
     )?;
     let entry = &config.providers[&selected.provider];
-    let system_prompt = Some(hi_core::system_prompt::resolve());
+    let bundle = match tools_flag {
+        Some(value) => ToolBundle::parse(value)?,
+        None => match settings.default_tools.as_deref() {
+            Some(value) => ToolBundle::parse(value)?,
+            None => ToolBundle::default(),
+        },
+    };
+    let cwd = std::env::current_dir()
+        .map_err(|err| format!("cannot determine current directory: {err}"))?;
+    let tools = Arc::new(bundle.registry(&cwd));
+    let system_prompt = {
+        let mut prompt = hi_core::system_prompt::resolve();
+        let notes = tools.prompt_notes();
+        if !notes.is_empty() {
+            prompt.push_str("\n\n# Tool notes\n");
+            prompt.push_str(notes.trim_end());
+        }
+        Some(prompt)
+    };
     let thinking = settings.thinking;
     // Attach here, not just in the /model picker: a fresh session's
     // first turn must honor SYSTEM.md and settings.thinking too.
+    // The registry rides in two places: with_tools puts the definitions on
+    // the wire; the same Arc drives execution inside spawn_agent_turn.
     let provider = Arc::new(
         OpenAiCompatProvider::from_config(entry, selected.model.clone())
             .with_system_prompt(system_prompt.clone())
-            .with_thinking_level(thinking),
+            .with_thinking_level(thinking)
+            .with_tools(Arc::clone(&tools)),
     );
     Ok(Target {
         provider,
         status: Status {
             provider: selected.provider,
             model: selected.model,
+            tool_count: tools.len(),
         },
         config,
         system_prompt,
         thinking,
+        tools,
     })
 }
 
@@ -208,18 +254,30 @@ fn print_mode(cli: &Cli) -> ExitCode {
         Err(err) => return fail(&err),
     };
 
-    let (provider, status, thinking) = if cli.mock {
+    let (provider, status, thinking, tools) = if cli.mock {
         (
             Arc::new(MockProvider::default()) as Arc<dyn Provider>,
             Status {
                 provider: "mock".into(),
                 model: "mock".into(),
+                tool_count: 0,
             },
             None,
+            // The mock never emits tool calls — keep its registry empty.
+            Arc::new(ToolRegistry::new()),
         )
     } else {
-        match resolve_target(cli.provider.as_deref(), cli.model.as_deref()) {
-            Ok(target) => (target.provider, target.status, target.thinking),
+        match resolve_target(
+            cli.provider.as_deref(),
+            cli.model.as_deref(),
+            cli.tools.as_deref(),
+        ) {
+            Ok(target) => (
+                target.provider,
+                target.status,
+                target.thinking,
+                target.tools,
+            ),
             Err(err) => return fail(&err),
         }
     };
@@ -239,7 +297,7 @@ fn print_mode(cli: &Cli) -> ExitCode {
 
     match headless::run(
         provider,
-        Arc::new(ToolRegistry::new()),
+        tools,
         None, // gate: permission UX arrives with the extension host
         &mut history,
         &prompt,

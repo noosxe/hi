@@ -18,6 +18,7 @@ The headless branch links no `hi-tui` code paths at runtime.
 | `--print`, `-p` | Run one prompt headlessly, print the final reply, exit |
 | `PROMPT` | Positional prompt; requires `--print` (piped stdin is prepended) |
 | `--no-session` | Run without loading or saving a session file (conflicts with `--continue`) |
+| `--tools <BUNDLE>` | Built-in set: `none` \| `read-only` \| `coding` \| `all` (default `coding`, or `defaultTools` in settings) |
 
 `after_help` points at `~/.config/hi/models.json` and the README schema.
 
@@ -43,9 +44,14 @@ otherwise (interactive):
   2. --list-models → selection::list_for   — prints "name:" + one id per line
   3. resolve_target: Settings::load() →    — selection::resolve(config,
        cli.provider, cli.model, settings.default_model)
+  3. resolve_target: Settings::load() →    — selection::resolve(config,
+       cli.provider, cli.model, settings.default_model);
+       --tools flag, else settings.defaultTools, else `coding`
+       → ToolBundle → ToolRegistry built at the cwd
   4. OpenAiCompatProvider::from_config(...)
-       .with_system_prompt(system_prompt::resolve())
+       .with_system_prompt(resolve() + tool prompt notes)
        .with_thinking_level(settings.thinking)
+       .with_tools(the same registry — wire and execution stay in sync)
   5. Catalog built once at startup:        — for each provider,
        entry.list_model_ids().ok() non-empty; failures/empty silently skipped
        (same 10s discovery timeout as --list-models)
@@ -55,15 +61,17 @@ otherwise (interactive):
   7. launch(...) → hi_tui::run(...)
 ```
 
-Note the asymmetry worth preserving: `system_prompt` is resolved from the
-file chain at startup, but `thinking` travels from settings; both are
-re-attached to the provider whenever the `/model` picker rebuilds it.
+Note the asymmetry worth preserving: `system_prompt` (with tool notes woven
+in) and the tool registry are resolved from files/settings at startup, but
+`thinking` travels from settings; all three are re-attached to the provider
+whenever the `/model` picker rebuilds it.
 
 ## Exit codes
 
 - `ExitCode::SUCCESS` — normal end of session / successful listing
 - `ExitCode::FAILURE` — config load failure, selection failure, listing
-  failure, TUI error, headless turn failure, missing `--print` prompt;
+  failure, TUI error, headless turn failure, missing `--print` prompt,
+  unknown `--tools` bundle;
   message printed as `hi: <message>` on stderr (`fail()`), so scripts
   can tell success from failure
 
@@ -89,6 +97,8 @@ hi -p --no-session "throwaway"          # don't touch the session dir
   `--continue` keeps appending to the same file, `--no-session` skips.
 - The machinery is `hi_core::headless` — the same agent loop, tools,
   and session files as the TUI (see [core.md](core.md)).
+- `--tools` composes: `hi -p --tools read-only "…"` runs headless with
+  only the observation tools; `--tools none` restores a pure-text model.
 ## Where new startup behavior goes
 
 - New flags → the `Cli` struct (clap derive handles help).
@@ -98,3 +108,6 @@ hi -p --no-session "throwaway"          # don't touch the session dir
 - Headless runs → `hi_core::headless` owns the drain; `print_mode` here
   only assembles the prompt, session, and exit code. JSONL event output
   (`--mode json`) is issue #18; auto-print on non-TTY streams is #19.
+- New built-in tools → `crates/core/src/tools/` (one file per tool, the
+  truncation contract in `truncate.rs`); bundles and selection stay in
+  `ToolBundle` (see [core.md](core.md)).

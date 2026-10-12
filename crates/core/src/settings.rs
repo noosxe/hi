@@ -24,6 +24,11 @@ pub struct Settings {
     /// `thinkingLevelMap` has an entry for it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingLevel>,
+    /// Which built-in tool bundle launches with the session: `none` |
+    /// `read-only` | `coding` | `all` (default `coding`). `--tools`
+    /// overrides per run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_tools: Option<String>,
 }
 
 /// The expected path of `settings.json` next to `models.json`.
@@ -103,6 +108,7 @@ mod tests {
         let original = Settings {
             default_model: Some("local/llama".into()),
             thinking: None,
+            default_tools: Some("read-only".into()),
         };
         original.save_to(&path).unwrap();
         let loaded = Settings::load_from(&path).unwrap();

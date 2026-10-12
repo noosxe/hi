@@ -130,3 +130,35 @@ slash commands.
   is the reference pattern).
 - README numbers lag the code (says 43 tests; 76 exist) — refresh when
   touching the README next.
+
+
+## AD-0004 — the harness ships its tools (2026-10-12)
+
+**Status:** implemented (issue #26). AD-0003 built the tool *system*; this
+decision ships the tools.
+
+**The decision:** built-in capabilities live in `hi-core`
+(`crates/core/src/tools/`), selected per run by a bundle — `none`,
+`read-only` (read/grep/find/ls), `coding` (read/bash/edit/write), `all` —
+via `--tools` or `settings.defaultTools`. The default is **`coding`**: hi
+is a coding harness first (maintainer ruling on #26), and it matches pi's
+`defaultTools`.
+
+- **Tool prompt contributions**: each tool carries a prompt note ("use read
+  to examine files instead of cat"), and the registry weaves them into the
+  system prompt — tool metadata teaches the model, not just the harness.
+- **Security stance (pi's, deliberate)**: tool paths resolve against the
+  cwd but are *not jailed*; there is no per-call approval prompt. Tools run
+  with the session's OS permissions — the boundary is the operating system,
+  not the harness. Containerize when the work is untrusted.
+- **Dependencies**: regex and glob matching use the `regex` and `globset`
+  crates (ruling: no hand-rolled parsers). Precedent set: canonical
+  pure-Rust crates are acceptable when the alternative is hand-rolling —
+  the first additions since `ureq`.
+- **One truncation contract**: every tool result clamps at 2000 lines or
+  50 KiB (head for inspection tools, tail for bash), implemented once in
+  `tools/truncate.rs` with its own tests.
+- **v1 limitations are filed, not hidden**: root-level `.gitignore` only
+  (#28), no image reads (#29), bash timeout kills the child but not
+  grandchildren (#30), no `/tools` command yet (#27), no Windows powershell
+  twin (#31).

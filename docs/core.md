@@ -1,13 +1,13 @@
 # `hi-core` reference
 
 Files this doc describes: everything under `crates/core/src/` — `lib.rs`,
-`message.rs`, `event.rs`, `tool.rs`, `agent.rs`, `session.rs`, `headless.rs`, `provider.rs`, `openai.rs`, `mock.rs`, `config.rs`,
+`message.rs`, `event.rs`, `tool.rs`, `agent.rs`, `session.rs`, `headless.rs`, `tools/`, `provider.rs`, `openai.rs`, `mock.rs`, `config.rs`,
 `selection.rs`, `settings.rs`, `thinking.rs`, `system_prompt.rs`,
 `test_support.rs`.
 
 Public surface re-exported from `crates/core/src/lib.rs`: `NAME`, `Event`,
 `Message`, `MockProvider`, `ModelsConfig`, `ModelConfig`, `ProviderConfig`,
-`OpenAiCompatProvider`, `Provider`, `spawn_turn`, `Settings`, `ThinkingLevel`, `Tool`,
+`OpenAiCompatProvider`, `Provider`, `spawn_turn`, `Settings`, `ThinkingLevel`, `Tool`, `ToolBundle`,
 `ToolAnnotations`, `ToolCall`, `ToolResult`, `ToolDecision`, `ToolGate`, `ToolRegistry`,
 `DEFAULT_MAX_TOOL_ROUNDS`, `spawn_agent_turn`, `Session`, `SessionHeader`, `LoadedSession`.
 Note: `selection` is a public module (`hi_core::selection::{resolve, list_for,
@@ -66,6 +66,41 @@ exactly one result (deny / unknown tool / bad JSON are error *results*, never `E
 Cap exceeded ⇒ `Error("tool loop did not settle within N rounds")` + `TurnEnd`. The loop never
 mutates the caller's history — consumers mirror the event stream (details in
 [turn-lifecycle.md](turn-lifecycle.md)).
+
+## tools/ — the built-in capabilities (#26)
+
+The harness ships tools, not just a loop. One file per tool under
+`crates/core/src/tools/`, plus two support modules: `truncate.rs` (the
+output contract) and `walk.rs` (gitignore-aware directory walking for
+grep/find).
+
+- **The seven built-ins**: `read` (line-numbered, `offset`/`limit` paging),
+  `bash` (optional `timeout` seconds, no default; tail-kept output; non-zero
+  exit is an error result with the output inside), `edit` (`edits[]` matched
+  against the ORIGINAL file, each exactly once, overlaps rejected),
+  `write` (creates parents, full overwrite), `grep` (`regex` crate, rg-style
+  rendering, `glob` filter, context), `find` (`globset`, .gitignore-aware),
+  `ls` (sorted, `/` suffix for dirs, dotfiles).
+- **Truncation contract**: every result clamps at 2000 lines or 50 KiB,
+  whichever hits first — head-kept for inspection tools, tail-kept for bash.
+  The contract lives in `truncate.rs` and has its own tests.
+- **Bundles** (`ToolBundle`): `none`, `read-only` (read/grep/find/ls),
+  `coding` (read/bash/edit/write — the default: hi is a coding harness
+  first), `all`. Selected by `--tools` or `settings.defaultTools`;
+  `ToolBundle::registry(cwd)` builds the registry.
+- **Prompt contributions**: every tool may carry a `prompt_note`
+  ("use read to examine files instead of cat"); the registry joins them and
+  the CLI weaves them into the system prompt under `# Tool notes`.
+- **Security stance (pi's, deliberate)**: tool paths resolve against the
+  cwd but are **not jailed**; there is no per-call approval prompt. Tools
+  run with the session's OS permissions — the boundary is the operating
+  system, not the harness. Run hi in a container when the work is untrusted.
+- The registry rides in two places by design: `.with_tools(...)` puts the
+  definitions on the wire, and the same `Arc` drives execution inside
+  `spawn_agent_turn` — resolve_target keeps them in sync, and the `/model`
+  picker re-attaches both.
+- Deferred with issues: full gitignore semantics (#28), images in read
+  (#29), process-group kill for bash (#30), `/tools` command (#27).
 
 ## session.rs — transcripts that survive restarts
 

@@ -14,9 +14,10 @@ cargo run            # hi --mock needs no config
 
 CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI).
 
-Current count: **99 `#[test]` functions** (the README's count gets refreshed in passing;
-trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: selection 14,
-app 14, openai 13, agent 9, session 6, headless 5, status 7, system_prompt 6, wrap 6,
+Current count: **155 `#[test]` functions** (the README's count gets refreshed in passing;
+trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 55
+(grep 8, walk 7, truncate 7, read 7, edit 6, bundle 5, bash 5, find 4, write 3, ls 3),
+selection 14, app 14, openai 13, agent 9, status 8, session 6, system_prompt 6, wrap 6,
 settings 5, commands 4, config 4, mock 2, catalog 2, thinking 2.
 ## The central tool: `FakeApi` (`crates/core/src/test_support.rs`, cfg(test))
 
@@ -78,6 +79,7 @@ assert!(api.first_request().contains("\"stream\":true"));
 | system prompt chain, whitespace-only files | `system_prompt.rs` |
 | tool registry rules, gate decisions (deny/mutate), loop rounds + cap, scripted replay | `agent.rs`, `tool.rs` |
 | headless drain: final text, narration flush before tool calls, error contract, session append, prompt assembly | `headless.rs` |
+| built-in tools: truncation contract, gitignore walk, per-tool behavior (paging, uniqueness, exit codes, timeouts), bundle selection | `tools/` |
 | session layout, header/message round-trip incl. tools, torn-tail tolerance, project keys, XDG data dir | `session.rs`, `config.rs` |
 | SSE parsing, streaming end-to-end, discovery shapes, thinking kwargs on the wire, tool-call fragments + wire replay, auth-header rules, error contract | `openai.rs` |
 | git branch detection (HEAD ref, detached, worktree `.git` file, walk-up, no repo), status composition | `tui/status.rs` |
