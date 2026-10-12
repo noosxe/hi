@@ -14,11 +14,11 @@ cargo run            # hi --mock needs no config
 
 CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI).
 
-Current count: **155 `#[test]` functions** (the README's count gets refreshed in passing;
+Current count: **163 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 55
 (grep 8, walk 7, truncate 7, read 7, edit 6, bundle 5, bash 5, find 4, write 3, ls 3),
 selection 14, app 14, openai 13, agent 9, status 8, session 6, system_prompt 6, wrap 6,
-settings 5, commands 4, config 4, mock 2, catalog 2, thinking 2.
+settings 5, commands 4, config 4, ui 8, mock 2, catalog 2, thinking 2.
 ## The central tool: `FakeApi` (`crates/core/src/test_support.rs`, cfg(test))
 
 A minimal HTTP server on an ephemeral port:
@@ -83,10 +83,11 @@ assert!(api.first_request().contains("\"stream\":true"));
 | session layout, header/message round-trip incl. tools, torn-tail tolerance, project keys, XDG data dir | `session.rs`, `config.rs` |
 | SSE parsing, streaming end-to-end, discovery shapes, thinking kwargs on the wire, tool-call fragments + wire replay, auth-header rules, error contract | `openai.rs` |
 | git branch detection (HEAD ref, detached, worktree `.git` file, walk-up, no repo), status composition | `tui/status.rs` |
+| transcript wrapping: word boundaries, label on first row only, source newlines, hard splits, tool preview cap + marker, error label style, degenerate widths | `tui/ui.rs` |
 | slash matching, exact dispatch, registry hygiene | `tui/commands.rs` |
 | catalog flattening, empty catalog | `tui/catalog.rs` |
 | queueing, Esc-cancel + queue restore, completion keys, unknown commands | `tui/app.rs` |
 | wrap width semantics, oversized-word hard split | `tui/wrap.rs` |
 
-Gaps to be aware of: `ui.rs` has no tests (drawing), `lib.rs` event loop is
+Gaps to be aware of: `ui.rs` drawing has row-level tests (scrollback wrapping) but no pty/frame snapshots, `lib.rs` event loop is
 untested (needs a pty), CLI `main` is untested (thin by design).

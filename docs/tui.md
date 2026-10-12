@@ -120,10 +120,16 @@ long input:  [stream 2] [input 8] [status 1]
   terminal cursor parks right after the typed text; while busy, the top rule
   carries the right-aligned activity label in yellow.
 - Transcript is NOT drawn here — finalized messages go to scrollback via
-- Transcript is NOT drawn here — finalized messages go to scrollback via
-  `message_into`; the live area shows the in-flight `turn.text` dim. Tool
-  activity lands in the same scrollback: `tool name(args)` in yellow, and
-  `result` dim — red when the call was refused or failed (`is_error`).
+  `message_rows` + `rows_into`; the live area shows the in-flight
+  `turn.text` dim. Messages wrap at word boundaries (`wrap.rs` is the one
+  wrap implementation for input, transcript, and streaming): the label
+  ("you ", "assistant ") occupies the first row and shrinks its wrap
+  capacity, continuation rows get the full width, and the insert height
+  is the wrapped row count — never one row per message. Tool activity
+  lands in the same scrollback: `tool name(args)` in yellow, and `result`
+  dim — red when the call was refused or failed (`is_error`); both are
+  preview-capped at 10 wrapped rows plus a `… N more lines` marker (full
+  output lives in the session file; expandable blocks are #33).
 - Other pieces: `draw_picker`, `draw_completion`, `draw_status`,
   `welcome_into`.
 

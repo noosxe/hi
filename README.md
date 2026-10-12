@@ -21,7 +21,7 @@ later.
 - Session transcripts persist per project (JSONL, append-only); `hi --continue` resumes the newest one
 - Headless one-shot mode: `hi -p "prompt"` (or `git diff | hi -p "review"`) prints the final reply and exits
 - Built-in agent tools: the model can read, search, list, write, edit, and run commands — the `coding` bundle by default, `--tools read-only|none|all` to change
-- 155 tests, including a fake HTTP server that records requests
+- 163 tests, including a fake HTTP server that records requests
 
 Not yet: JSONL event output for scripts, subagents, background tasks, extensions.
 The selection and settings layers are built so each slots in without
@@ -32,7 +32,7 @@ rework.
 ```sh
 nix develop          # Rust toolchain + cargo (or any Rust 1.85+, edition 2024)
 cargo run            # builds the `hi` binary; `hi --mock` needs no config
-cargo test           # 155 tests; no network needed
+cargo test           # 163 tests; no network needed
 ```
 
 
