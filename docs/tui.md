@@ -64,7 +64,11 @@ Behaviors (each pinned by a test in `app.rs`):
   selected row in `Fg::Accent`. The visible window is five rows, centered
   on the selection, with a muted `  (n/m)` row when the matches overflow —
   and Up/Down wrap. Descriptions only render when the terminal is wider
-  than 40 columns with room left, pi's exact rule.
+  than 40 columns with room left, pi's exact rule. The SelectList is the
+  one renderer for every menu (`ui::select_list_rows`): the `/model`
+  picker rides the same rows with a muted key-hint footer, the `/resume`
+  chooser marks its rows the same way with a count row on overflow, and
+  both pickers wrap their navigation.
   the typed text; unknown commands report instead of sending.
 - Enter mid-turn queues; Esc mid-turn cancels **and** restores the queue
   into the input box.

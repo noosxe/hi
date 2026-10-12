@@ -96,19 +96,31 @@ pub fn picker_lines(
         .collect();
     let selected = selected.min(visible.len().saturating_sub(1));
     let slots = height.saturating_sub(3); // title + filter + hint
-    let start = selected.saturating_sub(slots.saturating_sub(1));
+    // The same SelectList as every hi menu: when the matches overflow
+    // the window, one row is spent on the muted `(n/m)` count.
+    let overflowing = visible.len() > slots;
+    let take = slots.saturating_sub(usize::from(overflowing));
+    let start = selected.saturating_sub(take.saturating_sub(1));
 
     let mut lines = vec![Line::styled("resume a session", THEME.fg(Fg::Dim))];
-    for (offset, index) in visible.iter().skip(start).take(slots).enumerate() {
+    for (offset, index) in visible.iter().skip(start).take(take).enumerate() {
         let row = row_text(&summaries[*index], previews[*index].as_deref(), now);
         let chosen = start + offset == selected;
+        // The selected row colors whole — accent, pi's selectedText;
+        // unselected rows ride muted.
         let style = if chosen {
-            THEME.fg(Fg::ToolTitle)
+            THEME.fg(Fg::Accent)
         } else {
             THEME.fg(Fg::Muted)
         };
-        let marker = if chosen { "❯ " } else { "  " };
+        let marker = if chosen { "→ " } else { "  " };
         lines.push(Line::styled(format!("{marker}{row}"), style));
+    }
+    if overflowing {
+        lines.push(Line::styled(
+            format!("  ({}/{})", selected + 1, visible.len()),
+            THEME.fg(Fg::Muted),
+        ));
     }
     if visible.is_empty() {
         lines.push(Line::styled("no sessions match", THEME.fg(Fg::Dim)));
@@ -265,14 +277,24 @@ mod tests {
         let lines = picker_lines(&summaries, &previews, "", 0, 8, SystemTime::UNIX_EPOCH);
         assert_eq!(lines.len(), 5); // title + 2 rows + filter + hint
         assert_eq!(lines[0].spans[0].content, "resume a session");
-        assert_eq!(lines[1].spans[0].content, "❯ 0s · keeper · keep me");
+        assert_eq!(lines[1].spans[0].content, "→ 0s · keeper · keep me");
         assert_eq!(lines[2].spans[0].content, "  0s · 22222222");
-        assert_eq!(lines[1].style, THEME.fg(Fg::ToolTitle));
+        assert_eq!(lines[1].style, THEME.fg(Fg::Accent));
         assert_eq!(lines[2].style, THEME.fg(Fg::Muted));
         assert_eq!(lines[3].spans[0].content, "› ");
         // Selected position beyond the list clamps; the marker follows.
         let lines = picker_lines(&summaries, &previews, "", 9, 8, SystemTime::UNIX_EPOCH);
-        assert_eq!(lines[2].spans[0].content, "❯ 0s · 22222222");
+        assert_eq!(lines[2].spans[0].content, "→ 0s · 22222222");
+        // Overflowing matches spend a row on the muted count.
+        let many: Vec<SessionSummary> = (0..9)
+            .map(|i| summary(&format!("0000000{i}-aaaa"), Some(&format!("s{i}")), 0))
+            .collect();
+        let previews: Vec<Option<String>> = (0..9).map(|_| None).collect();
+        let lines = picker_lines(&many, &previews, "", 0, 8, SystemTime::UNIX_EPOCH);
+        assert!(
+            lines.iter().any(|l| l.spans[0].content == "  (1/9)"),
+            "count row on overflow"
+        );
         // A filter matching nothing says so instead of hiding rows silently.
         let lines = picker_lines(&summaries, &previews, "zzz", 0, 8, SystemTime::UNIX_EPOCH);
         assert_eq!(lines[1].spans[0].content, "no sessions match");
