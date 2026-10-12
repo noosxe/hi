@@ -6,6 +6,8 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 hi-core = { path = "../core" }
+pulldown-cmark = "0.13.4"
+serde_json = "1"
 # ratatui re-exports its crossterm dependency, so one dep covers both
 ratatui = "0.30"
 unicode-width = "0.2"

@@ -1,12 +1,13 @@
 # `hi-tui` reference
 
 Files this doc describes: `crates/tui/src/lib.rs`, `app.rs`, `commands.rs`,
-`catalog.rs`, `status.rs`, `ui.rs`, `wrap.rs`.
+`catalog.rs`, `status.rs`, `ui.rs`, `markdown.rs`, `theme.rs`, `wrap.rs`.
 
 Module map: `lib.rs` (terminal lifecycle + event loop), `app.rs` (all state +
 input handling), `commands.rs` (slash registry), `catalog.rs` (picker menu
-data), `status.rs` (status-bar facts), `ui.rs` (widgets/drawing), `wrap.rs`
-(text wrapping). Public exports: `run`, `Catalog`, `Status`.
+data), `status.rs` (status-bar facts), `ui.rs` (widgets/drawing),
+`markdown.rs` (markdown → themed rows), `theme.rs` (role-indirected palette),
+`wrap.rs` (text wrapping). Public exports: `run`, `Catalog`, `Status`.
 
 ## lib.rs — terminal lifecycle and the frame clock
 
@@ -120,24 +121,60 @@ long input:  [stream 2] [input 8] [status 1]
   terminal cursor parks right after the typed text; while busy, the top rule
   carries the right-aligned activity label in yellow.
 - Transcript is NOT drawn here — finalized messages go to scrollback via
-  `message_rows` + `rows_into`; the live area shows the in-flight
-  `turn.text` dim. Messages wrap at word boundaries (`wrap.rs` is the one
-  wrap implementation for input, transcript, and streaming): the label
-  ("you ", "assistant ") occupies the first row and shrinks its wrap
-  capacity, continuation rows get the full width, and the insert height
-  is the wrapped row count — never one row per message. Tool activity
-  lands in the same scrollback: `tool name(args)` in yellow, and `result`
-  dim — red when the call was refused or failed (`is_error`); both are
-  preview-capped at 10 wrapped rows plus a `… N more lines` marker (full
-  output lives in the session file; expandable blocks are #33).
+  `block_rows` + `rows_into` (pi-style role blocks, no text labels; see the
+  markdown.rs and theme.rs sections below). The insert height is the
+  wrapped row count — never one row per message — and one blank row
+  separates consecutive blocks (pi's `outputPad`). While a tool runs, the
+  streaming area shows its **live pending block** (pending fill); when the
+  result lands, one merged block (bold tool name + collapsed args over the
+  output preview) prints to scrollback with a success- or error-tinted
+  fill. Blocks print once, at final state, and are then terminal-owned —
+  frozen colors, frozen width on resize, exactly like pi's inline mode.
+- `draw_stream` shows the in-flight `turn.text` as **markdown, undimmed**
+  (pi parity; it re-wraps per frame), or a turn error in the error color.
 - Other pieces: `draw_picker`, `draw_completion`, `draw_status`,
   `welcome_into`.
+
+## markdown.rs — markdown → themed terminal rows
+
+`markdown_rows(text, width, base_style) -> Vec<Line>` — parses with
+`pulldown-cmark` (CommonMark plus pi's `marked` extension set: GFM tables,
+strikethrough, tasklists; no math, by ruling) and renders with pi-tui's
+conventions: h1 bold+underlined, h2 bold, h3+ keep their `### ` prefix
+(headings color); fenced code restated with border-colored ``` lines and a
+two-space indented body (no syntax highlighting — a recorded divergence);
+`│ `-bordered blockquotes with italic bodies; `- `/`N. ` list markers with
+`[x]`/`[ ] ` task checkboxes and four-space nesting; links as underlined
+text plus ` (url)` when the text differs from the href (the no-OSC-8
+fallback pi uses); `─` rules; tables drawn as `┌─┬─┐` box grids with bold
+headers, per-column wrapping, and proportional shrink when natural widths
+overflow (pi's algorithm, min word width capped at 30). A blank line
+separates blocks inside one message, as pi does.
+
+Inline content is collected as styled segments and wrapped by
+`wrap_segments` — the styled sibling of `wrap.rs`, carrying styles across
+line breaks. User and assistant messages render as markdown (ruling ② of
+#33); system and error lines stay plain text (`System` dim, `Error` in the
+error color — pi renders diagnostics as colored text, no labels).
+
+## theme.rs — the palette behind roles
+
+`THEME.fg(Fg::…) -> Style` and `THEME.bg(Bg::…) -> Style` — renderers ask
+for roles (`Heading`, `Link`, `ToolTitle`, `UserMessage`, `ToolPending`,
+`ToolSuccess`, `ToolError`…), never colors, so palettes stay swappable.
+Every value is pi's `dark.json` OKHSL token resolved to sRGB through pi's
+own color math at authoring time; hi renders pi's exact tints. One built-in
+dark palette for now: a light palette, a `theme` setting, and terminal
+querying (`system`) are deliberate follow-ups, mirroring pi where `system`
+is a separate theme.
 
 ## wrap.rs — text wrapping helpers
 
 Display-width aware (counts terminal columns, not chars — CJK-safe), used by
-both input height estimation and transcript printing. Oversized words
-(longer than the width) hard-split. Tests pin the width semantics and the
+input height estimation, plain system/error lines, and tool output bodies.
+Oversized words (longer than the width) hard-split. Styled markdown wraps
+through `markdown.rs`'s `wrap_segments`, which mirrors these semantics while
+carrying styles across breaks. Tests pin the width semantics and the
 hard-split behavior.
 
 ## Extension-relevant seams (see decisions.md before touching)

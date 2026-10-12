@@ -95,6 +95,9 @@ Works today (see also README "What works today"):
 
 - Inline TUI (bottom 12 rows, no alt-screen, transcript lives in native
   scrollback), streaming replies, Esc cancel, queued mid-turn messages
+- pi-style transcript: markdown rendering (pulldown-cmark), role-themed
+  blocks with background fills, merged tool blocks with state tints (see
+  [tui.md](tui.md), [decisions.md](decisions.md) AD-0005)
 - `mock` + `hi_core::OpenAiCompatProvider` behind the one `Provider` trait
 - pi-style `models.json` with `$ENV` key interpolation, model discovery,
   hybrid listing policy
@@ -117,7 +120,7 @@ Works today (see also README "What works today"):
   selected by bundle (`--tools`, default `coding`), results clamped by one
   truncation contract, prompt notes woven into the system prompt (see
   [decisions.md](decisions.md), AD-0004)
-- 163 `#[test]` functions, no network needed (see [testing.md](testing.md))
+- 189 `#[test]` functions, no network needed (see [testing.md](testing.md))
 
 Deliberately not yet built:
 

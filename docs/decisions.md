@@ -162,3 +162,43 @@ is a coding harness first (maintainer ruling on #26), and it matches pi's
   (#28), no image reads (#29), bash timeout kills the child but not
   grandchildren (#30), no `/tools` command yet (#27), no Windows powershell
   twin (#31).
+
+---
+
+## AD-0005 — the transcript renders pi-style (2026-10-14)
+
+**Status:** implemented (issue #33, rulings recorded in the issue).
+
+**The decision:** the transcript abandons dim text labels ("you ",
+"assistant ") for pi's identity model — **role blocks with background
+fills**. User messages render as markdown inside a tinted full-width block;
+assistant replies render as plain markdown on the terminal's default colors;
+tool executions render as one merged block (bold tool name + collapsed args
+preview over the output preview) whose fill is state-tinted — pending while
+running, then success or error. Colors are **roles, never literals** at call
+sites (`THEME.fg(Fg::Heading)`), with the single dark palette being pi's
+`dark.json` OKHSL tokens resolved through pi's own color math.
+
+- **Architecture: inline parity** (researched in `pi-tui/dist/tui-main-screen.js`):
+  pi's default mode owns only a bottom live viewport; rows pushed into native
+  scrollback carry their baked ANSI colors and freeze there. hi does the same
+  with ratatui's primitives — `insert_before` prints blocks once at final
+  state; the managed region hosts the live pending tool block and the
+  streaming markdown. Accepted consequences, identical to pi inline: history
+  freezes at print-time width on resize, no expand/collapse. A fullscreen
+  opt-in mode (alt-screen viewport, rewrap, expandable blocks) remains a
+  possible future issue — pi has the same two-mode split.
+- **Markdown engine**: `pulldown-cmark` with pi's `marked` extension set
+  (GFM tables, strikethrough, tasklists; no math, by ruling). The renderer
+  maps events → themed rows following pi-tui's conventions (heading
+  prefixes, restated code fences, `│ ` quotes, box-drawn tables with
+  proportional column shrink). Deps: `pulldown-cmark` (plus its
+  `getopts`/`unicase`/`pulldown-cmark-escape` tree) and `serde_json`
+  (already in the workspace) land in `hi-tui` — the AD-0004 precedent
+  extends: canonical crates over hand-rolling CommonMark.
+- **User input renders as markdown too** (pi parity), accepting the
+  paste-distortion trade; system and error lines stay plain colored text.
+- **Known divergences from pi, recorded**: no syntax highlighting in code
+  blocks (pi uses cli-highlight), collapsed args preview sorts keys (serde
+  maps vs marked's source order), no expand keybind on the preview marker
+  (a fullscreen-mode feature), no OSC 8 hyperlinks or OSC 133 scroll zones.
