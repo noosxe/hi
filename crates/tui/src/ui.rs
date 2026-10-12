@@ -36,39 +36,20 @@ pub fn draw(frame: &mut Frame, app: &App) {
         );
         return;
     }
-    // A fixed 12-row viewport with two elastic consumers. Bottom-up:
-    // the status row is pinned, the input grows upward with its
-    // wrapped text (3 rows resting, up to 8), the menu takes rows
-    // above the input (0 when closed), and the streaming area keeps
-    // whatever remains — never fewer than 2 rows.
+    // The live viewport is the whole terminal (AD-0015), not the
+    // fixed 12-row sketch this file shipped with. Bottom-up: the
+    // status row is pinned, the input grows upward with its wrapped
+    // text (3 rows resting, up to 8), the menu takes rows above the
+    // input (0 when closed), and the streaming area keeps everything
+    // that remains — a reply fills the window; pi's live viewport is
+    // likewise the full terminal.
     //
-    //   resting:    [stream 8] [input 3] [status 1]
-    //   menu open:  [stream 5] [menu 3] [input 3] [status 1]
-    //   long input: [stream 2] [input 8] [status 1]
+    //   50 rows, resting: [stream 46] [input 3] [status 1]
     let input_rows =
         crate::wrap::wrapped_row_count(&app.input, area.width as usize).clamp(1, 6) as u16;
     let input_height = input_rows + 2; // rules
-    let menu_h = app.menu_height().min(9 - input_height);
-    let stream_h = 11 - input_height - menu_h;
-    let stream_area = Rect {
-        height: stream_h,
-        ..area
-    };
-    let menu_area = Rect {
-        y: area.y + stream_h,
-        height: menu_h,
-        ..area
-    };
-    let input_area = Rect {
-        y: area.y + 11 - input_height,
-        height: input_height,
-        ..area
-    };
-    let status_area = Rect {
-        y: area.y + 11,
-        height: 1,
-        ..area
-    };
+    let menu_h = app.menu_height();
+    let (stream_area, menu_area, input_area, status_area) = layout(area, input_height, menu_h);
     draw_stream(frame, stream_area, app);
     draw_input(frame, input_area, app);
     if menu_h > 0 {
@@ -79,6 +60,37 @@ pub fn draw(frame: &mut Frame, app: &App) {
         }
     }
     draw_status(frame, status_area, app);
+}
+
+/// The live-area partition (AD-0015), bottom-up: status 1 pinned at
+/// the bottom edge, input above it, menu above that, and the stream
+/// keeps every row from the top. Saturating by construction — each
+/// consumer subtracts from the one below it, so on absurdly short
+/// terminals the stream shrinks first, to nothing, and nothing
+/// panics. The scrollback above the viewport is simply not visible
+/// while the reply streams; the committed block lands there on
+/// completion, as always.
+fn layout(area: Rect, input_height: u16, menu_h: u16) -> (Rect, Rect, Rect, Rect) {
+    let status_area = Rect {
+        y: area.bottom().saturating_sub(1),
+        height: 1,
+        ..area
+    };
+    let input_area = Rect {
+        y: status_area.y.saturating_sub(input_height),
+        height: input_height,
+        ..area
+    };
+    let menu_area = Rect {
+        y: input_area.y.saturating_sub(menu_h),
+        height: menu_h,
+        ..area
+    };
+    let stream_area = Rect {
+        height: menu_area.y.saturating_sub(area.y),
+        ..area
+    };
+    (stream_area, menu_area, input_area, status_area)
 }
 
 /// The input area: top/bottom rules only, no side walls — pi-style.
@@ -687,6 +699,40 @@ mod tests {
     use ratatui::layout::Rect;
 
     #[test]
+    fn the_viewport_is_the_whole_terminal() {
+        // 40 rows resting: the stream keeps everything but the input
+        // and the status row — the old fixed 12-row sketch gave this
+        // terminal 8 stream rows.
+        let (stream, menu, input, status) = layout(Rect::new(0, 0, 80, 40), 3, 0);
+        assert_eq!((stream.height, menu.height), (36, 0));
+        assert_eq!((input.y, input.height), (36, 3)); // rows 36-38
+        assert_eq!((status.y, status.height), (39, 1));
+        // A menu rides directly above the input.
+        let (stream, menu, input, status) = layout(Rect::new(0, 0, 80, 40), 3, 4);
+        assert_eq!(stream.height, 32);
+        assert_eq!((menu.y, menu.height), (32, 4)); // rows 32-35
+        assert_eq!(input.y, 36);
+        assert_eq!(status.y, 39);
+    }
+
+    #[test]
+    fn short_terminals_degrade_without_panicking() {
+        // The stream shrinks first, to nothing.
+        let (stream, _, input, status) = layout(Rect::new(0, 0, 80, 6), 3, 0);
+        assert_eq!(stream.height, 2);
+        assert_eq!(input.y, 2);
+        assert_eq!(status.y, 5);
+        let (stream, _, input, _) = layout(Rect::new(0, 0, 80, 4), 3, 0);
+        assert_eq!(stream.height, 0);
+        assert_eq!(input.y, 0); // rows 0-2, status at 3
+        // Absurd — an input taller than the terminal: saturated, no
+        // panic, the status row still claims the bottom edge.
+        let (_, _, input, status) = layout(Rect::new(0, 0, 80, 2), 8, 0);
+        assert_eq!(status.y, 1);
+        assert_eq!(input.y, 0);
+    }
+
+    #[test]
     fn the_caret_tracks_the_logical_cursor() {
         let mut app = crate::app::test_app();
         app.input = "hello world".into();
@@ -696,20 +742,22 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();
         // "hello world" wraps to two input rows here: four rows of
-        // input box total, inner text starting at y = 11 - 4 + 1 = 8.
+        // input box on an 11-row frame, inner text starting at
+        // y = 11 - 1(status) - 4(input) + 1 = 7.
         assert_eq!(
             terminal.backend_mut().get_cursor_position().unwrap(),
-            Position { x: 5, y: 8 }
+            Position { x: 5, y: 7 }
         );
         // Mid-word wrap: cursor inside the second wrapped row.
         app.input = "hello brave world".into();
         app.cursor = 8; // after "brave"'s first two chars
         terminal.draw(|f| draw(f, &app)).unwrap();
-        // Three wrapped rows: inner text starts at y = 11 - 5 + 1 = 7,
-        // and the cursor sits on row 1, two columns into "brave".
+        // Three wrapped rows: the box starts at y = 11 - 1 - 5 = 5,
+        // inner text at 6 — and the cursor sits on wrapped row 1,
+        // two columns into "brave", so 7.
         assert_eq!(
             terminal.backend_mut().get_cursor_position().unwrap(),
-            Position { x: 2, y: 8 }
+            Position { x: 2, y: 7 }
         );
     }
 
