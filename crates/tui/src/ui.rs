@@ -5,7 +5,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Borders, List, ListItem, ListState, Paragraph, Widget};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::App;
 use crate::markdown::markdown_rows;
@@ -221,32 +221,86 @@ fn draw_completion(frame: &mut Frame, area: Rect, app: &App) {
     let Some(completion) = app.completion.as_ref() else {
         return;
     };
-    // Narrower than the viewport reads as a menu, not a pane.
-    let popup = Rect {
-        width: area.width.min(64),
-        ..area
-    };
-    let items: Vec<ListItem> = completion
+    // pi's SelectList, grounded on select-list.js: plain rows under
+    // the input (no box), a `→ ` marker on the selected row, the
+    // command in a primary column sized to the widest match (clamped
+    // 12–32, the slash-command layout), descriptions in a muted
+    // second column, and a `(n/m)` row whenever the matches overflow
+    // the five visible slots. The visible window is centered on the
+    // selection; the selected row colors whole — accent, pi's
+    // selectedText — while unselected descriptions ride muted.
+    const VISIBLE: usize = 5;
+    let total = completion.items.len();
+    let start = completion
+        .selected
+        .saturating_sub(VISIBLE / 2)
+        .min(total.saturating_sub(VISIBLE));
+    let end = (start + VISIBLE).min(total);
+    let width = area.width as usize;
+    let widest = completion
         .items
         .iter()
-        .map(|(name, description)| {
-            ListItem::from(Line::from(vec![
-                format!("/{name} ").bold(),
-                (*description).dim(),
-            ]))
-        })
-        .collect();
-    let mut state = ListState::default();
-    state.select(Some(completion.selected));
-    let list = List::new(items)
-        .block(
-            ratatui::widgets::Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" /{} ", app.input.strip_prefix('/').unwrap_or(""))),
-        )
-        .highlight_symbol("› ")
-        .highlight_style(Style::new().bold());
-    frame.render_stateful_widget(list, popup, &mut state);
+        .map(|(name, _)| name.width() + 2) // PRIMARY_COLUMN_GAP
+        .max()
+        .unwrap_or(0);
+    let column = (widest as u16).clamp(12, 32) as usize;
+    let desc_start = 2 + column;
+    let desc_width = width.saturating_sub(desc_start + 2);
+    let mut rows: Vec<Line<'static>> = Vec::new();
+    for (index, (name, description)) in completion
+        .items
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(end - start)
+    {
+        let selected = index == completion.selected;
+        let prefix = if selected { "→ " } else { "  " };
+        let mut spans: Vec<Span<'static>> = vec![Span::raw(prefix.to_string())];
+        // pi shows the description only with room to spare: a wide
+        // terminal and at least MIN_DESCRIPTION_WIDTH columns left.
+        if width > 40 && desc_width > 10 && !description.is_empty() {
+            let shown = truncate_cols(name, column - 2);
+            let gap = " ".repeat(column - 2 - shown.width());
+            spans.push(Span::raw(shown.to_string()));
+            spans.push(Span::raw(gap));
+            spans.push(Span::styled(
+                truncate_cols(description, desc_width).to_string(),
+                THEME.fg(Fg::Muted),
+            ));
+        } else {
+            spans.push(Span::raw(
+                truncate_cols(name, width.saturating_sub(2)).to_string(),
+            ));
+        }
+        let mut line = Line::from(spans);
+        if selected {
+            line = line.style(THEME.fg(Fg::Accent));
+        }
+        rows.push(line);
+    }
+    if total > VISIBLE {
+        let info = format!("  ({}/{total})", completion.selected + 1);
+        rows.push(Line::from(Span::styled(
+            truncate_cols(&info, width.saturating_sub(2)).to_string(),
+            THEME.fg(Fg::Muted),
+        )));
+    }
+    frame.render_widget(Paragraph::new(Text::from(rows)), area);
+}
+
+/// Cut `text` to at most `max` display columns (emoji are two), on a
+/// char boundary — pi's `truncateToWidth`.
+fn truncate_cols(text: &str, max: usize) -> &str {
+    let mut used = 0usize;
+    for (index, ch) in text.char_indices() {
+        let w = ch.width().unwrap_or(0);
+        if used + w > max {
+            return &text[..index];
+        }
+        used += w;
+    }
+    text
 }
 /// The in-progress reply, rendered live in the viewport, dimmed to
 /// signal it is not final. Only the tail fits in the elastic stream
@@ -744,6 +798,41 @@ mod tests {
     }
 
     #[test]
+    fn the_menu_rolls_with_the_selection_and_counts_its_rows() {
+        use crate::app::test_app;
+        let mut app = test_app();
+        app.completion = Some(crate::app::Completion {
+            items: vec![
+                ("alpha", "first"),
+                ("beta", "second"),
+                ("gamma", "third"),
+                ("delta", "fourth"),
+                ("epsilon", "fifth"),
+                ("zeta", "sixth"),
+                ("eta", "seventh"),
+            ],
+            selected: 0,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend_mut().buffer().clone();
+        let row_text = |y: u16| {
+            (0..60)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        let rows: Vec<String> = (0..20u16).map(row_text).collect();
+        // Five visible slots plus the count row; the window shows the
+        // head of the list, not the tail.
+        assert!(rows.iter().any(|r| r.contains("  (1/7)")));
+        assert!(rows.iter().any(|r| r.contains("alpha")));
+        assert!(!rows.iter().any(|r| r.contains("zeta")));
+        assert!(!rows.iter().any(|r| r.contains("sixth")));
+    }
+
+    #[test]
     fn menus_render_under_the_input_and_status_yields() {
         use crate::app::test_app;
         let mut app = test_app();
@@ -752,11 +841,11 @@ mod tests {
             ratatui::crossterm::event::KeyModifiers::NONE,
         ));
         assert!(app.completion.is_some(), "slash opens the completion");
-        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();
         let buf = terminal.backend_mut().buffer().clone();
         let row_text = |y: u16| {
-            (0..40)
+            (0..60)
                 .map(|x| buf[(x, y)].symbol().to_string())
                 .collect::<String>()
                 .trim_end()
@@ -765,12 +854,15 @@ mod tests {
         // Geometry, not coordinates: the input line (with the typed
         // "/") must sit ABOVE the completion items, the items must
         // reach the bottom edge, and the status line must have
-        // yielded — no "mock" anywhere in the frame.
+        // yielded — no "mock" anywhere in the frame. SelectList
+        // style: the marker rides the selected row, the description
+        // sits in its own column.
         let input_row = (0..20u16).find(|&y| row_text(y) == "/").expect("input row");
         let menu_row = (0..20u16)
-            .find(|&y| row_text(y).contains("/model"))
-            .expect("completion items row");
+            .find(|&y| row_text(y).contains("pick a model"))
+            .expect("completion description column");
         assert!(input_row < menu_row, "menu renders under the input");
+        assert!(row_text(menu_row - 1).contains("→ "), "selected row marker");
         assert!(
             !row_text(19).contains("mock"),
             "status yields while a menu is open"

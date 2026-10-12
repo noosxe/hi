@@ -601,7 +601,10 @@ impl App {
         if let Some(picker) = &self.picker {
             (picker.items.len() as u16 + 2).clamp(5, 6)
         } else if let Some(completion) = &self.completion {
-            (completion.items.len() as u16 + 2).clamp(3, 6)
+            // SelectList geometry: five visible rows, plus the
+            // `(n/m)` scroll row only when the matches overflow them.
+            let visible = (completion.items.len() as u16).min(5);
+            visible + u16::from(completion.items.len() > 5)
         } else {
             0
         }
@@ -711,15 +714,18 @@ impl App {
             }
             KeyCode::Up => {
                 if let Some(menu) = self.completion.as_mut() {
-                    menu.selected = menu.selected.saturating_sub(1);
+                    // pi wraps: up from the top lands on the last row.
+                    menu.selected = if menu.selected == 0 {
+                        menu.items.len() - 1
+                    } else {
+                        menu.selected - 1
+                    };
                 }
                 true
             }
             KeyCode::Down => {
-                if let Some(menu) = self.completion.as_mut()
-                    && menu.selected + 1 < menu.items.len()
-                {
-                    menu.selected += 1;
+                if let Some(menu) = self.completion.as_mut() {
+                    menu.selected = (menu.selected + 1) % menu.items.len();
                 }
                 true
             }
@@ -1297,12 +1303,28 @@ mod tests {
         let mut app = app();
         assert_eq!(app.menu_height(), 0);
         type_string(&mut app, "/");
-        // The whole registry is listed, capped at the 6-row menu zone.
-        let expected = (crate::commands::COMMANDS.len() as u16 + 2).clamp(3, 6);
+        // Five visible slots plus the scroll row only when the
+        // registry overflows them.
+        let total = crate::commands::COMMANDS.len();
+        let expected = (total as u16).min(5) + u16::from(total > 5);
         assert_eq!(app.menu_height(), expected);
+        // And the menu wraps: up from the first row lands on the last.
+        assert_eq!(app.completion.as_ref().unwrap().selected, 0);
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.completion.as_ref().unwrap().selected, total - 1);
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.completion.as_ref().unwrap().selected, 0);
         app.completion = None;
         app.open_picker(); // empty catalog clamps to the 5-row minimum
         assert_eq!(app.menu_height(), 5);
+    }
+
+    #[test]
+    fn a_filtered_menu_shrinks_with_its_matches() {
+        let mut app = app();
+        type_string(&mut app, "/m");
+        let matches = crate::commands::matching("m");
+        assert_eq!(app.menu_height(), matches.len() as u16);
     }
 
     #[test]
