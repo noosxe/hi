@@ -76,6 +76,15 @@ pub struct App {
     /// loop advances it. A session switch resets it so the new history
     /// prints below the old conversation.
     pub(crate) printed: usize,
+    /// An in-flight clipboard read (Ctrl-V). `Some` until the thread
+    /// reports and `pump` applies the outcome — a second Ctrl-V while
+    /// one is pending is ignored, not queued.
+    pub clipboard_rx: Option<std::sync::mpsc::Receiver<crate::clipboard::ClipboardOutcome>>,
+    /// A transient composer note (e.g. "clipboard unavailable"), shown
+    /// in the input's title and cleared by the next keypress. A failed
+    /// paste is not an event worth persisting — never enters the
+    /// transcript or the session.
+    pub note: Option<String>,
     /// Session-storage root override — tests point this at a temp
     /// directory; production uses the real data dir (`None`).
     pub session_root: Option<std::path::PathBuf>,
@@ -161,6 +170,8 @@ impl App {
             queued: None,
             turn: None,
             session_picker: None,
+            clipboard_rx: None,
+            note: None,
             printed: 0,
             session_root: None,
         }
@@ -168,6 +179,9 @@ impl App {
 
     /// React to one key press by mutating state.
     pub fn handle_key(&mut self, key: KeyEvent) {
+        // The composer note is transient by definition: any keypress
+        // supersedes it.
+        self.note = None;
         // Ctrl-C quits from anywhere — keys are typed text otherwise.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.quit = true;
@@ -190,6 +204,13 @@ impl App {
         if self.completion.is_some() && self.handle_completion_key(key) {
             return;
         }
+        // Ctrl-V pastes from the system clipboard off-thread. The
+        // outcome stages a *reference* — text, or a temp-file path —
+        // into the input; nothing sends until Enter (AD-0011).
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('v') {
+            self.request_paste();
+            return;
+        }
         match key.code {
             KeyCode::Char(c) => {
                 self.input.push(c);
@@ -206,7 +227,13 @@ impl App {
                 // no clone needed since we own the value anyway.
                 let msg = std::mem::take(&mut self.input);
                 let trimmed = msg.trim().to_string();
-                if let Some(command_text) = trimmed.strip_prefix('/') {
+                // A leading `/` is a command only when the rest could
+                // be one — command names never contain `/`, but staged
+                // paste paths always start with one (`/tmp/hi-clipboard-…`,
+                // AD-0011). `/tmp` alone must send as a message, and a
+                // typo'd `/modle` still earns its teaching error.
+                let command_text = trimmed.strip_prefix('/').filter(|rest| !rest.contains('/'));
+                if let Some(command_text) = command_text {
                     // Exact name wins; otherwise the highlighted
                     // completion speaks for the user.
                     let highlighted = self
@@ -636,9 +663,68 @@ impl App {
     /// Called once per frame. `try_recv` never blocks — it reports
     /// empty, ready, or disconnected — so the UI stays responsive
     /// even in the middle of a streaming turn.
+    /// Stage a clipboard read, unless one is already in flight.
+    pub fn request_paste(&mut self) {
+        if self.clipboard_rx.is_none() {
+            self.begin_clipboard_request(crate::clipboard::spawn_clipboard_read());
+        }
+    }
+
+    /// Test seam: stage a clipboard read whose outcome is controlled by
+    /// the caller instead of the real system clipboard.
+    pub fn begin_clipboard_request(
+        &mut self,
+        rx: std::sync::mpsc::Receiver<crate::clipboard::ClipboardOutcome>,
+    ) {
+        self.clipboard_rx = Some(rx);
+    }
+
+    /// A bracketed-paste event: insert verbatim. This is text paste —
+    /// images never arrive this way (they have no keystroke encoding);
+    /// Ctrl-V reads the clipboard for those.
+    pub fn handle_paste(&mut self, text: &str) {
+        self.input = crate::clipboard::append_pasted(&self.input, text);
+    }
+
+    /// Apply one clipboard outcome: a staged path or text joins the
+    /// input; failures become the transient composer note. A failed
+    /// paste never touches the transcript or the session.
+    pub fn handle_clipboard_outcome(&mut self, outcome: crate::clipboard::ClipboardOutcome) {
+        use crate::clipboard::ClipboardOutcome;
+        match outcome {
+            ClipboardOutcome::Image { path } => {
+                self.input = crate::clipboard::append_pasted(&self.input, &path);
+            }
+            ClipboardOutcome::Text(text) if !text.is_empty() => {
+                self.input = crate::clipboard::append_pasted(&self.input, &text);
+            }
+            // Empty text inserts nothing — a no-op, not an event.
+            ClipboardOutcome::Text(_) => {}
+            ClipboardOutcome::Empty => {
+                self.note = Some("clipboard holds no image or text".into());
+            }
+            ClipboardOutcome::Unavailable(e) => {
+                self.note = Some(format!("clipboard unavailable: {e}"));
+            }
+        }
+    }
+
     pub fn pump(&mut self) {
         // One frame, one tick — this drives the activity spinner.
         self.tick = self.tick.wrapping_add(1);
+        // Clipboard outcomes first: a staged path should be in the
+        // input by the time the next frame renders.
+        if let Some(rx) = self.clipboard_rx.take() {
+            let mut received = false;
+            while let Ok(outcome) = rx.try_recv() {
+                self.handle_clipboard_outcome(outcome);
+                received = true;
+            }
+            if !received {
+                // The thread is still reading; keep listening.
+                self.clipboard_rx = Some(rx);
+            }
+        }
         let Some(turn) = self.turn.as_mut() else {
             return;
         };
@@ -739,6 +825,104 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_v_stages_and_pump_applies_the_staged_path() {
+        let mut app = app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.begin_clipboard_request(rx);
+        app.handle_key(ctrl(KeyCode::Char('v')));
+        // The staged reference is not the send — nothing leaves the
+        // composer until Enter, and the pending read is not replaced.
+        assert!(app.clipboard_rx.is_some());
+        assert_eq!(app.input, "");
+        tx.send(crate::clipboard::ClipboardOutcome::Image {
+            path: "/tmp/hi-clipboard-1.png".into(),
+        })
+        .unwrap();
+        app.pump();
+        assert!(app.clipboard_rx.is_none());
+        assert_eq!(app.input, "/tmp/hi-clipboard-1.png");
+        // And the staged path sends as plain text: Enter → Message::User.
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.messages[0],
+            Message::User("/tmp/hi-clipboard-1.png".into())
+        );
+    }
+
+    #[test]
+    fn a_second_ctrl_v_while_pending_is_ignored() {
+        let mut app = app();
+        let (_tx, rx) = std::sync::mpsc::channel();
+        app.begin_clipboard_request(rx);
+        app.handle_key(ctrl(KeyCode::Char('v')));
+        assert!(app.clipboard_rx.is_some());
+    }
+
+    #[test]
+    fn clipboard_failure_is_a_transient_note_not_an_event() {
+        let mut app = app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.begin_clipboard_request(rx);
+        tx.send(crate::clipboard::ClipboardOutcome::Unavailable(
+            "no clipboard".into(),
+        ))
+        .unwrap();
+        app.pump();
+        assert_eq!(
+            app.note.as_deref(),
+            Some("clipboard unavailable: no clipboard")
+        );
+        // A failed paste never enters the transcript or the session.
+        assert!(app.messages.is_empty());
+        // The next keypress supersedes the note.
+        app.handle_key(key(KeyCode::Char('h')));
+        assert_eq!(app.note, None);
+        assert_eq!(app.input, "h");
+    }
+
+    #[test]
+    fn a_staged_path_sends_as_a_message_not_an_unknown_command() {
+        // The dispatch rule: `/name` is a command only while the rest
+        // contains no `/` — paths are messages, typos still teach.
+        let mut staged = app();
+        staged.input = "/tmp/hi-clipboard-1.png".into();
+        staged.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            staged.messages[0],
+            Message::User("/tmp/hi-clipboard-1.png".into())
+        );
+        // A typo'd command keeps its teaching error.
+        let mut other = app();
+        other.input = "/modle".into();
+        other.handle_key(key(KeyCode::Enter));
+        assert!(matches!(other.messages[0], Message::System(_)));
+    }
+
+    #[test]
+    fn empty_clipboard_notes_and_text_paste_appends_normalized() {
+        let mut app = app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.begin_clipboard_request(rx);
+        tx.send(crate::clipboard::ClipboardOutcome::Empty).unwrap();
+        app.pump();
+        assert_eq!(
+            app.note.as_deref(),
+            Some("clipboard holds no image or text")
+        );
+
+        app.note = None;
+        app.input.clear();
+        app.handle_paste("two\r\nlines\r");
+        assert_eq!(app.input, "two\nlines\n");
+        // Paste is insertion, not submission — even with newlines.
+        assert!(app.messages.is_empty());
     }
 
     fn type_string(app: &mut App, text: &str) {

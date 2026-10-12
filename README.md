@@ -24,8 +24,9 @@ later.
 - Honest wire identity: `hi/<version> (<os>; <arch>)` on every request; prompt-cache affinity via the session id so multi-turn runs hit server-side caches; telemetry beyond that is strictly opt-in
 - `read` attaches image files (png/jpeg/webp/gif) for vision models — policy-gated (`vision` on the model, `images` master switch), resized/transcoded to a universal budget first, honest metadata notes otherwise
 - on kitty-protocol terminals (kitty, Ghostty, WezTerm, Warp) those images render as real graphics in the transcript; everywhere else the text note stays
+- Ctrl-V pastes from the clipboard: an image is staged at a temp file and its path lands in the input as plain text — nothing sends until Enter, and the image enters the conversation only when the model reads it
 - Built-in agent tools: the model can read, search, list, write, edit, and run commands — the `coding` bundle by default, `--tools read-only|none|all` to change
-- 250 tests, including a fake HTTP server that records requests
+- 260 tests, including a fake HTTP server that records requests
 
 Not yet: JSONL event output for scripts, subagents, background tasks, extensions.
 The selection and settings layers are built so each slots in without
@@ -36,7 +37,7 @@ rework.
 ```sh
 nix develop          # Rust toolchain + cargo (or any Rust 1.85+, edition 2024)
 cargo run            # builds the `hi` binary; `hi --mock` needs no config
-cargo test           # 250 tests; no network needed
+cargo test           # 260 tests; no network needed
 ```
 
 

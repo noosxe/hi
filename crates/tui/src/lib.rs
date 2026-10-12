@@ -5,6 +5,7 @@
 //! simply never links any of this.
 
 mod app;
+mod clipboard;
 mod commands;
 mod kitty;
 mod markdown;
@@ -26,7 +27,8 @@ pub use status::Status;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ratatui::crossterm::event::{self, Event};
+use ratatui::crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event};
+use ratatui::crossterm::execute;
 use ratatui::{TerminalOptions, Viewport};
 
 use crate::app::App;
@@ -71,6 +73,13 @@ pub fn run(
     // try_init_with_options: enables raw mode, skips the alternate
     // screen, and installs a panic hook that restores the terminal.
     let mut terminal = ratatui::try_init_with_options(options)?;
+    // Bracketed paste: without it the terminal sends a paste as raw
+    // keystrokes, and every newline in the pasted text submits the
+    // input mid-paste. With it, the whole paste arrives as one
+    // `Event::Paste` (AD-0011). The panic hook restores the terminal
+    // but not this mode — a panic mid-paste may leak a stray `200~`
+    // into the shell, the standard crossterm trade-off.
+    execute!(std::io::stdout(), EnableBracketedPaste)?;
     terminal.insert_before(1, ui::welcome_into)?;
 
     let mut app = App::new(provider, status, catalog, config, init, telemetry);
@@ -89,6 +98,9 @@ pub fn run(
     // Receiver. The provider thread's next send fails, so it returns
     // instead of streaming into a dead channel.
     terminal.clear()?;
+    // Mirror the enable: leave the terminal the way we found it.
+    // Best-effort — teardown must not mask the run's result.
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     // restore() reports its own errors to stderr and returns () —
     // the try_restore() variant is the Result-returning one.
     ratatui::restore();
@@ -103,10 +115,14 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io
         // either way. `poll` (unlike the blocking `read` we had
         // before) is what lets provider events arrive and render with
         // zero keyboard input — roughly 20 frames per second.
-        if event::poll(Duration::from_millis(50))?
-            && let Event::Key(key) = event::read()?
-        {
-            app.handle_key(key);
+        if event::poll(Duration::from_millis(50))? {
+            match event::read()? {
+                Event::Key(key) => app.handle_key(key),
+                Event::Paste(text) => app.handle_paste(&text),
+                // Resize redraws every frame anyway; mouse and focus
+                // events carry nothing hi listens for.
+                _ => {}
+            }
         }
 
         // Deliver whatever the provider thread streamed this frame;

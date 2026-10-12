@@ -179,6 +179,24 @@ transcript:
   — the same note every terminal shows when no image protocol is
   detected. Images render as words, never as nothing.
 
+## clipboard.rs — paste stages a reference (AD-0011)
+
+Ctrl-V reads the system clipboard on a one-shot thread (arboard;
+image first, then text) and reports through a channel `pump` drains —
+the UI never blocks on a possibly-stalling X11 clipboard. An image is
+encoded to PNG (via `core::image_util::from_rgba` — arboard only ever
+hands back raw pixels) and staged at
+`temp_dir()/hi-clipboard-*.png`; the **path is inserted into the input
+as inert text**. Nothing sends until Enter, and the image reaches the
+model only when `read` runs on the path — gates, budget, honest notes,
+kitty rendering all inherited. A failed read is a transient note on
+the composer's title rule, gone at the next keypress; it never enters
+the transcript or the session. Text paste rides bracketed paste
+(`Event::Paste` → verbatim insert, newlines normalized) — without the
+mode enabled, pasted newlines would submit mid-paste. Command
+dispatch disambiguation: a leading `/` is a command only while the
+rest contains no `/`, so staged paths send as messages.
+
 ## markdown.rs — markdown → themed terminal rows
 
 `markdown_rows(text, width, base_style) -> Vec<Line>` — parses with
