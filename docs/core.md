@@ -47,7 +47,8 @@ structured payloads instead).
   do their own threading. `ToolAnnotations { read_only, destructive }` are hints for gates/UIs;
   hi never enforces them.
 - `ToolRegistry`: `BTreeMap<String, Arc<dyn Tool>>` — stable sorted wire order, duplicate-name
-  rejection, `definitions()` for the request's `tools` array. Empty registry ⇒ no `tools` field
+  rejection, `definitions()` for the request's `tools` array. Empty registry ⇒ no `tools` field.
+  `info()` snapshots `ToolInfo { name, description, annotations }` per tool (wire order) for UIs
   on the wire at all.
 - `ToolCall { id, name, arguments }` / `ToolResult { call_id, name, content, is_error, images }`:
   `arguments` stays **raw JSON text** (the model's exact words; the tool owns its schema).

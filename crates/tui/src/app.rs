@@ -769,10 +769,48 @@ impl App {
             "exit" | "quit" => self.quit = true,
             "model" => self.open_picker(),
             "resume" => self.open_session_picker(),
+            "tools" => self
+                .messages
+                .push(Message::System(Self::tools_listing(&self.tools))),
             other => self
                 .messages
                 .push(Message::System(format!("unknown command: /{other}"))),
         }
+    }
+
+    /// The `/tools` listing: one line per registered tool — name, its
+    /// annotation badges when the tool claims any (the derived default is
+    /// deliberately unlabeled), and the first sentence of its description
+    /// (the whole paragraph is model-facing and too chatty for the
+    /// transcript). Sorted — the registry's BTreeMap order. Rendered as a
+    /// dim `Message::System` notice: local-only, never sent to the
+    /// provider.
+    fn tools_listing(tools: &ToolRegistry) -> String {
+        let info = tools.info();
+        if info.is_empty() {
+            return "no tools registered".into();
+        }
+        let mut lines = vec![format!("registered tools ({})", info.len())];
+        for tool in info {
+            let mut badges: Vec<&str> = Vec::new();
+            if tool.annotations.read_only {
+                badges.push("read-only");
+            }
+            if tool.annotations.destructive {
+                badges.push("destructive");
+            }
+            let first_sentence = tool
+                .description
+                .split_once(". ")
+                .map_or(tool.description.as_str(), |(first, _)| first);
+            let badge = if badges.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", badges.join(", "))
+            };
+            lines.push(format!("  {}{} — {first_sentence}", tool.name, badge));
+        }
+        lines.join("\n")
     }
 
     /// Open the `/resume` picker over this project's sessions. Refused
@@ -1662,6 +1700,43 @@ mod tests {
         app.handle_key(ctrl(KeyCode::Char('a')));
         app.handle_key(key(KeyCode::Delete));
         assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn tools_listing_names_badges_and_first_sentences() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(hi_core::tools::BashTool::new(".")))
+            .unwrap();
+        registry
+            .register(Arc::new(hi_core::tools::ReadTool::new(".")))
+            .unwrap();
+
+        let listing = App::tools_listing(&registry);
+        let lines: Vec<&str> = listing.split('\n').collect();
+        assert_eq!(lines[0], "registered tools (2)");
+        // Sorted by name — the registry's order, not insertion order.
+        assert!(lines[1].starts_with("  bash (destructive) — Execute a bash command"));
+        assert!(lines[2].starts_with("  read (read-only) — Read the contents of a text file"));
+        // The rest of the description paragraph stays out.
+        assert!(!listing.contains("line-numbered"));
+    }
+
+    #[test]
+    fn empty_registry_lists_nothing() {
+        let registry = ToolRegistry::new();
+        assert_eq!(App::tools_listing(&registry), "no tools registered");
+    }
+
+    #[test]
+    fn tools_command_pushes_a_local_notice() {
+        let mut app = app();
+        app.run_command("tools");
+        let last = app.messages.last().unwrap();
+        match last {
+            Message::System(text) => assert_eq!(text, "no tools registered"),
+            other => panic!("expected a System notice, got {other:?}"),
+        }
     }
 
     #[test]
