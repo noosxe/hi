@@ -18,7 +18,8 @@ later.
 - A real CLI: `--provider`/`--model`, `--list-models`, `--mock`, `--help` — and Esc cancels a running turn
 - `/model` picker in the TUI: arrows to move, Enter switches this session, Ctrl-S saves the default
 - Slash commands with completion: type `/` to see the menu, Tab completes, Enter runs
-- 88 tests, including a fake HTTP server that records requests
+- Session transcripts persist per project (JSONL, append-only); `hi --continue` resumes the newest one
+- 94 tests, including a fake HTTP server that records requests
 
 Not yet: headless one-shot mode, an effort indicator, extensions.
 The selection and settings layers are built so each slots in without
@@ -29,7 +30,7 @@ rework.
 ```sh
 nix develop          # Rust toolchain + cargo (or any Rust 1.85+, edition 2024)
 cargo run            # builds the `hi` binary; `hi --mock` needs no config
-cargo test           # 88 tests; no network needed
+cargo test           # 94 tests; no network needed
 ```
 
 

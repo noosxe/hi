@@ -11,6 +11,7 @@ pub mod mock;
 pub mod openai;
 pub mod provider;
 pub mod selection;
+pub mod session;
 pub mod settings;
 pub mod system_prompt;
 pub mod thinking;
@@ -26,6 +27,7 @@ pub use message::Message;
 pub use mock::MockProvider;
 pub use openai::OpenAiCompatProvider;
 pub use provider::{Provider, spawn_turn};
+pub use session::{LoadedSession, Session, SessionHeader};
 pub use settings::Settings;
 pub use thinking::ThinkingLevel;
 

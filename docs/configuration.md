@@ -13,6 +13,7 @@ root README. Behavior questions (precedence, discovery policy) are covered in
 | `settings.json` | same dir, `settings.json` | by the app (Ctrl-S in the `/model` picker); missing file is normal |
 | `SYSTEM.md` / `APPEND_SYSTEM.md` | same dir | by hand, optional |
 | `.hi/SYSTEM.md` / `.hi/APPEND_SYSTEM.md` | project root (cwd) | by hand, optional |
+| sessions | `$XDG_DATA_HOME/hi/sessions/<project>/`, else `~/.local/share/hi/sessions/<project>/` | by the app, every run |
 
 `XDG_CONFIG_HOME` must be set **and non-empty** to be honored; otherwise
 `~/.config/hi` is used (tested: `config_dir_prefers_xdg_then_falls_back_to_home`).
@@ -99,3 +100,28 @@ Built-in default: `"You are hi, a concise terminal assistant."`
 
 Joined blank-line separated; whitespace-only files count as absent; the
 result travels as one leading `role: "system"` message.
+
+## Sessions
+
+One JSONL file per session, under the **data** directory (not config —
+transcripts are generated data):
+
+```
+~/.local/share/hi/sessions/--Users-mechsoull-Projects-hi--/1760000000000_<uuid>.jsonl
+```
+
+- The directory name is the cwd, pi-style (`/` → `-`, wrapped in `--`), so
+  resume is per-project by construction.
+- Line 1 is the session header (`type:"session"`, camelCase: `id`,
+  `createdAt`, `cwd`, `provider`, `model`, optional `thinking`, `version`).
+  Every later line is one finalized message:
+  `{"type":"message","message":{"toolCall":{…}}}` — the same shapes as the
+  `Message` enum, so tool calls and results round-trip natively.
+- Writes are **append + flush at turn end**; tokens are never persisted. A
+  crash costs at most the in-flight turn, and a torn final line is
+  tolerated on read (a malformed line mid-file is a loud error).
+- Unknown fields are ignored, like every hi file — newer sessions open in
+  older builds.
+- `hi --continue` reopens the newest session for the current directory and
+  keeps appending to the same file; the model/provider come from today's
+  flags and config, not frozen from the header.

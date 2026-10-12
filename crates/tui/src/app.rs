@@ -5,7 +5,7 @@ use std::time::Instant;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use hi_core::{
-    DEFAULT_MAX_TOOL_ROUNDS, Event, Message, ModelsConfig, OpenAiCompatProvider, Provider,
+    DEFAULT_MAX_TOOL_ROUNDS, Event, Message, ModelsConfig, OpenAiCompatProvider, Provider, Session,
     Settings, ThinkingLevel, ToolRegistry, spawn_agent_turn,
 };
 
@@ -30,6 +30,10 @@ pub struct App {
     /// Tools the model may call this session. Empty until built-ins
     /// land; the agent loop already runs whatever is registered here.
     pub tools: Arc<ToolRegistry>,
+    /// The open session file, appended at every turn end. `None` when
+    /// persistence is unavailable (no data dir, unwritable path) — chat
+    /// must never depend on the disk.
+    pub session: Option<Session>,
     /// Status-bar facts: which provider and model this session uses.
     /// Passed in from the CLI — the trait object can't name itself.
     pub status: Status,
@@ -103,14 +107,19 @@ impl App {
         status: Status,
         catalog: Catalog,
         config: ModelsConfig,
-        system_prompt: Option<String>,
-        thinking: Option<ThinkingLevel>,
-        tools: Arc<ToolRegistry>,
+        init: crate::SessionInit,
     ) -> Self {
+        let crate::SessionInit {
+            system_prompt,
+            thinking,
+            tools,
+            messages,
+            session,
+        } = init;
         Self {
             quit: false,
             input: String::new(),
-            messages: Vec::new(),
+            messages,
             provider,
             status,
             location: location_label(),
@@ -119,6 +128,7 @@ impl App {
             system_prompt,
             thinking,
             tools,
+            session,
             picker: None,
             completion: None,
             tick: 0,
@@ -451,6 +461,7 @@ impl App {
             return;
         };
         let mut finished = false;
+        let added_from = self.messages.len();
         // Messages produced by tool events queue here and land in the
         // transcript after the loop — `self.messages` can't be touched
         // while `turn` holds a borrow of `self`.
@@ -501,6 +512,18 @@ impl App {
                 self.start_turn();
             }
         }
+        // Persist everything finalized this frame. An append failure
+        // degrades once, loudly — the session is dropped so the note is
+        // not spammed every frame, and chat continues without disk.
+        let append_error = self
+            .session
+            .as_mut()
+            .and_then(|session| session.append(&self.messages[added_from..]).err());
+        if let Some(err) = append_error {
+            self.session = None;
+            self.messages
+                .push(Message::System(format!("session not saved: {err}")));
+        }
     }
 }
 
@@ -519,9 +542,13 @@ mod tests {
             },
             Catalog::default(),
             ModelsConfig::default(),
-            None,
-            None,
-            Arc::new(ToolRegistry::new()),
+            crate::SessionInit {
+                system_prompt: None,
+                thinking: None,
+                tools: Arc::new(ToolRegistry::new()),
+                messages: Vec::new(),
+                session: None,
+            },
         )
     }
 

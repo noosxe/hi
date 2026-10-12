@@ -14,10 +14,10 @@ cargo run            # hi --mock needs no config
 
 CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI).
 
-Current count: **88 `#[test]` functions** (the README's count gets refreshed in passing;
+Current count: **94 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: selection 14,
-app 14, openai 13, agent 9, status 7, system_prompt 6, wrap 6, settings 5, commands 4,
-config 4, mock 2, catalog 2, thinking 2.
+app 14, openai 13, agent 9, session 6, status 7, system_prompt 6, wrap 6, settings 5,
+commands 4, config 4, mock 2, catalog 2, thinking 2.
 ## The central tool: `FakeApi` (`crates/core/src/test_support.rs`, cfg(test))
 
 A minimal HTTP server on an ephemeral port:
@@ -77,6 +77,7 @@ assert!(api.first_request().contains("\"stream\":true"));
 | thinking level parse/serde | `thinking.rs` |
 | system prompt chain, whitespace-only files | `system_prompt.rs` |
 | tool registry rules, gate decisions (deny/mutate), loop rounds + cap, scripted replay | `agent.rs`, `tool.rs` |
+| session layout, header/message round-trip incl. tools, torn-tail tolerance, project keys, XDG data dir | `session.rs`, `config.rs` |
 | SSE parsing, streaming end-to-end, discovery shapes, thinking kwargs on the wire, tool-call fragments + wire replay, auth-header rules, error contract | `openai.rs` |
 | git branch detection (HEAD ref, detached, worktree `.git` file, walk-up, no repo), status composition | `tui/status.rs` |
 | slash matching, exact dispatch, registry hygiene | `tui/commands.rs` |

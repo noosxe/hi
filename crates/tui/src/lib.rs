@@ -22,7 +22,24 @@ use ratatui::crossterm::event::{self, Event};
 use ratatui::{TerminalOptions, Viewport};
 
 use crate::app::App;
-use hi_core::{ModelsConfig, Provider, ThinkingLevel, ToolRegistry};
+use hi_core::{Message, ModelsConfig, Provider, Session, ThinkingLevel, ToolRegistry};
+
+/// Everything a session carries beyond provider/config: the pieces that
+/// exist before the first keypress. One struct instead of a nine-argument
+/// constructor — and the natural home for whatever the extension track
+/// adds next (subagent config, hook registries, …).
+pub struct SessionInit {
+    /// Resolved system prompt (`None` sends none).
+    pub system_prompt: Option<String>,
+    /// Session thinking level.
+    pub thinking: Option<ThinkingLevel>,
+    /// Tools the model may call.
+    pub tools: Arc<ToolRegistry>,
+    /// Transcript to start from — empty, or the resumed session's.
+    pub messages: Vec<Message>,
+    /// Open session file for turn-end appends (`None` = not persisting).
+    pub session: Option<Session>,
+}
 
 /// Run the interactive interface until the user quits.
 pub fn run(
@@ -30,9 +47,7 @@ pub fn run(
     status: Status,
     catalog: Catalog,
     config: ModelsConfig,
-    system_prompt: Option<String>,
-    thinking: Option<ThinkingLevel>,
-    tools: Arc<ToolRegistry>,
+    init: SessionInit,
 ) -> std::io::Result<()> {
     // Inline mode: NO alternate screen. The terminal keeps its normal
     // buffer and scrollback — we manage only the bottom 12 rows (an
@@ -49,15 +64,7 @@ pub fn run(
     let mut terminal = ratatui::try_init_with_options(options)?;
     terminal.insert_before(1, ui::welcome_into)?;
 
-    let mut app = App::new(
-        provider,
-        status,
-        catalog,
-        config,
-        system_prompt,
-        thinking,
-        tools,
-    );
+    let mut app = App::new(provider, status, catalog, config, init);
     let result = event_loop(&mut terminal, &mut app);
 
     // Teardown, in order:

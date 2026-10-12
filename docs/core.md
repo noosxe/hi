@@ -1,7 +1,7 @@
 # `hi-core` reference
 
 Files this doc describes: everything under `crates/core/src/` — `lib.rs`,
-`message.rs`, `event.rs`, `tool.rs`, `agent.rs`, `provider.rs`, `openai.rs`, `mock.rs`, `config.rs`,
+`message.rs`, `event.rs`, `tool.rs`, `agent.rs`, `session.rs`, `provider.rs`, `openai.rs`, `mock.rs`, `config.rs`,
 `selection.rs`, `settings.rs`, `thinking.rs`, `system_prompt.rs`,
 `test_support.rs`.
 
@@ -9,7 +9,7 @@ Public surface re-exported from `crates/core/src/lib.rs`: `NAME`, `Event`,
 `Message`, `MockProvider`, `ModelsConfig`, `ModelConfig`, `ProviderConfig`,
 `OpenAiCompatProvider`, `Provider`, `spawn_turn`, `Settings`, `ThinkingLevel`, `Tool`,
 `ToolAnnotations`, `ToolCall`, `ToolResult`, `ToolDecision`, `ToolGate`, `ToolRegistry`,
-`DEFAULT_MAX_TOOL_ROUNDS`, `spawn_agent_turn`.
+`DEFAULT_MAX_TOOL_ROUNDS`, `spawn_agent_turn`, `Session`, `SessionHeader`, `LoadedSession`.
 Note: `selection` is a public module (`hi_core::selection::{resolve, list_for,
 Selected}`), not re-exported at the root.
 
@@ -66,6 +66,24 @@ exactly one result (deny / unknown tool / bad JSON are error *results*, never `E
 Cap exceeded ⇒ `Error("tool loop did not settle within N rounds")` + `TurnEnd`. The loop never
 mutates the caller's history — consumers mirror the event stream (details in
 [turn-lifecycle.md](turn-lifecycle.md)).
+
+## session.rs — transcripts that survive restarts
+
+One JSONL file per session under the data dir (`config::data_dir()` +
+`sessions/`), in a cwd-keyed project directory (pi-style encoding). Only
+finalized messages are persisted, appended and flushed at turn end; the
+reader tolerates a torn final line and rejects malformation anywhere else.
+
+- `Session::start` / `Session::resume(path)` — create or reopen; the file
+  handle stays open in append mode for the session's life.
+- `Session::append(&[Message])` — one JSONL line per message, flushed.
+- `session::latest(cwd)` — newest readable session for a project
+  (`--continue`); `session::load(path)` — full parse.
+- `SessionHeader` is the flat first line (`camelCase`, `version` field for
+  future migrations); `Message` serializes as externally-tagged camelCase
+  (`{"toolCall":{…}}`), so tool traffic round-trips losslessly.
+- Persistence is best-effort by contract: callers degrade to a transcript
+  note when the disk fails — chat never blocks on I/O.
 
 ## provider.rs — the abstraction + the turn thread
 

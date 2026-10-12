@@ -41,6 +41,8 @@ finalize:
   ├─ if !turn.text.is_empty() → messages.push(Assistant(text))
   ├─ if turn.error            → messages.push(Error(msg))   (after the partial)
   └─ if queued                → push it as User + start_turn() immediately
+  └─ session.append(everything new this frame)   (failure → one System
+     note + persistence off for the rest of the run)
 
 Rendering: the live area shows `turn.text` while in flight; finalized
 messages are printed **above** the viewport into native scrollback
@@ -116,3 +118,6 @@ path: partial `Token`s stand, then one `Event::Error` (message built by
 6. Every `ToolCall` event is answered by exactly one `ToolResult` with the
    same `call_id`; a user turn may span rounds but keeps exactly one
    `TurnStart` and one `TurnEnd` (the loop swallows round framing).
+7. Finalized messages reach the session file at turn end (append + flush);
+   only the in-flight turn is ever lost, and a persistence failure never
+   blocks the conversation.
