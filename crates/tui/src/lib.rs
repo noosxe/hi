@@ -114,7 +114,6 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io
         // blocks are derived from the message stream (a call pairs with
         // its result); a trailing unpaired call stays in the live area
         // as the pending execution until its result lands.
-        let mut printed_any = false;
         while printed < app.messages.len() {
             let (blocks, pending) = ui::derive_blocks(&app.messages[printed..]);
             if blocks.is_empty() {
@@ -124,14 +123,12 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io
             // measure rows against the old width.
             let width = terminal.size()?.width;
             for block in &blocks {
-                let mut rows = ui::block_rows(block, width);
-                if printed_any {
-                    // One blank row between blocks (pi's outputPad).
-                    rows.insert(0, ratatui::text::Line::raw(""));
-                }
+                // Spacing is each block's own padding (one blank row above
+                // and below, tinted for filled blocks — see `block_rows`),
+                // so no cross-block separator bookkeeping exists here.
+                let rows = ui::block_rows(block, width);
                 let height = rows.len().clamp(1, u16::MAX as usize) as u16;
                 terminal.insert_before(height, |buf| ui::rows_into(rows, buf))?;
-                printed_any = true;
             }
             printed = app.messages.len() - usize::from(pending.is_some());
         }

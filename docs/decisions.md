@@ -198,6 +198,12 @@ sites (`THEME.fg(Fg::Heading)`), with the single dark palette being pi's
   extends: canonical crates over hand-rolling CommonMark.
 - **User input renders as markdown too** (pi parity), accepting the
   paste-distortion trade; system and error lines stay plain colored text.
+- **Spacing is per-block padding, not separators**: every block carries one
+  blank row above and below its content (`paddingY`), tinted with the fill
+  for blocks that have a background, plain otherwise — two blank rows
+  between any adjacent content rows, with no cross-block bookkeeping in
+  the print loop (a first cut used a separator counter that reset every
+  frame; blocks owning their padding removed the whole class of bug).
 - **Known divergences from pi, recorded**: no syntax highlighting in code
   blocks (pi uses cli-highlight), collapsed args preview sorts keys (serde
   maps vs marked's source order), no expand keybind on the preview marker
