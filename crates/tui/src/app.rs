@@ -514,11 +514,16 @@ impl App {
         };
         match key.code {
             KeyCode::Esc => self.picker = None,
-            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Up => {
+                // pi's SelectList wraps at both ends.
+                picker.selected = if picker.selected == 0 {
+                    picker.items.len().saturating_sub(1)
+                } else {
+                    picker.selected - 1
+                };
+            }
             KeyCode::Down => {
-                if picker.selected + 1 < picker.items.len() {
-                    picker.selected += 1;
-                }
+                picker.selected = (picker.selected + 1) % picker.items.len().max(1);
             }
             // pi's contract: Ctrl-S persists the choice as the startup
             // default; Enter only switches this session.
@@ -599,7 +604,14 @@ impl App {
     /// lands directly above the input.
     pub fn menu_height(&self) -> u16 {
         if let Some(picker) = &self.picker {
-            (picker.items.len() as u16 + 2).clamp(5, 6)
+            // SelectList geometry: five visible rows, the `(n/m)`
+            // count row only on overflow, and the key-hint footer.
+            if picker.items.is_empty() {
+                2 // "no models available" + hint
+            } else {
+                let visible = (picker.items.len() as u16).min(5);
+                visible + u16::from(picker.items.len() > 5) + 1
+            }
         } else if let Some(completion) = &self.completion {
             // SelectList geometry: five visible rows, plus the
             // `(n/m)` scroll row only when the matches overflow them.
@@ -824,16 +836,20 @@ impl App {
         match key.code {
             KeyCode::Esc => self.session_picker = None,
             KeyCode::Up => {
+                // pi's SelectList wraps at both ends.
+                let len = self.session_picker_visible().len();
                 if let Some(picker) = self.session_picker.as_mut() {
-                    picker.selected = picker.selected.saturating_sub(1);
+                    picker.selected = if picker.selected == 0 {
+                        len.saturating_sub(1)
+                    } else {
+                        picker.selected - 1
+                    };
                 }
             }
             KeyCode::Down => {
-                let visible = self.session_picker_visible();
-                if let Some(picker) = self.session_picker.as_mut()
-                    && picker.selected + 1 < visible.len()
-                {
-                    picker.selected += 1;
+                let len = self.session_picker_visible().len();
+                if let Some(picker) = self.session_picker.as_mut() {
+                    picker.selected = (picker.selected + 1) % len.max(1);
                 }
             }
             KeyCode::Enter => {
@@ -1315,8 +1331,8 @@ mod tests {
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.completion.as_ref().unwrap().selected, 0);
         app.completion = None;
-        app.open_picker(); // empty catalog clamps to the 5-row minimum
-        assert_eq!(app.menu_height(), 5);
+        app.open_picker(); // empty catalog: "no models" row + hint row
+        assert_eq!(app.menu_height(), 2);
     }
 
     #[test]

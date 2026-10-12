@@ -4,7 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Borders, List, ListItem, ListState, Paragraph, Widget};
+use ratatui::widgets::{Borders, Paragraph, Widget};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::App;
@@ -196,22 +196,27 @@ fn draw_picker(frame: &mut Frame, area: Rect, app: &App) {
     let Some(picker) = app.picker.as_ref() else {
         return;
     };
-    let items: Vec<ListItem> = picker
+    // The same SelectList as the slash menu (AD: deprecated box): the
+    // bare model rows carry no descriptions, so this is the
+    // name-only path; the key hints the box title used to carry
+    // become a muted footer row.
+    let items: Vec<(&str, &str)> = picker
         .items
         .iter()
-        .map(|item| ListItem::from(item.as_str()))
+        .map(|item| (item.as_str(), ""))
         .collect();
-    let mut state = ListState::default();
-    state.select(Some(picker.selected));
-    let list = List::new(items)
-        .block(
-            ratatui::widgets::Block::default()
-                .borders(Borders::ALL)
-                .title(" model — enter: use · ctrl-s: default · esc: close "),
-        )
-        .highlight_symbol("› ")
-        .highlight_style(Style::new().bold());
-    frame.render_stateful_widget(list, area, &mut state);
+    let mut rows = select_list_rows(items, picker.selected, area.width as usize);
+    if picker.items.is_empty() {
+        rows.push(Line::from(Span::styled(
+            "no models available",
+            THEME.fg(Fg::Muted),
+        )));
+    }
+    rows.push(Line::from(Span::styled(
+        "enter use · ctrl-s default · esc close",
+        THEME.fg(Fg::Dim),
+    )));
+    frame.render_widget(Paragraph::new(Text::from(rows)), area);
 }
 
 /// The `/` completion menu, drawn in the menu zone between the
@@ -221,24 +226,37 @@ fn draw_completion(frame: &mut Frame, area: Rect, app: &App) {
     let Some(completion) = app.completion.as_ref() else {
         return;
     };
-    // pi's SelectList, grounded on select-list.js: plain rows under
-    // the input (no box), a `→ ` marker on the selected row, the
-    // command in a primary column sized to the widest match (clamped
-    // 12–32, the slash-command layout), descriptions in a muted
-    // second column, and a `(n/m)` row whenever the matches overflow
-    // the five visible slots. The visible window is centered on the
-    // selection; the selected row colors whole — accent, pi's
-    // selectedText — while unselected descriptions ride muted.
+    let items: Vec<(&str, &str)> = completion
+        .items
+        .iter()
+        .map(|(name, description)| (*name, *description))
+        .collect();
+    let rows = select_list_rows(items, completion.selected, area.width as usize);
+    frame.render_widget(Paragraph::new(Text::from(rows)), area);
+}
+
+/// pi's SelectList row set (select-list.js, the one renderer behind
+/// every hi menu): plain rows, `→ ` on the selected row, a primary
+/// column sized to the widest item (clamped 12–32) with an optional
+/// muted description in a second column, and a `(n/m)` count row
+/// whenever the items overflow the five visible slots. The visible
+/// window is centered on the selection; the selected row colors
+/// whole — accent, pi's selectedText — while unselected descriptions
+/// ride muted. Descriptions render only with room to spare: a wide
+/// terminal and at least MIN_DESCRIPTION_WIDTH columns left.
+fn select_list_rows<'a>(
+    items: impl IntoIterator<Item = (&'a str, &'a str)>,
+    selected: usize,
+    width: usize,
+) -> Vec<Line<'static>> {
     const VISIBLE: usize = 5;
-    let total = completion.items.len();
-    let start = completion
-        .selected
+    let items: Vec<(&str, &str)> = items.into_iter().collect();
+    let total = items.len();
+    let start = selected
         .saturating_sub(VISIBLE / 2)
         .min(total.saturating_sub(VISIBLE));
     let end = (start + VISIBLE).min(total);
-    let width = area.width as usize;
-    let widest = completion
-        .items
+    let widest = items
         .iter()
         .map(|(name, _)| name.width() + 2) // PRIMARY_COLUMN_GAP
         .max()
@@ -247,18 +265,10 @@ fn draw_completion(frame: &mut Frame, area: Rect, app: &App) {
     let desc_start = 2 + column;
     let desc_width = width.saturating_sub(desc_start + 2);
     let mut rows: Vec<Line<'static>> = Vec::new();
-    for (index, (name, description)) in completion
-        .items
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(end - start)
-    {
-        let selected = index == completion.selected;
-        let prefix = if selected { "→ " } else { "  " };
+    for (index, (name, description)) in items.iter().enumerate().skip(start).take(end - start) {
+        let chosen = index == selected;
+        let prefix = if chosen { "→ " } else { "  " };
         let mut spans: Vec<Span<'static>> = vec![Span::raw(prefix.to_string())];
-        // pi shows the description only with room to spare: a wide
-        // terminal and at least MIN_DESCRIPTION_WIDTH columns left.
         if width > 40 && desc_width > 10 && !description.is_empty() {
             let shown = truncate_cols(name, column - 2);
             let gap = " ".repeat(column - 2 - shown.width());
@@ -274,19 +284,19 @@ fn draw_completion(frame: &mut Frame, area: Rect, app: &App) {
             ));
         }
         let mut line = Line::from(spans);
-        if selected {
+        if chosen {
             line = line.style(THEME.fg(Fg::Accent));
         }
         rows.push(line);
     }
     if total > VISIBLE {
-        let info = format!("  ({}/{total})", completion.selected + 1);
+        let info = format!("  ({}/{total})", selected + 1);
         rows.push(Line::from(Span::styled(
             truncate_cols(&info, width.saturating_sub(2)).to_string(),
             THEME.fg(Fg::Muted),
         )));
     }
-    frame.render_widget(Paragraph::new(Text::from(rows)), area);
+    rows
 }
 
 /// Cut `text` to at most `max` display columns (emoji are two), on a
@@ -795,6 +805,35 @@ mod tests {
         assert!(row_text(14).contains("where did my transcript go"));
         assert!(row_text(15).trim().is_empty()); // the block's lower pad
         assert!(row_text(16).contains("─")); // input top rule
+    }
+
+    #[test]
+    fn the_model_picker_uses_the_same_select_list() {
+        use crate::app::test_app;
+        let mut app = test_app();
+        app.picker = Some(crate::app::Picker {
+            items: (0..6).map(|i| format!("provider{i}/model-{i}")).collect(),
+            selected: 1,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend_mut().buffer().clone();
+        let rows: Vec<String> = (0..20u16)
+            .map(|y| {
+                (0..60)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        // The deprecated box is gone; the SelectList marker, count row
+        // and hint footer take its place.
+        assert!(!rows.iter().any(|r| r.contains("┌")));
+        assert!(rows.iter().any(|r| r.contains("→ provider1")));
+        // The count row follows the last visible item, not the marker.
+        assert!(rows.iter().any(|r| r.contains("  (2/6)")));
+        assert!(rows.iter().any(|r| r.contains("ctrl-s default")));
     }
 
     #[test]
