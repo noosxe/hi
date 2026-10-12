@@ -96,21 +96,29 @@ pub fn temp_png_path() -> PathBuf {
 /// (the insertion point is the end of the input). Line endings
 /// normalize to `\n` — terminals send `\r\n`, and a raw `\r` would
 /// mangle the composer's wrapping.
-pub fn append_pasted(input: &str, text: &str) -> String {
+/// Paste `text` at the cursor: `before` is everything left of it,
+/// `after` everything from it onward. Newlines normalize to `\n`;
+/// pad with a space against a non-whitespace neighbor on either side
+/// (pi's cursor-neighborhood rule — with a real cursor the "after"
+/// half of it finally applies too).
+pub fn insert_pasted(before: &str, text: &str, after: &str) -> String {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
-    if text.is_empty() {
-        return input.to_string();
+    let mut out = String::with_capacity(before.len() + after.len() + text.len() + 2);
+    out.push_str(before);
+    if !text.is_empty() {
+        if before
+            .chars()
+            .next_back()
+            .is_some_and(|c| !c.is_whitespace())
+        {
+            out.push(' ');
+        }
+        out.push_str(&text);
+        if after.chars().next().is_some_and(|c| !c.is_whitespace()) {
+            out.push(' ');
+        }
     }
-    let mut out = String::with_capacity(input.len() + text.len() + 1);
-    out.push_str(input);
-    if input
-        .chars()
-        .next_back()
-        .is_some_and(|c| !c.is_whitespace())
-    {
-        out.push(' ');
-    }
-    out.push_str(&text);
+    out.push_str(after);
     out
 }
 
@@ -119,20 +127,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn append_pasted_pads_against_words_but_not_whitespace() {
-        assert_eq!(append_pasted("", "/tmp/x.png"), "/tmp/x.png");
-        assert_eq!(append_pasted("look", "/tmp/x.png"), "look /tmp/x.png");
-        // Trailing whitespace on the input means no pad — and never a
-        // trailing space after the insert (pi pads the cursor
-        // neighborhood; here the cursor is always at the end).
-        assert_eq!(append_pasted("look ", "/tmp/x.png"), "look /tmp/x.png");
+    fn insert_pasted_pads_against_words_on_both_sides() {
+        assert_eq!(insert_pasted("", "/tmp/x.png", ""), "/tmp/x.png");
+        assert_eq!(insert_pasted("look", "/tmp/x.png", ""), "look /tmp/x.png");
+        // Whitespace neighbors mean no pad, either side.
+        assert_eq!(insert_pasted("look ", "/tmp/x.png", ""), "look /tmp/x.png");
+        // Mid-word: pad both sides so the paste stands alone.
+        assert_eq!(
+            insert_pasted("see", "/tmp/x.png", "now"),
+            "see /tmp/x.png now"
+        );
+        // Empty text is a pure no-op — no pad invented.
+        assert_eq!(insert_pasted("see", "", "now"), "seenow");
     }
 
     #[test]
-    fn append_pasted_normalizes_line_endings_and_skips_empty() {
-        assert_eq!(append_pasted("a", "x\r\ny\rz"), "a x\ny\nz");
-        assert_eq!(append_pasted("a", ""), "a");
-        assert_eq!(append_pasted("a", "\r\n"), "a \n");
+    fn insert_pasted_normalizes_line_endings() {
+        assert_eq!(insert_pasted("a", "x\r\ny\rz", ""), "a x\ny\nz");
+        assert_eq!(insert_pasted("a", "\r\n", "b"), "a \n b");
     }
 
     #[test]

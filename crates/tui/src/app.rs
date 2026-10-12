@@ -10,13 +10,18 @@ use hi_core::{
 };
 
 use crate::catalog::Catalog;
-use crate::status::{Status, location_label};
 /// All TUI state lives here.
 ///
 /// The contract that keeps a TUI codebase sane as it grows:
 /// event handling *mutates* this struct (`handle_key`, `pump`),
 /// rendering only *reads* it. No widget, no terminal handle, no
 /// drawing inside here.
+use crate::editor;
+use crate::status::{Status, location_label};
+
+/// Prompt-history ceiling (AD-0014).
+const HISTORY_CAP: usize = 100;
+
 /// The paste chord: Ctrl+V always; Cmd+V too where the kitty
 /// keyboard protocol reports it (`KeyModifiers::SUPER` — the terminal
 /// only forwards the chord in that mode, so this can never collide
@@ -27,11 +32,48 @@ fn paste_key(key: &KeyEvent) -> bool {
             || key.modifiers.contains(KeyModifiers::SUPER))
 }
 
+#[cfg(test)]
+pub(crate) fn test_app() -> App {
+    App::new(
+        Arc::new(hi_core::MockProvider::default()),
+        Status {
+            provider: "mock".into(),
+            model: "mock".into(),
+            tool_count: 0,
+        },
+        Catalog::default(),
+        ModelsConfig::default(),
+        crate::SessionInit {
+            system_prompt: None,
+            thinking: None,
+            tools: Arc::new(ToolRegistry::new()),
+            messages: Vec::new(),
+            session: None,
+            images: hi_core::ImageGate::new(false),
+            images_setting: true,
+        },
+        false,
+    )
+}
+
 pub struct App {
     /// Set when the user wants to exit; the event loop watches this.
     pub quit: bool,
     /// Text currently being typed in the input box.
     pub input: String,
+    /// Byte offset into `input` where editing happens — always on a
+    /// `char` boundary. The rules live in `editor` (AD-0014).
+    pub cursor: usize,
+    /// Submitted input, oldest first, for Up/Down recall. Everything
+    /// non-empty that went through Enter — commands included, shell
+    /// parity (AD-0014). Capped at [`HISTORY_CAP`].
+    pub history: Vec<String>,
+    /// Position while browsing history: `Some(index)` from the first
+    /// Up until Down passes the newest entry.
+    pub history_pos: Option<usize>,
+    /// The in-progress input, parked when history browsing starts and
+    /// restored when it ends.
+    pub history_draft: Option<String>,
     /// The conversation transcript — finalized messages only.
     pub messages: Vec<Message>,
     /// The backend producing assistant turns. A trait object (`dyn`),
@@ -172,6 +214,10 @@ impl App {
         Self {
             quit: false,
             input: String::new(),
+            cursor: 0,
+            history: Vec::new(),
+            history_pos: None,
+            history_draft: None,
             messages,
             provider,
             status,
@@ -236,26 +282,129 @@ impl App {
             return;
         }
         match key.code {
-            KeyCode::Char(c) => {
-                self.input.push(c);
+            // --- editing chords (AD-0014). The editor helpers take
+            // the input as a plain &str so every rule is testable
+            // without an App; the App shuttles only the cursor field.
+            KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => match c {
+                'a' => self.cursor = 0,
+                'e' => self.cursor = self.input.len(),
+                'b' => {
+                    self.cursor =
+                        editor::prev_boundary(&self.input, self.cursor).unwrap_or(self.cursor);
+                }
+                'f' => {
+                    self.cursor =
+                        editor::next_boundary(&self.input, self.cursor).unwrap_or(self.cursor);
+                }
+                // Ctrl+D and Delete forward-delete the same unit.
+                'd' => {
+                    if let Some(next) = editor::next_boundary(&self.input, self.cursor) {
+                        self.cursor = editor::delete_range(&mut self.input, self.cursor..next);
+                    }
+                }
+                'k' => {
+                    let end = self.input.len();
+                    self.cursor = editor::delete_range(&mut self.input, self.cursor..end);
+                }
+                'u' => {
+                    self.cursor = editor::delete_range(&mut self.input, 0..self.cursor);
+                }
+                'w' => {
+                    let range = editor::word_delete_range_back(&self.input, self.cursor);
+                    self.cursor = editor::delete_range(&mut self.input, range);
+                }
+                // Unbound control chords keep their old behavior: the
+                // character lands in the input (ctrl+c quits and
+                // ctrl+v/cmd+v paste, both handled above).
+                _ => {
+                    self.cursor = editor::insert_char(&mut self.input, self.cursor, c);
+                    self.sync_completion();
+                }
+            },
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
+                let range = editor::word_delete_range_fwd(&self.input, self.cursor);
+                self.cursor = editor::delete_range(&mut self.input, range);
                 self.sync_completion();
             }
+            KeyCode::Left => {
+                self.cursor = if key.modifiers.contains(KeyModifiers::SUPER) {
+                    // Cmd+Left: start of input — the macOS text
+                    // convention, reportable under the kitty keyboard
+                    // protocol (AD-0013).
+                    0
+                } else if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                {
+                    editor::word_left(&self.input, self.cursor)
+                } else {
+                    editor::prev_boundary(&self.input, self.cursor).unwrap_or(self.cursor)
+                };
+            }
+            KeyCode::Right => {
+                self.cursor = if key.modifiers.contains(KeyModifiers::SUPER) {
+                    self.input.len()
+                } else if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                {
+                    editor::word_right(&self.input, self.cursor)
+                } else {
+                    editor::next_boundary(&self.input, self.cursor).unwrap_or(self.cursor)
+                };
+            }
+            KeyCode::Home => self.cursor = 0,
+            KeyCode::End => self.cursor = self.input.len(),
+            // Prompt history: up into the past (draft parked on
+            // entry), down toward it — past the newest, the draft
+            // returns (AD-0014).
+            KeyCode::Up => self.history_up(),
+            KeyCode::Down => self.history_down(),
             KeyCode::Backspace => {
-                // `pop` removes and returns the last char; we only want
-                // the removal, so discard the return value explicitly.
-                let _ = self.input.pop();
+                if key.modifiers.contains(KeyModifiers::ALT) {
+                    // The same unit the move lands on, so
+                    // Alt+Backspace composes with Alt+Left.
+                    let range = editor::word_delete_range_back(&self.input, self.cursor);
+                    self.cursor = editor::delete_range(&mut self.input, range);
+                } else if let Some(prev) = editor::prev_boundary(&self.input, self.cursor) {
+                    self.cursor = editor::delete_range(&mut self.input, prev..self.cursor);
+                }
+                self.sync_completion();
+            }
+            KeyCode::Delete => {
+                if key.modifiers.contains(KeyModifiers::ALT) {
+                    let range = editor::word_delete_range_fwd(&self.input, self.cursor);
+                    self.cursor = editor::delete_range(&mut self.input, range);
+                } else if let Some(next) = editor::next_boundary(&self.input, self.cursor) {
+                    self.cursor = editor::delete_range(&mut self.input, self.cursor..next);
+                }
+                self.sync_completion();
+            }
+            KeyCode::Char(c) => {
+                self.cursor = editor::insert_char(&mut self.input, self.cursor, c);
                 self.sync_completion();
             }
             KeyCode::Enter => {
                 // Move the input out, leaving an empty String behind —
                 // no clone needed since we own the value anyway.
                 let msg = std::mem::take(&mut self.input);
+                self.cursor = 0;
                 let trimmed = msg.trim().to_string();
                 // A leading `/` is a command only when the rest could
                 // be one — command names never contain `/`, but staged
                 // paste paths always start with one (`/tmp/hi-clipboard-…`,
                 // AD-0011). `/tmp` alone must send as a message, and a
                 // typo'd `/modle` still earns its teaching error.
+                // Every non-empty submission lands in prompt
+                // history — commands included, shell parity (AD-0014).
+                if !trimmed.is_empty() {
+                    if self.history.len() >= HISTORY_CAP {
+                        self.history.remove(0);
+                    }
+                    self.history.push(msg.clone());
+                }
+                self.history_pos = None;
+                self.history_draft = None;
                 let command_text = trimmed.strip_prefix('/').filter(|rest| !rest.contains('/'));
                 if let Some(command_text) = command_text {
                     // Exact name wins; otherwise the highlighted
@@ -316,9 +465,9 @@ impl App {
                 // text back so nothing typed is lost.
                 if let Some(queued) = self.queued.take() {
                     if self.input.is_empty() {
-                        self.input = queued;
+                        self.set_input(queued);
                     } else {
-                        self.input = format!("{queued}\n\n{}", self.input);
+                        self.set_input(format!("{queued}\n\n{}", self.input));
                     }
                 }
             }
@@ -456,6 +605,67 @@ impl App {
         }
     }
 
+    /// Replace the whole input, cursor parked at the end — the shape
+    /// every whole-text assignment wants (completions, queue
+    /// handback, history loads).
+    fn set_input(&mut self, text: String) {
+        self.cursor = text.len();
+        self.input = text;
+    }
+
+    /// The input split at the cursor — the two halves paste insertion
+    /// works between. Owned copies so the caller's borrow ends before
+    /// it reassigns.
+    fn split_at_cursor(&self) -> (String, String) {
+        (
+            self.input[..self.cursor].to_string(),
+            self.input[self.cursor..].to_string(),
+        )
+    }
+
+    /// Step back through prompt history. Entering from fresh input
+    /// parks the draft; a loaded entry puts the cursor at the start
+    /// so the first keystrokes fix up its beginning (pi's rule,
+    /// AD-0014).
+    fn history_up(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        match self.history_pos {
+            None => {
+                let draft = std::mem::take(&mut self.input);
+                self.history_draft = Some(draft);
+                self.history_pos = Some(self.history.len() - 1);
+                self.input = self.history[self.history.len() - 1].clone();
+                self.cursor = 0;
+            }
+            Some(i) if i > 0 => {
+                self.history_pos = Some(i - 1);
+                self.input = self.history[i - 1].clone();
+                self.cursor = 0;
+            }
+            Some(_) => {} // already at the oldest entry
+        }
+    }
+
+    /// Step forward through prompt history; past the newest entry the
+    /// parked draft returns, cursor at the end — as if you'd never
+    /// left.
+    fn history_down(&mut self) {
+        let Some(i) = self.history_pos else {
+            return;
+        };
+        if i + 1 >= self.history.len() {
+            self.history_pos = None;
+            self.input = self.history_draft.take().unwrap_or_default();
+            self.cursor = self.input.len();
+        } else {
+            self.history_pos = Some(i + 1);
+            self.input = self.history[i + 1].clone();
+            self.cursor = 0;
+        }
+    }
+
     /// Rebuild the `/` completion menu from the current input: open
     /// while the text is a bare `/prefix` (no spaces yet — argument
     /// parsing is a future problem), closed otherwise.
@@ -513,7 +723,7 @@ impl App {
             }
             KeyCode::Tab => {
                 if let Some((name, _)) = completion.items.get(completion.selected) {
-                    self.input = format!("/{name}");
+                    self.set_input(format!("/{name}"));
                     self.sync_completion();
                 }
                 true
@@ -521,6 +731,7 @@ impl App {
             KeyCode::Enter => {
                 self.completion = None;
                 self.input.clear();
+                self.cursor = 0;
                 if let Some((name, _)) = completion.items.get(completion.selected) {
                     self.run_command(name);
                 }
@@ -713,7 +924,9 @@ impl App {
     /// images never arrive this way (they have no keystroke encoding);
     /// Ctrl-V reads the clipboard for those.
     pub fn handle_paste(&mut self, text: &str) {
-        self.input = crate::clipboard::append_pasted(&self.input, text);
+        let (before, after) = self.split_at_cursor();
+        self.input = crate::clipboard::insert_pasted(&before, text, &after);
+        self.cursor = self.input.len() - after.len();
     }
 
     /// Apply one clipboard outcome: a staged path or text joins the
@@ -723,10 +936,14 @@ impl App {
         use crate::clipboard::ClipboardOutcome;
         match outcome {
             ClipboardOutcome::Image { path } => {
-                self.input = crate::clipboard::append_pasted(&self.input, &path);
+                let (before, after) = self.split_at_cursor();
+                self.input = crate::clipboard::insert_pasted(&before, &path, &after);
+                self.cursor = self.input.len() - after.len();
             }
             ClipboardOutcome::Text(text) if !text.is_empty() => {
-                self.input = crate::clipboard::append_pasted(&self.input, &text);
+                let (before, after) = self.split_at_cursor();
+                self.input = crate::clipboard::insert_pasted(&before, &text, &after);
+                self.cursor = self.input.len() - after.len();
             }
             // Empty text inserts nothing — a no-op, not an event.
             ClipboardOutcome::Text(_) => {}
@@ -828,31 +1045,11 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hi_core::MockProvider;
     use ratatui::crossterm::event::KeyEvent;
     use std::path::PathBuf;
 
     fn app() -> App {
-        App::new(
-            Arc::new(MockProvider::default()),
-            Status {
-                provider: "mock".into(),
-                model: "mock".into(),
-                tool_count: 0,
-            },
-            Catalog::default(),
-            ModelsConfig::default(),
-            crate::SessionInit {
-                system_prompt: None,
-                thinking: None,
-                tools: Arc::new(ToolRegistry::new()),
-                messages: Vec::new(),
-                session: None,
-                images: hi_core::ImageGate::new(false),
-                images_setting: true,
-            },
-            false,
-        )
+        test_app()
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1299,5 +1496,233 @@ mod tests {
         assert!(
             matches!(app.messages.last(), Some(Message::System(note)) if note.contains("esc first"))
         );
+    }
+
+    fn alt(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn arrows_move_the_cursor_and_clamp_at_the_edges() {
+        let mut app = app();
+        for c in "hi there".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.cursor, 8);
+        app.handle_key(key(KeyCode::Left));
+        assert_eq!(app.cursor, 7);
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.cursor, 8);
+        // Past the end: clamped, not wrapped, not panicking.
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.cursor, 8);
+        for _ in 0..20 {
+            app.handle_key(key(KeyCode::Left));
+        }
+        assert_eq!(app.cursor, 0);
+        app.handle_key(key(KeyCode::Left));
+        assert_eq!(app.cursor, 0);
+    }
+
+    #[test]
+    fn typing_and_backspace_work_at_the_cursor_not_the_tail() {
+        let mut app = app();
+        for c in "hello world".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        for _ in 0..6 {
+            app.handle_key(key(KeyCode::Left));
+        }
+        assert_eq!(app.cursor, 5);
+        // Typing lands mid-string.
+        app.handle_key(key(KeyCode::Char('X')));
+        assert_eq!(app.input, "helloX world");
+        // Backspace removes before the cursor.
+        app.handle_key(key(KeyCode::Backspace));
+        assert_eq!(app.input, "hello world");
+        assert_eq!(app.cursor, 5);
+        // An old friend: backspace at the tail.
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Right));
+        app.handle_key(key(KeyCode::Backspace));
+        assert_eq!(app.input, "hello orld"); // cursor 7, the 'w' goes
+    }
+
+    #[test]
+    fn home_end_and_ctrl_a_e_jump_to_the_ends() {
+        let mut app = app();
+        for c in "hello".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Home));
+        assert_eq!(app.cursor, 0);
+        app.handle_key(key(KeyCode::End));
+        assert_eq!(app.cursor, 5);
+        app.handle_key(ctrl(KeyCode::Char('a')));
+        assert_eq!(app.cursor, 0);
+        app.handle_key(ctrl(KeyCode::Char('e')));
+        assert_eq!(app.cursor, 5);
+    }
+
+    #[test]
+    fn word_chords_jump_by_words() {
+        let mut app = app();
+        for c in "one two three".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(alt(KeyCode::Left));
+        assert_eq!(app.cursor, 8); // "three" starts at 8
+        app.handle_key(ctrl(KeyCode::Left));
+        assert_eq!(app.cursor, 4);
+        app.handle_key(alt(KeyCode::Right));
+        assert_eq!(app.cursor, 7);
+        app.handle_key(ctrl(KeyCode::Right));
+        assert_eq!(app.cursor, 13);
+    }
+
+    #[test]
+    fn cmd_left_right_jump_to_start_and_end() {
+        let mut app = app();
+        for c in "some words here".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        let cmd = KeyEvent::new(KeyCode::Left, KeyModifiers::SUPER);
+        app.handle_key(cmd);
+        assert_eq!(app.cursor, 0);
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SUPER));
+        assert_eq!(app.cursor, 15);
+    }
+
+    #[test]
+    fn kill_chords_delete_their_ranges() {
+        let mut app = app();
+        for c in "keep kill me".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(ctrl(KeyCode::Char('w'))); // word back: "me"
+        assert_eq!(app.input, "keep kill ");
+        // The cursor now parks after the space — Alt+Backspace skips
+        // it and removes "kill ", composing exactly like a shell.
+        app.handle_key(alt(KeyCode::Backspace));
+        assert_eq!(app.input, "keep ");
+        app.handle_key(ctrl(KeyCode::Char('u'))); // to start
+        assert_eq!(app.input, "");
+        for c in "keep kill me".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(ctrl(KeyCode::Char('a')));
+        app.handle_key(ctrl(KeyCode::Char('f'))); // past 'k'
+        app.handle_key(ctrl(KeyCode::Char('k'))); // to end
+        assert_eq!(app.input, "k");
+        // Forward delete: Ctrl+D at the cursor, Delete key the same.
+        app.handle_key(ctrl(KeyCode::Char('e')));
+        app.handle_key(ctrl(KeyCode::Char('d')));
+        assert_eq!(app.input, "k");
+        app.handle_key(ctrl(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Delete));
+        assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn alt_d_deletes_the_word_ahead() {
+        let mut app = app();
+        for c in "go far now".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(ctrl(KeyCode::Char('a')));
+        app.handle_key(alt(KeyCode::Char('d')));
+        assert_eq!(app.input, " far now"); // "go" goes, the space stays
+    }
+
+    #[test]
+    fn history_walks_newest_first_and_restores_the_draft() {
+        let mut app = app();
+        for msg in ["first message", "second message"] {
+            for c in msg.chars() {
+                app.handle_key(key(KeyCode::Char(c)));
+            }
+            app.handle_key(key(KeyCode::Enter));
+            app.pump();
+        }
+        assert_eq!(app.history, ["first message", "second message"]);
+        // Fresh draft parked on the first Up.
+        for c in "draft text".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.input, "second message");
+        assert_eq!(app.cursor, 0);
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.input, "first message");
+        app.handle_key(key(KeyCode::Up)); // oldest — clamps
+        assert_eq!(app.input, "first message");
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.input, "second message");
+        app.handle_key(key(KeyCode::Down)); // past newest — draft returns
+        assert_eq!(app.input, "draft text");
+        assert_eq!(app.cursor, 10);
+        assert_eq!(app.history_pos, None);
+    }
+
+    #[test]
+    fn a_cancelled_message_can_be_recalled_edited_and_resent() {
+        let mut app = app();
+        for c in "deploy to prod".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        app.pump();
+        // Esc cancels the turn; the sent text stays in history.
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.turn.is_none());
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.input, "deploy to prod");
+        // Cursor parked at the start: the first edits fix the beginning.
+        app.handle_key(key(KeyCode::Char('X')));
+        assert_eq!(app.input, "Xdeploy to prod");
+        app.handle_key(key(KeyCode::Enter));
+        app.pump();
+        assert!(matches!(app.messages.last(), Some(Message::User(m)) if m == "Xdeploy to prod"));
+        // History now holds both, in order.
+        assert_eq!(app.history, ["deploy to prod", "Xdeploy to prod"]);
+    }
+
+    #[test]
+    fn history_records_commands_and_queue_lines_but_not_empties() {
+        let mut app = app();
+        app.handle_key(key(KeyCode::Enter)); // empty — nothing
+        assert!(app.history.is_empty());
+        for c in "/theme".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.history, ["/theme"]);
+        // A mid-turn submission queues — and lands in history too.
+        for c in "hello".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        app.pump();
+        for c in "also this".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        app.pump();
+        assert_eq!(app.history, ["/theme", "hello", "also this"]);
+    }
+
+    #[test]
+    fn paste_inserts_at_the_cursor_with_pads_on_both_sides() {
+        let mut app = app();
+        for c in "seepaste now".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        for _ in 0..9 {
+            app.handle_key(key(KeyCode::Left));
+        }
+        assert_eq!(app.cursor, 3);
+        app.handle_paste("/tmp/x.png");
+        assert_eq!(app.input, "see /tmp/x.png paste now");
+        assert_eq!(app.cursor, 15);
     }
 }

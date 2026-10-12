@@ -565,3 +565,44 @@ policy** (some keep Cmd+V bound to their text paste even under the
 protocol). The feature degrades to today's behavior wherever that
 happens — worst case is the status quo.
 
+---
+
+## AD-0014 — the composer becomes an editor; owned, not a crate (2026-10-15)
+
+**Status:** implemented. Supersedes nothing; extends AD-0011's paste
+and AD-0013's protocol work into a full editing surface.
+
+**The gap:** the input was append-only — no cursor, no movement, no
+word jumps, no history recall. Fix a typo in a long line and the only
+tool was Backspace to the mistake and retype. Recall a cancelled
+message and the only tool was memory.
+
+**The ruling that shaped it:** pi's input can do all of this, and the
+Rust ecosystem was checked before writing code. ratatui ships no input
+widget (render-only by design). tui-textarea is a full editor but a
+multi-line, self-rendering widget whose "history" is undo history —
+the prompt-recall part is absent because it is app state, not editor
+state. tui-input covers cursor movement — the thin, replaceable slice.
+The valuable parts (history with a parked draft, the chord set,
+dispatch interplay) are app-shaped regardless, and one chord —
+Cmd+Left/Right — exists only because AD-0013 turned on the kitty
+keyboard protocol; no crate can know that. pi reached the same verdict
+with a 2,000-line editor of its own. AD-0004 (minimal deps) settled
+it: `editor.rs`, ~150 owned lines, every rule unit-tested without an
+`App`.
+
+**The model:** flat `String` + byte-offset cursor on a `char`
+boundary. The caret is the real terminal cursor, parked via
+`wrap::cursor_pos` (row starts from the same greedy walk that renders
+— one algorithm, no drift; a row-boundary cursor belongs to the
+previous row's end). Word unit: alphanumeric + `_`, separators
+skipped — pi's granularity, right for paths. History: every non-empty
+submission (commands included — shell parity), cap 100, draft parked
+on first ↑ and restored past the newest ↓; loaded entries load with
+the cursor at the start so the first keystrokes fix the beginning —
+the cancel-edit-resend workflow the user asked for.
+
+**Named out of scope:** kill-ring yank, undo, jump-to-char,
+Shift+Enter newline (crossterm cannot report it), page-scroll. Each is
+a clean later PR.
+

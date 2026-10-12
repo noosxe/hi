@@ -123,8 +123,9 @@ long input:  [stream 2] [input 8] [status 1]
   above the input; the streaming area keeps the rest, never fewer than 2
   rows.
 - `draw_input`: top/bottom rules only, no side walls (pi-style); the real
-  terminal cursor parks right after the typed text; while busy, the top rule
-  carries the right-aligned activity label in yellow.
+  terminal cursor parks **at the logical cursor** (`wrap::cursor_pos` maps the
+  byte offset into wrapped row/column — mid-text while editing, AD-0014);
+  while busy, the top rule carries the right-aligned activity label in yellow.
 - Transcript is NOT drawn here — finalized messages go to scrollback via
   `block_rows` + `rows_into` (pi-style role blocks, no text labels; see the
   markdown.rs and theme.rs sections below). The insert height is the
@@ -201,6 +202,42 @@ protocol reports the chord (AD-0013: `DISAMBIGUATE_ESCAPE_CODES` is
 pushed at startup — supporting terminals forward Cmd+V as
 `Char('v') + SUPER`; the rest ignore the enable and keep their own
 text paste).
+
+## editor.rs — the composer's text-editing core (AD-0014)
+
+Pure functions over the flat input `String` plus a byte-offset cursor
+(always on a `char` boundary). Owned, not a crate: ratatui ships no
+input widget, tui-textarea is a self-rendering multi-line widget whose
+"history" is undo history, tui-input covers only this thin slice, and
+the app-shaped parts — prompt history with a parked draft, chords
+including SUPER under the kitty keyboard protocol — cannot come from a
+crate at all. pi reached the same conclusion with its own editor.
+
+Word unit everywhere: maximal runs of `is_alphanumeric() || '_'`,
+other characters separators — so paths like `/tmp/hi-clipboard-x.png`
+jump at `-`, `/`, `.`.
+
+| Chord | Action |
+| --- | --- |
+| ← / → , Ctrl+B / F | move one character (clamped) |
+| Home / End, Ctrl+A / E | start / end of input |
+| Alt+← / →, Ctrl+← / → | word jump (separator-skip, then word-skip) |
+| Cmd+← / → (SUPER) | start / end — kitty-protocol reporting (AD-0013) |
+| Backspace | remove the character before the cursor |
+| Delete, Ctrl+D | remove the character at the cursor |
+| Ctrl+W, Alt+Backspace | remove the word before the cursor |
+| Alt+D, Alt+Delete | remove the word after the cursor |
+| Ctrl+U / Ctrl+K | remove to start / end |
+| ↑ / ↓ | prompt history (below) |
+
+Prompt history: every non-empty Enter submission — commands included,
+shell parity — lands in `App.history` (cap 100). ↑ from fresh input
+parks the draft and loads the newest entry with the cursor at its
+start; ↓ walks back down, and past the newest entry the draft returns
+with the cursor at its end, as if you'd never left. Submitting a
+loaded entry works as-is — that is the fix-up-a-cancelled-message
+workflow. Typing mid-browse edits the loaded entry; there is no
+kill-ring, undo, or Shift+Enter newline (named candidates for later).
 
 ## markdown.rs — markdown → themed terminal rows
 
