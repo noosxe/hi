@@ -144,6 +144,41 @@ long input:  [stream 2] [input 8] [status 1]
 - Other pieces: `draw_picker`, `draw_completion`, `draw_status`,
   `welcome_into`.
 
+## kitty.rs — image rendering into scrollback (AD-0010)
+
+On kitty-protocol terminals (kitty, Ghostty, WezTerm, Warp — pi's exact
+env-sniffed matrix, no terminal queries; `HI_IMAGE_PROTOCOL=kitty|none`
+overrides), `read`-attached images render as real graphics in the
+transcript:
+
+- **Emission model**: the block builder returns `Segment`s — text rows
+  or `{ sequence, rows }` images. `lib.rs` computes the height across
+  segments and `insert_before`s once; `segments_into` writes text via
+  the ordinary Paragraph path and drops the whole kitty APC sequence
+  into **one buffer cell** at the block's side padding. The `rows`
+  cells below stay untouched — the image overlays them (z-order draws
+  images over default-background cells), and because history prints
+  exactly once, the terminal keeps it the way it keeps text. No image
+  registry, no cropping, no delete-on-exit — the machinery pi needs
+  for re-renderable viewports is structurally unnecessary here.
+- **Encoder**: `a=T,f=100,q=2,C=1,c=<cols>,r=<rows>,i=<id>` — PNG data
+  only (f=100; non-PNG re-encodes via `core::image_util::to_png`),
+  base64 chunked at the protocol's 4096 bytes with `m=1`/`m=0` flags,
+  only the first chunk carries control keys. `C=1` is mandatory: by
+  default kitty moves the cursor after placing, and ratatui's backend
+  skips cursor moves between contiguous cells — the next row's text
+  would land where kitty left the cursor.
+- **Fit**: pixel dims sniffed from headers (`core::image_util::
+  dimensions`), scaled into a cell rectangle via the cell pixel size
+  (crossterm's `window_size()` when the OS reports real pixels, pi's
+  9×18 fallback), capped at 80 columns × 24 rows, aspect-preserved
+  with pi's distortion chooser. Small images upscale to the budget,
+  like pi.
+- **Fallback**: an image that fails any step (undecodable base64,
+  corrupt bytes) renders as its text note — `· image: <mime>, <size>`
+  — the same note every terminal shows when no image protocol is
+  detected. Images render as words, never as nothing.
+
 ## markdown.rs — markdown → themed terminal rows
 
 `markdown_rows(text, width, base_style) -> Vec<Line>` — parses with

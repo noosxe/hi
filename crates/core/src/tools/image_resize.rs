@@ -41,7 +41,7 @@ pub(crate) const MAX_IMAGE_FILE_BYTES: u64 = 64 * 1024 * 1024;
 /// hostile PNG header claiming a million-pixel width must not become a
 /// 4 TB allocation. Matches the strictest provider maximum
 /// (Anthropic 8000×8000) with headroom for 5K screenshots.
-const MAX_DECODE_DIMENSION: u32 = 8192;
+pub(crate) const MAX_DECODE_DIMENSION: u32 = 8192;
 
 /// A processed attachment: the bytes that will be stored on the
 /// `ToolResult` (post-resize — the ladder runs once, before history),

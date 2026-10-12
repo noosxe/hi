@@ -20,7 +20,7 @@ mod bash;
 mod edit;
 mod find;
 mod grep;
-mod image_resize;
+pub(crate) mod image_resize;
 mod ls;
 mod read;
 mod truncate;

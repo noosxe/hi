@@ -322,51 +322,83 @@ pub fn pending_tool(messages: &[Message]) -> Option<ToolExec> {
 /// Compose a transcript block into wrapped, styled rows — one `Line`
 /// per scrollback row, in the pi-dark palette. Measuring and rendering
 /// share this function, so the row count a caller passes to
-/// `Terminal::insert_before` always matches what `rows_into` draws.
+/// `Terminal::insert_before` always matches what `segments_into` draws.
 pub fn block_rows(block: &TranscriptBlock, width: u16) -> Vec<Line<'static>> {
+    text_only(block_segments(block, width, None))
+}
+
+/// Flatten segments to their text rows, dropping image segments. Used
+/// by the managed region (which cannot host images — it re-renders
+/// every frame) and by the no-protocol path, where `block_segments`
+/// emits no image segments at all.
+fn text_only(segments: Vec<Segment>) -> Vec<Line<'static>> {
+    segments
+        .into_iter()
+        .flat_map(|segment| match segment {
+            Segment::Text(rows) => rows,
+            Segment::Image { .. } => Vec::new(),
+        })
+        .collect()
+}
+
+/// One printed chunk of a transcript block. Text rows flow through the
+/// ordinary Paragraph path; an image is a raw kitty sequence plus the
+/// number of scrollback rows it overlays.
+#[derive(Debug)]
+pub enum Segment {
+    Text(Vec<Line<'static>>),
+    Image { sequence: String, rows: u16 },
+}
+
+/// Build the printable segments of a block. `caps` is the terminal's
+/// image protocol: `Some` lets `read`-attached images render as real
+/// graphics (falling back to the text note per corrupt image), `None`
+/// reproduces the text-only transcript exactly.
+pub fn block_segments(
+    block: &TranscriptBlock,
+    width: u16,
+    caps: Option<crate::kitty::Protocol>,
+) -> Vec<Segment> {
     let width = width.max(1) as usize;
     match block {
         // Filled blocks pad in their own fill (padded_block / tool_rows).
-        TranscriptBlock::Message(Message::User(text)) => padded_block(
+        TranscriptBlock::Message(Message::User(text)) => vec![Segment::Text(padded_block(
             markdown_rows(text, width as u16, THEME.fg(Fg::UserText)),
             width,
             THEME.bg(Bg::UserMessage),
-        ),
+        ))],
         // Transparent blocks pad with plain blank rows. Either way every
         // block carries one blank row above and below (pi's paddingY):
         // two blank rows separate any adjacent content rows, some tinted
         // by their block's background, some not.
         TranscriptBlock::Message(Message::Assistant(text)) => {
             // Plain markdown, terminal-default text, no fill (pi).
-            pad_plain(markdown_rows(text, width as u16, Style::new()))
+            vec![Segment::Text(pad_plain(markdown_rows(
+                text,
+                width as u16,
+                Style::new(),
+            )))]
         }
-        TranscriptBlock::Message(Message::System(text)) => {
-            pad_plain(wrap_plain(text, width, THEME.fg(Fg::Dim)))
-        }
-        TranscriptBlock::Message(Message::Error(text)) => {
-            pad_plain(wrap_plain(text, width, THEME.fg(Fg::Error)))
-        }
+        TranscriptBlock::Message(Message::System(text)) => vec![Segment::Text(pad_plain(
+            wrap_plain(text, width, THEME.fg(Fg::Dim)),
+        ))],
+        TranscriptBlock::Message(Message::Error(text)) => vec![Segment::Text(pad_plain(
+            wrap_plain(text, width, THEME.fg(Fg::Error)),
+        ))],
         // derive_blocks routes tool messages to TranscriptBlock::Tool;
         // if one ever lands here, render defensively instead of panicking.
-        TranscriptBlock::Message(Message::ToolCall(call)) => pad_plain(wrap_plain(
-            &format!("{}({})", call.name, call.arguments),
-            width,
-            THEME.fg(Fg::Dim),
-        )),
-        TranscriptBlock::Message(Message::ToolResult(result)) => {
-            pad_plain(wrap_plain(&result.content, width, THEME.fg(Fg::Dim)))
+        TranscriptBlock::Message(Message::ToolCall(call)) => {
+            vec![Segment::Text(pad_plain(wrap_plain(
+                &format!("{}({})", call.name, call.arguments),
+                width,
+                THEME.fg(Fg::Dim),
+            )))]
         }
-        TranscriptBlock::Tool(exec) => tool_rows(exec, width),
+        TranscriptBlock::Message(Message::ToolResult(result)) => vec![Segment::Text(pad_plain(
+            wrap_plain(&result.content, width, THEME.fg(Fg::Dim)),
+        ))],
+        TranscriptBlock::Tool(exec) => tool_segments(exec, width, caps),
     }
-}
-
-/// Render pre-wrapped transcript rows into a scrollback buffer. Called
-/// via `Terminal::insert_before`; after this runs, the rows are
-/// terminal-owned history — scrolling them is the emulator's job.
-pub fn rows_into(rows: Vec<Line<'static>>, buf: &mut Buffer) {
-    // The rows are already wrapped and styled to the buffer's width, so
-    // this is a plain placement pass — no `Wrap`, no reflow.
-    Paragraph::new(Text::from(rows)).render(buf.area, buf);
 }
 
 /// Plain-text wrap in one style (system and error lines are not
@@ -425,6 +457,81 @@ fn fill_row(width: usize, fill: Style) -> Line<'static> {
 /// Tool block: bold tool name with the collapsed args preview over the
 /// output preview, in a fill tinted by execution state — pi's
 /// ToolExecutionComponent: pending while running, then success or error.
+/// Attached images render as kitty graphics after the text band (ruling
+/// #42.2); a corrupt or undecodable image falls back to its text note,
+/// never to nothing.
+fn tool_segments(
+    exec: &ToolExec,
+    width: usize,
+    caps: Option<crate::kitty::Protocol>,
+) -> Vec<Segment> {
+    let mut segments = vec![Segment::Text(tool_rows(exec, width))];
+    let Some(result) = &exec.result else {
+        return segments;
+    };
+    if result.images.is_empty() {
+        return segments;
+    }
+    let kitty = caps == Some(crate::kitty::Protocol::Kitty);
+    let inner_width = width.saturating_sub(2).max(1);
+    for image in &result.images {
+        // One note format serves both stories: no image protocol, or a
+        // specific image the renderer had to reject.
+        if let (true, Some((sequence, rows))) =
+            (kitty, crate::kitty::render(image, inner_width as u16))
+        {
+            segments.push(Segment::Image { sequence, rows });
+        } else {
+            segments.push(Segment::Text(vec![image_note(image)]));
+        }
+    }
+    segments
+}
+
+/// Total scrollback rows a set of segments will occupy.
+pub fn segments_height(segments: &[Segment]) -> u16 {
+    segments
+        .iter()
+        .map(|segment| match segment {
+            Segment::Text(rows) => rows.len().max(1) as u16,
+            Segment::Image { rows, .. } => *rows,
+        })
+        .sum()
+}
+
+/// Render print segments into a scrollback buffer. Text rows go
+/// through the ordinary Paragraph path; an image's kitty sequence
+/// rides in one cell at the block's side padding, overlaying the
+/// `rows` untouched cells below it (kitty z-order draws the image over
+/// default-background cells, so the empty spaces stay invisible).
+pub fn segments_into(segments: Vec<Segment>, buf: &mut Buffer) {
+    const PAD_X: u16 = 1; // padded_block's side padding
+    let mut y = 0u16;
+    for segment in segments {
+        match segment {
+            Segment::Text(rows) => {
+                let height = rows.len().max(1) as u16;
+                Paragraph::new(Text::from(rows)).render(
+                    Rect {
+                        x: 0,
+                        y,
+                        width: buf.area.width,
+                        height,
+                    },
+                    buf,
+                );
+                y += height;
+            }
+            Segment::Image { sequence, rows } => {
+                if let Some(cell) = buf.cell_mut((PAD_X, y)) {
+                    cell.set_symbol(sequence.as_str());
+                }
+                y += rows;
+            }
+        }
+    }
+}
+
 fn tool_rows(exec: &ToolExec, width: usize) -> Vec<Line<'static>> {
     let fill = match &exec.result {
         None => THEME.bg(Bg::ToolPending),
@@ -468,31 +575,24 @@ fn tool_rows(exec: &ToolExec, width: usize) -> Vec<Line<'static>> {
                 THEME.fg(Fg::Muted),
             )));
         }
-        inner.extend(image_notes(result));
     }
     padded_block(inner, width, fill)
 }
 
-/// One dim line per attached image: mime type plus decoded size. The
-/// terminal renders no pixels — the kitty graphics protocol is issue
-/// #42 — so this note is the honest placeholder.
-fn image_notes(result: &ToolResult) -> Vec<Line<'static>> {
-    result
-        .images
-        .iter()
-        .map(|image| {
-            let bytes = image.data.len() as u64 * 3 / 4;
-            let size = if bytes < 1024 * 1024 {
-                format!("{:.1} KB", bytes as f64 / 1024.0)
-            } else {
-                format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
-            };
-            Line::from(Span::styled(
-                format!("· image: {}, {size}", image.mime_type),
-                THEME.fg(Fg::Muted),
-            ))
-        })
-        .collect()
+/// One dim line per image: mime type plus decoded size. The text note
+/// is the honest placeholder whenever pixels cannot render — no image
+/// protocol, or a specific image the renderer rejected (issue #42).
+fn image_note(image: &hi_core::tool::ImageBlock) -> Line<'static> {
+    let bytes = image.data.len() as u64 * 3 / 4;
+    let size = if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
+    };
+    Line::from(Span::styled(
+        format!("· image: {}, {size}", image.mime_type),
+        THEME.fg(Fg::Muted),
+    ))
 }
 
 /// Collapse call arguments to pi's `key=value key2=value2` preview,
@@ -590,7 +690,7 @@ mod tests {
             call: None,
             result: Some(result),
         };
-        let rows = tool_rows(&exec, 60);
+        let rows = block_rows(&TranscriptBlock::Tool(exec), 60);
         let text: Vec<String> = rows
             .iter()
             .map(|line| {
@@ -618,6 +718,100 @@ mod tests {
         }
     }
 
+    fn segment_text(segments: &[Segment]) -> String {
+        segments
+            .iter()
+            .flat_map(|s| match s {
+                Segment::Text(rows) => rows
+                    .iter()
+                    .map(|r| {
+                        r.spans
+                            .iter()
+                            .map(|sp| sp.content.to_string())
+                            .collect::<Vec<_>>()
+                            .join("")
+                    })
+                    .collect::<Vec<_>>(),
+                Segment::Image { .. } => Vec::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    const TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn kitty_caps_render_images_as_segments_not_notes() {
+        let mut result = tool_result("done", false);
+        result.images = vec![hi_core::tool::ImageBlock {
+            data: TINY_PNG_B64.into(),
+            mime_type: "image/png".into(),
+        }];
+        let segments = block_segments(
+            &TranscriptBlock::Tool(ToolExec {
+                call: None,
+                result: Some(result),
+            }),
+            60,
+            Some(crate::kitty::Protocol::Kitty),
+        );
+        let text = segment_text(&segments);
+        assert!(!text.contains("· image:"), "note must be gone: {text}");
+        let images: Vec<&Segment> = segments
+            .iter()
+            .filter(|s| matches!(s, Segment::Image { .. }))
+            .collect();
+        assert_eq!(images.len(), 1);
+        let Segment::Image { sequence, rows } = images[0] else {
+            unreachable!()
+        };
+        assert!(sequence.starts_with("\x1b_Ga=T,f=100,q=2,C=1,"));
+        assert!(*rows >= 1);
+        // Height accounting covers the image's overlay rows too.
+        assert!(segments_height(&segments) as usize >= 3 + *rows as usize);
+    }
+
+    #[test]
+    fn corrupt_images_fall_back_to_an_honest_note() {
+        let mut result = tool_result("done", false);
+        result.images = vec![hi_core::tool::ImageBlock {
+            data: "aW1n".into(), // decodes, but is not an image
+            mime_type: "image/png".into(),
+        }];
+        let segments = block_segments(
+            &TranscriptBlock::Tool(ToolExec {
+                call: None,
+                result: Some(result),
+            }),
+            60,
+            Some(crate::kitty::Protocol::Kitty),
+        );
+        assert!(!segments.iter().any(|s| matches!(s, Segment::Image { .. })));
+        let text = segment_text(&segments);
+        assert!(text.contains("· image: image/png, 0.0 KB"));
+    }
+
+    #[test]
+    fn image_segments_place_their_sequence_and_rows_exactly() {
+        // One text segment (2 rows), then an image (3 rows), then text.
+        let segments = vec![
+            Segment::Text(vec![Line::from("one"), Line::from("two")]),
+            Segment::Image {
+                sequence: "\x1b_Gfake\x1b\\".into(),
+                rows: 3,
+            },
+            Segment::Text(vec![Line::from("after")]),
+        ];
+        assert_eq!(segments_height(&segments), 6);
+        let buf = &mut Buffer::empty(Rect::new(0, 0, 20, 6));
+        segments_into(segments, buf);
+        // The sequence lands in one cell at the side padding, exactly
+        // where the image band starts.
+        assert_eq!(buf[(1, 2)].symbol(), "\x1b_Gfake\x1b\\");
+        // Text resumes below the image band.
+        assert_eq!(text_of(buf, 5, 20), "after");
+    }
+
     #[test]
     fn user_block_fills_its_background() {
         let rows = block_rows(
@@ -627,7 +821,7 @@ mod tests {
         // paddingY: one fill row above and below the content.
         assert_eq!(rows.len(), 3);
         let buf = &mut Buffer::empty(Rect::new(0, 0, 20, 3));
-        rows_into(rows, buf);
+        segments_into(vec![Segment::Text(rows)], buf);
         let fill = THEME.bg(Bg::UserMessage).bg.unwrap();
         for x in 0..20 {
             // Top and bottom rows are solid fill; the content row carries
@@ -648,7 +842,7 @@ mod tests {
         // paddingY: one plain blank row above and below the content.
         assert_eq!(rows.len(), 3);
         let buf = &mut Buffer::empty(Rect::new(0, 0, 30, 3));
-        rows_into(rows, buf);
+        segments_into(vec![Segment::Text(rows)], buf);
         assert_eq!(text_of(buf, 0, 30), "");
         assert_eq!(text_of(buf, 1, 30), "plain reply");
         assert_eq!(text_of(buf, 2, 30), "");

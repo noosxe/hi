@@ -6,6 +6,7 @@
 
 mod app;
 mod commands;
+mod kitty;
 mod markdown;
 mod picker;
 mod theme;
@@ -126,13 +127,17 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io
             // Re-read the width per batch: a resize mid-burst must not
             // measure rows against the old width.
             let width = terminal.size()?.width;
+            // Detect once per batch: env vars do not change mid-burst,
+            // and the answer is passed down, not read in the renderer
+            // (which would make ui tests depend on the real terminal).
+            let caps = kitty::detect();
             for block in &blocks {
                 // Spacing is each block's own padding (one blank row above
                 // and below, tinted for filled blocks — see `block_rows`),
                 // so no cross-block separator bookkeeping exists here.
-                let rows = ui::block_rows(block, width);
-                let height = rows.len().clamp(1, u16::MAX as usize) as u16;
-                terminal.insert_before(height, |buf| ui::rows_into(rows, buf))?;
+                let segments = ui::block_segments(block, width, caps);
+                let height = ui::segments_height(&segments).max(1);
+                terminal.insert_before(height, |buf| ui::segments_into(segments, buf))?;
             }
             app.printed = app.messages.len() - usize::from(pending.is_some());
         }

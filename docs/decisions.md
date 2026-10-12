@@ -376,3 +376,60 @@ limit, and the note surfaces it verbatim.
 
 **Non-goal:** per-model limits, image protocols (#42), resize outside
 `read`.
+
+---
+
+## AD-0010 — kitty graphics by one-shot emission; no re-render, no registry (2026-10-15)
+
+**Status:** implemented (issue #42). Scope ruled on the thread:
+kitty-protocol terminals only, text-note fallback everywhere else.
+
+**The fit with the architecture decided everything.** pi-tui needs a
+scrollback image registry (`registerKittyImageMetadata`), placement-only
+re-emission, and viewport cropping because pi-tui re-renders its
+viewport and must clip images line by line. hi's inline ratatui prints
+history exactly once via `insert_before` into terminal-owned
+scrollback — the image, once placed, is kept by the terminal the way
+text is. The hardest third of pi's module is structurally unnecessary
+here, and we do not build it.
+
+**The decisions:**
+
+- **Detection is env-sniffing, never terminal queries.** pi's exact
+  matrix, kitty scope: kitty/Ghostty/WezTerm/Warp → kitty; tmux →
+  none (passthrough unreliable); everything else → none.
+  `HI_IMAGE_PROTOCOL=kitty|none` is the env's last word. Detection is
+  a pure function over an env snapshot — testable without process-env
+  races, read once per print batch.
+- **Emission is one cell, not a widget.** The block builder returns
+  `Segment`s; a kitty sequence rides as the symbol of a single buffer
+  cell and overlays `rows` untouched cells below it. Verified in
+  ratatui-crossterm's source that cursor positioning is cell-index
+  based, so a 200 KB symbol cannot skew the layout. No
+  `ratatui-image` dependency (v11 resolves, but brings chafa/sixel/
+  negotiation and a query-based picker hi doesn't use — AD-0004).
+- **`C=1` is mandatory.** By default kitty moves the cursor right and
+  down after placing; ratatui's backend skips cursor moves between
+  contiguous cells, so the next row's text would land where kitty
+  left the cursor. Verified against the kitty spec, not assumed.
+- **Protocol-exact encoder**: `a=T,f=100,q=2,C=1,c,r,i`, base64 in
+  4096-byte chunks with `m=1`/`m=0`, control keys only on the first
+  chunk — byte-tested against the spec's chunking rules, not
+  transcribed from memory.
+- **Pixel work stays in core** (`image_util::{dimensions, to_png}`):
+  header-only dimension sniff; PNG passthrough only after a
+  structural chunk-walk to IEND (a corrupt "PNG" sent blind would
+  render as nothing instead of falling back honestly); other formats
+  decode under the AD-0009 limits and re-encode. The TUI never takes
+  the image dependency.
+- **Sizing follows pi**, including upscaling small images to the
+  budget and the distortion chooser that sometimes prefers the
+  neighboring cell count. Caps: 80 columns × 24 rows.
+- **Fallback is a text note, never nothing**: undecodable base64,
+  corrupt bytes, or a terminal without the protocol all render
+  `· image: <mime>, <size>`.
+
+**Non-goals:** iTerm2 protocol (its encoder is a new `Protocol`
+variant away), sixel, halfblocks/ASCII art, pasted attachments
+(#41), animation.**
+

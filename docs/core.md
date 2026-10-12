@@ -78,8 +78,11 @@ mutates the caller's history — consumers mirror the event stream (details in
 The harness ships tools, not just a loop. One file per tool under
 `crates/core/src/tools/`, plus support modules: `truncate.rs` (the
 output contract), `walk.rs` (gitignore-aware directory walking for
-grep/find), and `image_resize.rs` (read's attachment ladder —
-[decisions.md](decisions.md) AD-0009).
+grep/find), `image_resize.rs` (read's attachment ladder —
+[decisions.md](decisions.md) AD-0009), and `image_util.rs`
+(presentation-side helpers the TUI's kitty renderer uses: header-only
+`dimensions` and `to_png` with a structural chunk-walk —
+[decisions.md](decisions.md) AD-0010).
 
 - **The seven built-ins**: `read` (line-numbered, `offset`/`limit` paging;
   image files — png/jpeg/webp/gif, magic-byte sniffed, never extension-guessed — are
