@@ -7,6 +7,7 @@
 mod app;
 mod clipboard;
 mod commands;
+mod editor;
 mod kitty;
 mod markdown;
 mod picker;

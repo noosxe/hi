@@ -122,15 +122,24 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
 
     // Word-wrap the input into the elastic text rows and park the
-    // real cursor after the last visible cell of the last row.
-    // Widths are display columns — emoji count double.
-    let rows = crate::wrap::wrap(&app.input, inner.width as usize);
-    let text: Text = rows.iter().map(|row| Line::from(row.as_str())).collect();
+    // real terminal caret at the logical cursor (AD-0014) — mid-text
+    // while editing, not just after the last cell. Widths are display
+    // columns — emoji count double.
+    let starts = crate::wrap::wrap_row_starts(&app.input, inner.width as usize);
+    let ends = starts.iter().copied().skip(1).chain([app.input.len()]);
+    let rows: Vec<&str> = starts
+        .iter()
+        .copied()
+        .zip(ends)
+        .map(|(s, e)| &app.input[s..e])
+        .collect();
+    let (cursor_row, cursor_col) =
+        crate::wrap::cursor_pos(&app.input, app.cursor, inner.width as usize);
+    let text: Text = rows.iter().map(|row| Line::from(*row)).collect();
     frame.render_widget(Paragraph::new(text).block(block), area);
-    let last_row = rows.last().map(String::as_str).unwrap_or("");
     frame.set_cursor_position(Position::new(
-        inner.x + crate::wrap::display_width(last_row) as u16,
-        inner.y + rows.len() as u16 - 1,
+        inner.x + cursor_col as u16,
+        inner.y + cursor_row as u16,
     ));
 }
 
@@ -673,7 +682,36 @@ fn draw_session_picker(frame: &mut Frame, area: Rect, app: &App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::{Backend, TestBackend};
     use ratatui::layout::Rect;
+
+    #[test]
+    fn the_caret_tracks_the_logical_cursor() {
+        let mut app = crate::app::test_app();
+        app.input = "hello world".into();
+        app.cursor = 5;
+        // Narrow frame: "hello world" wraps into two rows here.
+        let backend = TestBackend::new(10, 11);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        // "hello world" wraps to two input rows here: four rows of
+        // input box total, inner text starting at y = 11 - 4 + 1 = 8.
+        assert_eq!(
+            terminal.backend_mut().get_cursor_position().unwrap(),
+            Position { x: 5, y: 8 }
+        );
+        // Mid-word wrap: cursor inside the second wrapped row.
+        app.input = "hello brave world".into();
+        app.cursor = 8; // after "brave"'s first two chars
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        // Three wrapped rows: inner text starts at y = 11 - 5 + 1 = 7,
+        // and the cursor sits on row 1, two columns into "brave".
+        assert_eq!(
+            terminal.backend_mut().get_cursor_position().unwrap(),
+            Position { x: 2, y: 8 }
+        );
+    }
 
     /// All cell symbols of one buffer row, trailing blanks trimmed.
     fn text_of(buf: &Buffer, y: u16, width: u16) -> String {

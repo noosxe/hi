@@ -62,10 +62,81 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     rows
 }
 
-/// How many rows `wrap` would produce — the number the input area
-/// needs to grow by.
+/// Byte offset of each row's first character under the same greedy
+/// walk `wrap` uses. Rows are a contiguous partition of `text`
+/// (concatenating `wrap`'s rows reproduces its characters), so the
+/// ranges never need building explicitly — row *i* spans
+/// `starts[i]..starts[i+1]`, the last row to the end of the text.
+pub fn wrap_row_starts(text: &str, width: usize) -> Vec<usize> {
+    if width == 0 {
+        return vec![0];
+    }
+    let mut starts = vec![0usize];
+    let mut current_width = 0usize;
+    // Byte offset of the current word. A row's start is exactly the
+    // offset where it opens — pushed the moment the walk opens it.
+    let mut offset = 0usize;
+    for word in text.split_inclusive(' ') {
+        let word_width = display_width(word);
+        if current_width + word_width <= width {
+            current_width += word_width;
+        } else if word_width > width {
+            // The partial row closes here (its start was recorded
+            // when it opened); this word's first char opens the next
+            // row. Then hard-split cell by cell — a wide char still
+            // refuses to straddle the edge.
+            if current_width > 0 {
+                current_width = 0;
+                starts.push(offset);
+            }
+            for ch in word.chars() {
+                let ch_width = ch.width().unwrap_or(0);
+                if current_width + ch_width > width {
+                    starts.push(offset);
+                    current_width = 0;
+                }
+                current_width += ch_width;
+                offset += ch.len_utf8();
+            }
+            continue;
+        } else {
+            // This word opens the next row.
+            starts.push(offset);
+            current_width = word_width;
+        }
+        offset += word.len();
+    }
+    starts
+}
+
+/// How many rows the greedy wrap produces — the number the input
+/// area needs to grow by.
 pub fn wrapped_row_count(text: &str, width: usize) -> usize {
-    wrap(text, width).len()
+    wrap_row_starts(text, width).len()
+}
+
+/// Where the input's cursor lands in the wrapped rows: the row index
+/// and the cursor's display column inside it — the coordinates the
+/// real terminal caret parks at. `cursor` is clamped down to the
+/// nearest char boundary first (the invariant says it already sits
+/// on one; belt and suspenders for rendering).
+pub fn cursor_pos(text: &str, cursor: usize, width: usize) -> (usize, usize) {
+    let starts = wrap_row_starts(text, width);
+    let mut cursor = cursor.min(text.len());
+    while cursor > 0 && !text.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    // A cursor at a row boundary belongs to the previous row's end —
+    // the caret sits after "hello ", not on "brave"'s first cell.
+    let row = if cursor == 0 {
+        0
+    } else {
+        starts
+            .iter()
+            .rposition(|&s| s < cursor)
+            .expect("starts[0] == 0")
+    };
+    (row, display_width(&text[starts[row]..cursor]))
 }
 
 #[cfg(test)]
@@ -78,6 +149,40 @@ mod tests {
         assert_eq!(display_width("中"), 2);
         assert_eq!(display_width("🙂"), 2);
         assert_eq!(display_width("a🙂中"), 5);
+    }
+
+    #[test]
+    fn row_starts_partition_exactly_what_wrap_renders() {
+        for (text, width) in [
+            ("hello brave world", 6),
+            ("", 10),
+            ("word", 80),
+            ("supercalifragilistic", 5),
+            ("a\u{4e2d}b wide", 4),
+            ("trailing space ", 3),
+        ] {
+            let rows = wrap(text, width);
+            let starts = wrap_row_starts(text, width);
+            assert_eq!(rows.len(), starts.len(), "{text:?}/{width}");
+            let bounds = starts.iter().copied().skip(1).chain([text.len()]);
+            for (row, (s, e)) in rows.iter().zip(starts.iter().copied().zip(bounds)) {
+                assert_eq!(*row, &text[s..e], "{text:?}/{width}");
+            }
+        }
+    }
+
+    #[test]
+    fn cursor_pos_lands_on_the_right_row_and_column() {
+        // "hello brave world" at width 6 wraps ["hello ", "brave ", "world"].
+        assert_eq!(cursor_pos("hello brave world", 0, 6), (0, 0));
+        assert_eq!(cursor_pos("hello brave world", 6, 6), (0, 6)); // after "hello "
+        assert_eq!(cursor_pos("hello brave world", 8, 6), (1, 2)); // "br|"
+        assert_eq!(cursor_pos("hello brave world", 17, 6), (2, 5)); // end
+        // Wide char: the column counts display cells, not chars.
+        assert_eq!(cursor_pos("a\u{4e2d}b", 4, 80), (0, 3)); // after "a中"
+        // Out-of-range and mid-char cursors clamp.
+        assert_eq!(cursor_pos("ab", 99, 80), (0, 2));
+        assert_eq!(cursor_pos("a\u{4e2d}b", 2, 80), (0, 1));
     }
 
     #[test]
