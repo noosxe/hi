@@ -5,7 +5,6 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Borders, List, ListItem, ListState, Paragraph, Widget};
-use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
@@ -36,18 +35,18 @@ pub fn draw(frame: &mut Frame, app: &App) {
         );
         return;
     }
-    // The live viewport is the whole terminal (AD-0015), not the
-    // fixed 12-row sketch this file shipped with. Bottom-up: the
-    // status row is pinned, the input grows upward with its wrapped
-    // text (3 rows resting, up to 8), the menu takes rows above the
-    // input (0 when closed), and the streaming area keeps everything
-    // that remains — a reply fills the window; pi's live viewport is
-    // likewise the full terminal.
+    // The live viewport is the whole terminal (AD-0015/AD-0016),
+    // bottom-up: the input grows upward with its wrapped text (3 rows
+    // resting, up to 8); an open menu renders UNDER the input —
+    // pi-style, taking the bottom edge while the status row yields
+    // for its brief lifetime (ruled: menus outrank status); and the
+    // stream area keeps every row above it: the transcript window
+    // (AD-0016), then live content, flowing down to the input. Never
+    // a blank band.
     //
-    //   50 rows, resting: [stream 46] [input 3] [status 1]
-    let input_rows =
-        crate::wrap::wrapped_row_count(&app.input, area.width as usize).clamp(1, 6) as u16;
-    let input_height = input_rows + 2; // rules
+    //   50 rows, resting:   [stream 46] [input 3] [status 1]
+    //   50 rows, menu open: [stream 44] [input 3] [menu 3]
+    let input_height = input_height(app, area.width);
     let menu_h = app.menu_height();
     let (stream_area, menu_area, input_area, status_area) = layout(area, input_height, menu_h);
     draw_stream(frame, stream_area, app);
@@ -58,36 +57,59 @@ pub fn draw(frame: &mut Frame, app: &App) {
         } else {
             draw_completion(frame, menu_area, app);
         }
+    } else {
+        draw_status(frame, status_area, app);
     }
-    draw_status(frame, status_area, app);
 }
 
-/// The live-area partition (AD-0015), bottom-up: status 1 pinned at
-/// the bottom edge, input above it, menu above that, and the stream
+/// The input box's row count at this width — wrapped rows (1–6) plus
+/// its two rules. Shared with the event loop's flush pass so the
+/// window is measured with one formula.
+pub fn input_height(app: &App, width: u16) -> u16 {
+    let rows = crate::wrap::wrapped_row_count(&app.input, width.max(1) as usize).clamp(1, 6);
+    rows as u16 + 2
+}
+
+/// How many rows the stream window gets at this frame's geometry —
+/// the flush pass targets exactly this many live rows.
+pub fn stream_window_height(height: u16, input_height: u16, menu_h: u16) -> u16 {
+    layout(Rect::new(0, 0, 1, height), input_height, menu_h)
+        .0
+        .height
+}
+
+/// The live-area partition (AD-0015/AD-0016), bottom-up: the input
+/// sits above the bottom edge; an open menu renders UNDER the input
+/// and takes the bottom edge for its brief lifetime — the status row
+/// yields while it is open (ruled: menus outrank status). The stream
 /// keeps every row from the top. Saturating by construction — each
 /// consumer subtracts from the one below it, so on absurdly short
 /// terminals the stream shrinks first, to nothing, and nothing
-/// panics. The scrollback above the viewport is simply not visible
-/// while the reply streams; the committed block lands there on
-/// completion, as always.
+/// panics. The scrollback above the viewport is the flushed prefix
+/// of the transcript; the stream area is its window — never blank.
 fn layout(area: Rect, input_height: u16, menu_h: u16) -> (Rect, Rect, Rect, Rect) {
-    let status_area = Rect {
-        y: area.bottom().saturating_sub(1),
-        height: 1,
-        ..area
-    };
+    let bottom_row = area.bottom().saturating_sub(1);
+    // The bottommost consumer is the open menu, or — when no menu is
+    // open — the status row. Exactly one of them owns the edge.
+    let edge_h = if menu_h > 0 { menu_h } else { 1 };
+    let edge_y = bottom_row.saturating_sub(edge_h.saturating_sub(1));
     let input_area = Rect {
-        y: status_area.y.saturating_sub(input_height),
+        y: edge_y.saturating_sub(input_height),
         height: input_height,
         ..area
     };
     let menu_area = Rect {
-        y: input_area.y.saturating_sub(menu_h),
+        y: input_area.y.saturating_sub(0) + input_height,
         height: menu_h,
         ..area
     };
+    let status_area = Rect {
+        y: bottom_row,
+        height: u16::from(menu_h == 0),
+        ..area
+    };
     let stream_area = Rect {
-        height: menu_area.y.saturating_sub(area.y),
+        height: input_area.y.saturating_sub(area.y),
         ..area
     };
     (stream_area, menu_area, input_area, status_area)
@@ -231,45 +253,34 @@ fn draw_completion(frame: &mut Frame, area: Rect, app: &App) {
 /// rows — the complete text is printed to scrollback when the turn
 /// ends.
 fn draw_stream(frame: &mut Frame, area: Rect, app: &App) {
-    // A running tool replaces the streaming text with its live pending
-    // block — pi inline: the pending execution occupies the live region
-    // and lands in history complete, colored by its outcome.
+    // The window (AD-0016): the unflushed tail of the transcript —
+    // the conversation flows straight down to the input, and the
+    // scrollback above the viewport is its flushed prefix. Live
+    // content continues below it: a running tool's pending block
+    // replaces the streaming text (pi inline: the pending execution
+    // occupies the live region and lands in history complete), then
+    // the turn's streaming markdown, undimmed.
+    let mut rows = app.scroll.window_rows();
     if let Some(exec) = pending_tool(&app.messages) {
-        render_tail(
-            &block_rows(&TranscriptBlock::Tool(exec), area.width),
-            area,
-            frame,
-        );
-        return;
-    }
-    let Some(turn) = app.turn.as_ref() else {
-        return;
-    };
-    if turn.text.is_empty() && turn.error.is_none() {
-        return;
-    }
-    // Trim from the front until the tail fits the visible columns —
-    // counted in display columns (emoji are two), not characters.
-    let capacity = area.width as usize * area.height as usize;
-    let mut start = 0;
-    let mut used = 0usize;
-    for (index, ch) in turn.text.char_indices().rev() {
-        let width = ch.width().unwrap_or(0);
-        if used + width > capacity {
-            start = index + ch.len_utf8();
-            break;
+        rows.extend(block_rows(&TranscriptBlock::Tool(exec), area.width));
+    } else if let Some(turn) = app.turn.as_ref() {
+        if !turn.text.is_empty() {
+            rows.extend(markdown_rows(&turn.text, area.width, Style::new()));
         }
-        used += width;
+        if let Some(err) = &turn.error {
+            rows.extend(markdown_rows(err, area.width, THEME.fg(Fg::Error)));
+        }
     }
-    let mut rows: Vec<Line<'static>> = Vec::new();
-    if !turn.text.is_empty() {
-        // pi streams markdown in place, undimmed.
-        rows.extend(markdown_rows(&turn.text[start..], area.width, Style::new()));
-    }
-    if let Some(err) = &turn.error {
-        rows.extend(markdown_rows(err, area.width, THEME.fg(Fg::Error)));
-    }
-    render_tail(&rows, area, frame);
+    // The newest rows win, and they hug the input: a short
+    // conversation sits directly above the composer, not floating at
+    // the top of the window — pi bottom-anchors its live region too.
+    let visible = rows.len().min(area.height as usize);
+    let anchored = Rect {
+        y: area.y + area.height - visible as u16,
+        height: visible as u16,
+        ..area
+    };
+    render_tail(&rows, anchored, frame);
 }
 
 /// Draw the last rows of pre-wrapped content into the live area.
@@ -379,7 +390,7 @@ fn text_only(segments: Vec<Segment>) -> Vec<Line<'static>> {
 /// One printed chunk of a transcript block. Text rows flow through the
 /// ordinary Paragraph path; an image is a raw kitty sequence plus the
 /// number of scrollback rows it overlays.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Segment {
     Text(Vec<Line<'static>>),
     Image { sequence: String, rows: u16 },
@@ -667,11 +678,6 @@ fn args_preview(arguments: &str) -> String {
 /// One-row welcome banner, printed above the viewport on startup.
 /// Doubles as visual separation from whatever the terminal was
 /// showing before the app launched.
-pub fn welcome_into(buf: &mut Buffer) {
-    let line = Line::from(vec!["hi".bold(), " · say something, ctrl-c to quit".dim()]);
-    Paragraph::new(line).render(buf.area, buf);
-}
-
 /// The `/resume` chooser: title, the visible session rows around the
 /// selection, the filter line, and the key hint. Composition is
 /// shared with the standalone `--resume` picker (`picker_lines`), so
@@ -699,6 +705,65 @@ mod tests {
     use ratatui::layout::Rect;
 
     #[test]
+    fn the_window_hugs_the_input_when_the_transcript_is_short() {
+        use crate::app::test_app;
+        let mut app = test_app();
+        app.messages
+            .push(hi_core::Message::User("where did my transcript go".into()));
+        app.scroll.sync(&app.messages, 40, None);
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend_mut().buffer().clone();
+        let row_text = |y: u16| {
+            (0..40)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        // Input box rows 16-18, status row 19; the stream window is
+        // rows 0..16 — and the user block (3 rows: pad, text, pad)
+        // sits at its BOTTOM, rows 13-15, directly above the input.
+        assert!(row_text(14).contains("where did my transcript go"));
+        assert!(row_text(15).trim().is_empty()); // the block's lower pad
+        assert!(row_text(16).contains("─")); // input top rule
+    }
+
+    #[test]
+    fn menus_render_under_the_input_and_status_yields() {
+        use crate::app::test_app;
+        let mut app = test_app();
+        app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('/'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(app.completion.is_some(), "slash opens the completion");
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend_mut().buffer().clone();
+        let row_text = |y: u16| {
+            (0..40)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        // Geometry, not coordinates: the input line (with the typed
+        // "/") must sit ABOVE the completion items, the items must
+        // reach the bottom edge, and the status line must have
+        // yielded — no "mock" anywhere in the frame.
+        let input_row = (0..20u16).find(|&y| row_text(y) == "/").expect("input row");
+        let menu_row = (0..20u16)
+            .find(|&y| row_text(y).contains("/model"))
+            .expect("completion items row");
+        assert!(input_row < menu_row, "menu renders under the input");
+        assert!(
+            !row_text(19).contains("mock"),
+            "status yields while a menu is open"
+        );
+    }
+
+    #[test]
     fn the_viewport_is_the_whole_terminal() {
         // 40 rows resting: the stream keeps everything but the input
         // and the status row — the old fixed 12-row sketch gave this
@@ -707,12 +772,13 @@ mod tests {
         assert_eq!((stream.height, menu.height), (36, 0));
         assert_eq!((input.y, input.height), (36, 3)); // rows 36-38
         assert_eq!((status.y, status.height), (39, 1));
-        // A menu rides directly above the input.
+        // A menu renders UNDER the input and owns the bottom edge;
+        // the status row yields for its lifetime.
         let (stream, menu, input, status) = layout(Rect::new(0, 0, 80, 40), 3, 4);
-        assert_eq!(stream.height, 32);
-        assert_eq!((menu.y, menu.height), (32, 4)); // rows 32-35
-        assert_eq!(input.y, 36);
-        assert_eq!(status.y, 39);
+        assert_eq!(stream.height, 33);
+        assert_eq!(input.y, 33); // rows 33-35
+        assert_eq!((menu.y, menu.height), (36, 4)); // rows 36-39
+        assert_eq!((status.y, status.height), (39, 0));
     }
 
     #[test]

@@ -44,9 +44,10 @@ finalize:
   └─ session.append(everything new this frame)   (failure → one System
      note + persistence off for the rest of the run)
 
-Rendering: the live area shows `turn.text` while in flight; finalized
-messages are printed **above** the viewport into native scrollback
-(`ui::block_rows` + `ui::rows_into`) and are never redrawn by ratatui.
+Rendering: the live area is a window onto the transcript — the
+unflushed tail with `turn.text` at its live edge. Finalized rows flush
+into the scrollback above the viewport exactly once
+(`scroll.rs` + `ui::segments_into`) and are never redrawn by ratatui.
 
 ## Tool rounds (the agent loop)
 

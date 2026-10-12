@@ -11,6 +11,7 @@ mod editor;
 mod kitty;
 mod markdown;
 mod picker;
+mod scroll;
 mod theme;
 mod ui;
 mod wrap;
@@ -72,14 +73,19 @@ pub fn run(
     telemetry: bool,
 ) -> std::io::Result<()> {
     // Inline mode: NO alternate screen. The terminal keeps its normal
-    // buffer and scrollback — we manage only the bottom 12 rows (an
-    // 8-row live streaming area that shrinks while a menu is open
-    // above the 3-row input, plus the status row), and
-    // transcript lines are printed *above* the viewport, owned by the
-    // terminal from then on. Native scrolling, search, and copy come
-    // for free; pi's "regular mode" works the same way.
+    // buffer and scrollback; the viewport is the whole screen (the
+    // inline height is frozen at construction, so it is sized once
+    // here — a mid-run resize keeps the startup height, clamped).
+    // The scrollback is the flushed prefix of the transcript (AD-0016)
+    // and the viewport shows its live tail down to the input — pi's
+    // "regular mode" works the same way. Native scrolling, search, and
+    // copy come for free.
+    let rows = ratatui::crossterm::terminal::size()
+        .map(|(_, h)| h)
+        .unwrap_or(24)
+        .max(1);
     let options = TerminalOptions {
-        viewport: Viewport::Inline(12),
+        viewport: Viewport::Inline(rows),
     };
     // try_init_with_options: enables raw mode, skips the alternate
     // screen, and installs a panic hook that restores the terminal.
@@ -105,8 +111,6 @@ pub fn run(
         std::io::stdout(),
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )?;
-    terminal.insert_before(1, ui::welcome_into)?;
-
     let mut app = App::new(provider, status, catalog, config, init, telemetry);
     let result = event_loop(&mut terminal, &mut app);
 
@@ -155,36 +159,25 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io
         // finished turns are finalized into `app.messages`.
         app.pump();
 
-        // Anything appended to the transcript but not yet printed goes
-        // into the scrollback above the viewport; once printed, the
-        // terminal owns the rows and we never redraw history. Display
-        // blocks are derived from the message stream (a call pairs with
-        // its result); a trailing unpaired call stays in the live area
-        // as the pending execution until its result lands.
-        while app.printed < app.messages.len() {
-            let (blocks, pending) = ui::derive_blocks(&app.messages[app.printed..]);
-            if blocks.is_empty() {
-                break; // only the pending execution — wait for its result
-            }
-            // Re-read the width per batch: a resize mid-burst must not
-            // measure rows against the old width.
-            let width = terminal.size()?.width;
-            // Detect once per batch: env vars do not change mid-burst,
-            // and the answer is passed down, not read in the renderer
-            // (which would make ui tests depend on the real terminal).
-            let caps = kitty::detect();
-            for block in &blocks {
-                // Spacing is each block's own padding (one blank row above
-                // and below, tinted for filled blocks — see `block_rows`),
-                // so no cross-block separator bookkeeping exists here.
-                let segments = ui::block_segments(block, width, caps);
-                let height = ui::segments_height(&segments).max(1);
-                terminal.insert_before(height, |buf| ui::segments_into(segments, buf))?;
-            }
-            app.printed = app.messages.len() - usize::from(pending.is_some());
+        // The flushed-prefix window (AD-0016): fold any new messages
+        // into the cached transcript, then push the rows the live
+        // window cannot show into the scrollback above the viewport —
+        // exactly once, in order, images included. One chunk per
+        // frame; the seam between scrollback and window stays
+        // invisible because both are projections of the same block
+        // stream.
+        let size = terminal.size()?;
+        let (width, height) = (size.width, size.height);
+        app.scroll.sync(&app.messages, width, kitty::detect());
+        let stream_h =
+            ui::stream_window_height(height, ui::input_height(app, width), app.menu_height());
+        let live_follows = app.turn.is_some() || ui::pending_tool(&app.messages).is_some();
+        if let Some((rows, segments)) = app.scroll.take_flush(stream_h as usize, live_follows) {
+            terminal.insert_before(rows, |buf| ui::segments_into(segments, buf))?;
         }
 
-        // Redraw the managed region (live streaming area + input).
+        // Redraw the live region: the transcript window + streaming
+        // tail above the input.
         terminal.draw(|frame| ui::draw(frame, app))?;
     }
 
