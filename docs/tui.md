@@ -120,7 +120,10 @@ long input:  [stream 2] [input 8] [status 1]
   terminal cursor parks right after the typed text; while busy, the top rule
   carries the right-aligned activity label in yellow.
 - Transcript is NOT drawn here — finalized messages go to scrollback via
-  `message_into`; the live area shows the in-flight `turn.text` dim.
+- Transcript is NOT drawn here — finalized messages go to scrollback via
+  `message_into`; the live area shows the in-flight `turn.text` dim. Tool
+  activity lands in the same scrollback: `tool name(args)` in yellow, and
+  `result` dim — red when the call was refused or failed (`is_error`).
 - Other pieces: `draw_picker`, `draw_completion`, `draw_status`,
   `welcome_into`.
 

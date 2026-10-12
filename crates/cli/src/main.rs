@@ -12,6 +12,7 @@ use clap::Parser;
 
 use hi_core::{
     MockProvider, ModelsConfig, OpenAiCompatProvider, Provider, Settings, ThinkingLevel,
+    ToolRegistry,
 };
 use hi_tui::{Catalog, Status, run};
 
@@ -55,6 +56,7 @@ fn main() -> ExitCode {
             // The mock ignores system prompts — nothing to resolve.
             None,
             None,
+            Arc::new(ToolRegistry::new()),
         );
     }
 
@@ -125,7 +127,15 @@ fn main() -> ExitCode {
         provider: selected.provider,
         model: selected.model,
     };
-    launch(provider, status, catalog, config, system_prompt, thinking)
+    launch(
+        provider,
+        status,
+        catalog,
+        config,
+        system_prompt,
+        thinking,
+        Arc::new(ToolRegistry::new()),
+    )
 }
 
 /// Hand the session to the interactive interface.
@@ -136,8 +146,17 @@ fn launch(
     config: ModelsConfig,
     system_prompt: Option<String>,
     thinking: Option<ThinkingLevel>,
+    tools: Arc<ToolRegistry>,
 ) -> ExitCode {
-    match run(provider, status, catalog, config, system_prompt, thinking) {
+    match run(
+        provider,
+        status,
+        catalog,
+        config,
+        system_prompt,
+        thinking,
+        tools,
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => fail(&err.to_string()),
     }

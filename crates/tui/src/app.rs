@@ -5,8 +5,8 @@ use std::time::Instant;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use hi_core::{
-    Event, Message, ModelsConfig, OpenAiCompatProvider, Provider, Settings, ThinkingLevel,
-    spawn_turn,
+    DEFAULT_MAX_TOOL_ROUNDS, Event, Message, ModelsConfig, OpenAiCompatProvider, Provider,
+    Settings, ThinkingLevel, ToolRegistry, spawn_agent_turn,
 };
 
 use crate::catalog::Catalog;
@@ -27,6 +27,9 @@ pub struct App {
     /// The backend producing assistant turns. A trait object (`dyn`),
     /// so swapping mock → real LLM later is a one-line change here.
     pub provider: Arc<dyn Provider>,
+    /// Tools the model may call this session. Empty until built-ins
+    /// land; the agent loop already runs whatever is registered here.
+    pub tools: Arc<ToolRegistry>,
     /// Status-bar facts: which provider and model this session uses.
     /// Passed in from the CLI — the trait object can't name itself.
     pub status: Status,
@@ -102,6 +105,7 @@ impl App {
         config: ModelsConfig,
         system_prompt: Option<String>,
         thinking: Option<ThinkingLevel>,
+        tools: Arc<ToolRegistry>,
     ) -> Self {
         Self {
             quit: false,
@@ -114,6 +118,7 @@ impl App {
             config,
             system_prompt,
             thinking,
+            tools,
             picker: None,
             completion: None,
             tick: 0,
@@ -228,7 +233,16 @@ impl App {
     /// Spawn the provider thread for a fresh turn. It starts running
     /// immediately; events queue up in the channel until we pump.
     fn start_turn(&mut self) {
-        let rx = spawn_turn(Arc::clone(&self.provider), &self.messages);
+        // The agent loop, not a bare provider round: with an empty
+        // registry it behaves exactly like a single `spawn_turn`, but it
+        // already knows how to execute tools and feed results back.
+        let rx = spawn_agent_turn(
+            Arc::clone(&self.provider),
+            Arc::clone(&self.tools),
+            None, // gate: permission UX arrives with the extension host
+            &self.messages,
+            DEFAULT_MAX_TOOL_ROUNDS,
+        );
         self.turn = Some(Turn {
             text: String::new(),
             error: None,
@@ -437,16 +451,34 @@ impl App {
             return;
         };
         let mut finished = false;
+        // Messages produced by tool events queue here and land in the
+        // transcript after the loop — `self.messages` can't be touched
+        // while `turn` holds a borrow of `self`.
+        let mut transcript: Vec<Message> = Vec::new();
         while let Ok(event) = turn.rx.try_recv() {
             match event {
                 Event::TurnStart => {} // nothing to do yet — tokens follow
                 Event::Token(token) => turn.text.push_str(&token),
+                Event::ToolCall(call) => {
+                    // Narration before a call is its own assistant
+                    // message: flush the accumulated tokens so the
+                    // transcript keeps text and request separate.
+                    if !turn.text.is_empty() {
+                        let text = std::mem::take(&mut turn.text);
+                        transcript.push(Message::Assistant(text));
+                    }
+                    transcript.push(Message::ToolCall(call));
+                }
+                Event::ToolResult(result) => transcript.push(Message::ToolResult(result)),
                 Event::Error(message) => turn.error = Some(message),
                 Event::TurnEnd => {
                     finished = true;
                     break;
                 }
             }
+        }
+        for message in transcript {
+            self.messages.push(message);
         }
         if finished {
             // `Option::take` removes the turn and leaves `None` behind.
@@ -489,6 +521,7 @@ mod tests {
             ModelsConfig::default(),
             None,
             None,
+            Arc::new(ToolRegistry::new()),
         )
     }
 

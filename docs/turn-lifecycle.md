@@ -1,8 +1,10 @@
 # Turn lifecycle — end-to-end data flow
 
 Files this doc describes: `crates/tui/src/app.rs` (`handle_key`, `pump`,
+Files this doc describes: `crates/tui/src/app.rs` (`handle_key`, `pump`,
 `start_turn`, `activity_label`, `Turn`), `crates/core/src/provider.rs`
-(`spawn_turn`), `crates/core/src/openai.rs` (`respond`, `stream`),
+(`spawn_turn`), `crates/core/src/tool.rs`, `crates/core/src/agent.rs`
+(`spawn_agent_turn`), `crates/core/src/openai.rs` (`respond`, `stream`),
 `crates/tui/src/lib.rs` (`event_loop`). Type contracts live in
 [core.md](core.md); this doc is about the flow.
 
@@ -12,32 +14,58 @@ Files this doc describes: `crates/tui/src/app.rs` (`handle_key`, `pump`,
 user presses Enter (no completion menu open)
   └─ App::handle_key → App::run_command (not a slash command)
        └─ messages.push(Message::User(input)); start_turn()
-            └─ spawn_turn(provider, &messages)          [core]
-                 └─ OS thread: provider.respond(history, tx)
-                      ├─ send(TurnStart)
-                      ├─ POST {baseUrl}/chat/completions {stream:true}
-                      ├─ per SSE frame: send(Token(chunk))
-                      └─ send(TurnEnd)                  (or Error + TurnEnd)
+            └─ spawn_agent_turn(provider, tools, gate, &messages)     [core]
+                 └─ OS thread: rounds until the model settles
+                      round: spawn_turn(provider, working)
+                        ├─ send(TurnStart)              (swallowed by the loop)
+                        ├─ POST {baseUrl}/chat/completions {stream:true, tools?}
+                        ├─ per SSE frame: send(Token(chunk)) | accumulate tool_call
+                        ├─ stream end: send(ToolCall(…)) per accumulated call
+                        └─ send(TurnEnd)                (swallowed unless final)
+                      calls present: gate → execute → send(ToolResult(…)); next round
+                      no calls (or failed round): loop emits the turn's TurnEnd
 
 per frame (event_loop polls keys with 50ms timeout):
   └─ App::pump()
        ├─ tick += 1                      (drives the spinner)
        └─ while try_recv():
-            ├─ TurnStart  → no-op (tokens follow)
-            ├─ Token(t)   → turn.text.push_str(t)     (rendered live)
-            ├─ Error(m)   → turn.error = Some(m)
-            └─ TurnEnd    → finalize (below)
+            ├─ TurnStart     → no-op (tokens follow)
+            ├─ Token(t)      → turn.text.push_str(t)     (rendered live)
+            ├─ ToolCall(c)   → flush pending text as Assistant, push ToolCall
+            ├─ ToolResult(r) → push ToolResult
+            ├─ Error(m)      → turn.error = Some(m)
+            └─ TurnEnd       → finalize (below)
 
 finalize:
   ├─ turn taken out of App.turn (turn = None)
   ├─ if !turn.text.is_empty() → messages.push(Assistant(text))
   ├─ if turn.error            → messages.push(Error(msg))   (after the partial)
   └─ if queued                → push it as User + start_turn() immediately
-```
 
 Rendering: the live area shows `turn.text` while in flight; finalized
 messages are printed **above** the viewport into native scrollback
 (`ui::message_into`) and are never redrawn by ratatui.
+
+## Tool rounds (the agent loop)
+
+`spawn_agent_turn` (`crates/core/src/agent.rs`) wraps `spawn_turn`:
+
+- One user turn = one `TurnStart` … one `TurnEnd` on the consumer side, no
+  matter how many provider rounds happened. Per-round `TurnStart`/`TurnEnd`
+  framing is swallowed; the loop emits the final `TurnEnd` itself (settled
+  round, failed round, or round cap).
+- A round that ends with tool calls is followed by interception
+  (`ToolGate`: allow / deny(reason) / mutate), JSON-object validation,
+  sequential execution in proposal order, and exactly one `ToolResult` per
+  call. Refusals, unknown tools, and tool errors are error *results*
+  (`is_error`), never `Event::Error` — the model sees why and can adapt.
+  The loop's internal history grows with the assistant text (if any), the
+  calls, and the results before the next round.
+- `Event::Error` still means the turn itself failed (wire error, or round
+  cap: `"tool loop did not settle within N rounds"`), always immediately
+  before `TurnEnd` — the single finalization path is unchanged.
+- Cancellation is unchanged: dropping the `Receiver` fails the loop's next
+  send and everything unwinds.
 
 ## Cancellation (Esc)
 
@@ -78,9 +106,13 @@ path: partial `Token`s stand, then one `Event::Error` (message built by
 ## Invariants recap (all tested somewhere)
 
 1. `TurnStart` first, exactly one `TurnEnd` last, always.
+
 2. `Token`s concatenate to the exact reply; partial output survives errors
    and cancellation.
 3. `Message::Error` never reaches the wire (`wire_messages` filters it).
 4. At most one turn in flight; `queued` holds at most one merged message.
 5. Dropping `Turn` is the only cancellation mechanism; providers must honor
    failed sends as "stop".
+6. Every `ToolCall` event is answered by exactly one `ToolResult` with the
+   same `call_id`; a user turn may span rounds but keeps exactly one
+   `TurnStart` and one `TurnEnd` (the loop swallows round framing).

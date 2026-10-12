@@ -3,6 +3,7 @@
 //! Provider traits, tool traits, and the agent event loop belong here.
 //! The one rule for this crate: it never touches the terminal. That
 //! keeps the harness usable headless (tests, CLI, daemons) later.
+pub mod agent;
 pub mod config;
 pub mod event;
 pub mod message;
@@ -13,10 +14,12 @@ pub mod selection;
 pub mod settings;
 pub mod system_prompt;
 pub mod thinking;
+pub mod tool;
 
 #[cfg(test)]
 pub(crate) mod test_support;
 
+pub use agent::{DEFAULT_MAX_TOOL_ROUNDS, spawn_agent_turn};
 pub use config::{ModelConfig, ModelsConfig, ProviderConfig};
 pub use event::Event;
 pub use message::Message;
@@ -26,5 +29,6 @@ pub use provider::{Provider, spawn_turn};
 pub use settings::Settings;
 pub use thinking::ThinkingLevel;
 
+pub use tool::{Tool, ToolAnnotations, ToolCall, ToolDecision, ToolGate, ToolRegistry, ToolResult};
 /// The program's name, shared by every crate in the workspace.
 pub const NAME: &str = "hi";

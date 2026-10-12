@@ -1,20 +1,23 @@
 # `hi-core` reference
 
 Files this doc describes: everything under `crates/core/src/` — `lib.rs`,
-`message.rs`, `event.rs`, `provider.rs`, `openai.rs`, `mock.rs`, `config.rs`,
+`message.rs`, `event.rs`, `tool.rs`, `agent.rs`, `provider.rs`, `openai.rs`, `mock.rs`, `config.rs`,
 `selection.rs`, `settings.rs`, `thinking.rs`, `system_prompt.rs`,
 `test_support.rs`.
 
 Public surface re-exported from `crates/core/src/lib.rs`: `NAME`, `Event`,
 `Message`, `MockProvider`, `ModelsConfig`, `ModelConfig`, `ProviderConfig`,
-`OpenAiCompatProvider`, `Provider`, `spawn_turn`, `Settings`, `ThinkingLevel`.
+`OpenAiCompatProvider`, `Provider`, `spawn_turn`, `Settings`, `ThinkingLevel`, `Tool`,
+`ToolAnnotations`, `ToolCall`, `ToolResult`, `ToolDecision`, `ToolGate`, `ToolRegistry`,
+`DEFAULT_MAX_TOOL_ROUNDS`, `spawn_agent_turn`.
 Note: `selection` is a public module (`hi_core::selection::{resolve, list_for,
 Selected}`), not re-exported at the root.
 
 ## message.rs — the transcript entry type
 
-`enum Message { User(String), Assistant(String), Error(String), System(String) }`
-plus `Message::text(&self) -> &str`.
+`enum Message { User(String), Assistant(String), ToolCall(ToolCall), ToolResult(ToolResult), Error(String), System(String) }`
+plus `Message::text(&self) -> Option<&str>` (the four prose variants; the tool variants carry
+structured payloads instead).
 
 **Invariants**
 - Enum, not struct-with-role: payload lives in the variant, `match` is
@@ -22,13 +25,13 @@ plus `Message::text(&self) -> &str`.
 - `Error` messages are displayed in the transcript but **never sent to the
   model** — enforced by `wire_messages` filtering and by the test
   `error_messages_are_never_sent_to_the_model` in `openai.rs`.
-- There are no tool variants yet; that is the designated growth axis.
+- `ToolCall`/`ToolResult` always appear as a pair in agent-loop-built history — one result per
+  call, results directly after their calls (see [turn-lifecycle.md](turn-lifecycle.md)).
 
 ## event.rs — the turn event stream
 
-`enum Event { TurnStart, Token(String), TurnEnd, Error(String) }`, `Clone +
-PartialEq`. This is how a turn in progress talks to the UI.
-
+`enum Event { TurnStart, Token(String), ToolCall(ToolCall), ToolResult(ToolResult), TurnEnd, Error(String) }`,
+`Clone + PartialEq`. This is how a turn in progress talks to the UI.
 **Invariants (the single finalization path)**
 - A turn always emits `TurnStart` first and exactly one `TurnEnd` last.
 - `Token`s arrive in order; concatenating them reproduces the full reply.
@@ -36,6 +39,33 @@ PartialEq`. This is how a turn in progress talks to the UI.
   `TurnEnd`. Producers: see `OpenAiCompatProvider::respond`. Consumers
   therefore need exactly one finalize code path (`App::pump` is the reference
   consumer).
+
+## tool.rs — what a model may call, and who decides what runs
+
+- `Tool` trait: `name / description / parameters (JSON Schema value) / annotations / execute`.
+  Deliberately synchronous — tools run on the agent-loop worker thread, off the UI; long tools
+  do their own threading. `ToolAnnotations { read_only, destructive }` are hints for gates/UIs;
+  hi never enforces them.
+- `ToolRegistry`: `BTreeMap<String, Arc<dyn Tool>>` — stable sorted wire order, duplicate-name
+  rejection, `definitions()` for the request's `tools` array. Empty registry ⇒ no `tools` field
+  on the wire at all.
+- `ToolCall { id, name, arguments }` / `ToolResult { call_id, name, content, is_error }`:
+  `arguments` stays **raw JSON text** (the model's exact words; the tool owns its schema).
+  `is_error` is harness-side only — the OpenAI wire has no such flag.
+- The interception seam: `ToolGate = dyn Fn(&ToolCall) -> ToolDecision`, with
+  `ToolDecision::{ Allow, Deny(reason), Mutate(arguments) }`. A plain function type on purpose —
+  the extension host (#6) backs this seam from outside core, so core stays runtime-free.
+
+## agent.rs — the multi-turn loop
+
+`spawn_agent_turn(provider, registry, gate, history, max_tool_rounds) -> Receiver<Event>`
+(default rounds: `DEFAULT_MAX_TOOL_ROUNDS`). Runs rounds of `spawn_turn` + tool execution until
+the model settles; the consumer sees ONE `TurnStart`/ONE `TurnEnd` per user message — the loop
+swallows per-round framing and emits the final `TurnEnd` itself. Every proposed call yields
+exactly one result (deny / unknown tool / bad JSON are error *results*, never `Event::Error`).
+Cap exceeded ⇒ `Error("tool loop did not settle within N rounds")` + `TurnEnd`. The loop never
+mutates the caller's history — consumers mirror the event stream (details in
+[turn-lifecycle.md](turn-lifecycle.md)).
 
 ## provider.rs — the abstraction + the turn thread
 

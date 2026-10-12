@@ -1,14 +1,20 @@
 //! Test-only helpers shared across hi-core's test modules.
 //!
 //! `FakeApi` is a minimal HTTP server on an ephemeral port: it reads
-//! each request fully, records it, answers with one canned response,
-//! and closes. One accept loop per server, one connection per request
-//! (every response says `Connection: close`).
+//! each request fully, records it, answers with one canned response
+//! (or one per request, via `start_sequence`), and closes. One accept
+//! loop per server, one connection per request (every response says
+//! `Connection: close`).
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
+
+use crate::event::Event;
+use crate::message::Message;
+use crate::provider::Provider;
 
 pub struct FakeApi {
     pub base_url: String,
@@ -17,16 +23,30 @@ pub struct FakeApi {
 
 impl FakeApi {
     pub fn start(response: impl Into<String>) -> Self {
+        Self::start_sequence(vec![response.into()])
+    }
+
+    /// Like `start`, but each request consumes the next response; the
+    /// last one repeats for any further requests. The agent loop's
+    /// multi-round conversations need round-specific answers.
+    pub fn start_sequence(responses: Vec<String>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&requests);
-        let response = response.into();
+        let responses = Arc::new(Mutex::new(responses));
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let mut stream = stream.unwrap();
                 let request = read_request(&mut stream);
                 recorded.lock().unwrap().push(request);
+                let response = {
+                    let mut responses = responses.lock().unwrap();
+                    match responses.len() {
+                        0 | 1 => responses.first().cloned().unwrap_or_default(),
+                        _ => responses.remove(0),
+                    }
+                };
                 let _ = stream.write_all(response.as_bytes());
                 let _ = stream.flush();
             }
@@ -44,6 +64,11 @@ impl FakeApi {
             .first()
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// The `index`-th recorded request (0-based), if it happened.
+    pub fn request(&self, index: usize) -> Option<String> {
+        self.requests.lock().unwrap().get(index).cloned()
     }
 }
 
@@ -99,4 +124,66 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+/// A provider that replays scripted rounds — the test double for the
+/// agent loop. Each call to `respond` consumes the next scripted round
+/// and records the history it was handed, so tests can assert on the
+/// replayed conversation the same way `FakeApi` records raw requests.
+pub(crate) struct ScriptedProvider {
+    rounds: Vec<Vec<Event>>,
+    /// What each round received, in order. Index `i` is round `i`'s
+    /// input history.
+    pub received: std::sync::Mutex<Vec<Vec<Message>>>,
+}
+
+impl ScriptedProvider {
+    pub fn new(rounds: Vec<Vec<Event>>) -> Self {
+        Self {
+            rounds,
+            received: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl Provider for ScriptedProvider {
+    fn respond(&self, history: &[Message], tx: Sender<Event>) {
+        let index = {
+            let mut received = self.received.lock().unwrap();
+            received.push(history.to_vec());
+            received.len() - 1
+        };
+        let Some(round) = self.rounds.get(index) else {
+            // A test that consumes more rounds than scripted is a bug
+            // in the test — fail loudly instead of hanging.
+            let _ = tx.send(Event::Error("scripted provider exhausted".into()));
+            let _ = tx.send(Event::TurnEnd);
+            return;
+        };
+        for event in round {
+            if tx.send(event.clone()).is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// A tool that answers with its own name plus whatever arguments it
+/// received — makes mutated vs. original arguments visible in loop and
+/// wire tests.
+pub(crate) struct EchoTool;
+
+impl crate::tool::Tool for EchoTool {
+    fn name(&self) -> &str {
+        "echo"
+    }
+    fn description(&self) -> &str {
+        "echoes its arguments"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    fn execute(&self, arguments: &str) -> Result<String, String> {
+        Ok(format!("echo{arguments}"))
+    }
 }
