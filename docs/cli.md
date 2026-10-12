@@ -1,9 +1,9 @@
 # `hi` CLI reference
 
 Files this doc describes: `crates/cli/` (`Cargo.toml`, `src/main.rs`). The
-binary is thin on purpose: it decides *what* runs (mock, TUI, model listing)
-while `hi-core` resolves and `hi-tui` draws. A future headless mode branches
-here without touching either library.
+binary is thin on purpose: it decides *what* runs — mock, TUI, headless
+`--print`, model listing — while `hi-core` resolves and `hi-tui` draws.
+The headless branch links no `hi-tui` code paths at runtime.
 
 ## Flags (clap derive, `--help` text mirrors the README)
 
@@ -15,35 +15,44 @@ here without touching either library.
 | `--list-models` | Print the selected provider's models and exit |
 | `-h, --help` / `-V, --version` | clap-standard |
 | `--continue` | Resume the most recent session for this directory (conflicts with `--mock`) |
+| `--print`, `-p` | Run one prompt headlessly, print the final reply, exit |
+| `PROMPT` | Positional prompt; requires `--print` (piped stdin is prepended) |
+| `--no-session` | Run without loading or saving a session file (conflicts with `--continue`) |
 
 `after_help` points at `~/.config/hi/models.json` and the README schema.
 
 ## Startup flow (`main`)
 
 ```
---mock
-  └─ launch(MockProvider::default(), Status{mock,mock}, Catalog::default(),
+--mock (interactive)
   └─ launch(MockProvider::default(), Status{mock,mock}, Catalog::default(),
             ModelsConfig::default(), SessionInit{no session, empty transcript})
      (the mock ignores prompts — nothing to resolve)
 
-otherwise:
+--print (headless, `print_mode`):
+  1. prompt = combine_prompt(piped stdin, positional PROMPT)
+       — neither present → "hi: no prompt…", exit FAILURE
+  2. --mock → MockProvider; otherwise resolve_target() as below
+  3. open_session() per flags → headless::run(...)
+  4. Ok(text) → println! + SUCCESS; Err → "hi: …" on stderr,
+     stdout empty, FAILURE
+
+otherwise (interactive):
   1. ModelsConfig::load()                  — failure → "hi: …create one
                                               (see the README) or run with --mock", exit FAILURE
   2. --list-models → selection::list_for   — prints "name:" + one id per line
-  3. Catalog built once at startup:        — for each provider,
-       entry.list_model_ids().ok() non-empty; failures/empty silently skipped
-       (same 10s discovery timeout as --list-models)
-  4. Settings::load() → default_model      — selection::resolve(config,
+  3. resolve_target: Settings::load() →    — selection::resolve(config,
        cli.provider, cli.model, settings.default_model)
-  5. OpenAiCompatProvider::from_config(...)
+  4. OpenAiCompatProvider::from_config(...)
        .with_system_prompt(system_prompt::resolve())
        .with_thinking_level(settings.thinking)
-  6. launch(...) → hi_tui::run(...)
- 6. Session file: `--continue` → session::latest + Session::resume
-       (warn + fresh start when nothing to resume); otherwise Session::start
-       — failures degrade to a stderr warning either way
- 7. launch(...) → hi_tui::run(...)
+  5. Catalog built once at startup:        — for each provider,
+       entry.list_model_ids().ok() non-empty; failures/empty silently skipped
+       (same 10s discovery timeout as --list-models)
+  6. open_session: --no-session → None;    --continue → session::latest +
+       Session::resume; otherwise Session::start — failures degrade to a
+       stderr warning either way
+  7. launch(...) → hi_tui::run(...)
 ```
 
 Note the asymmetry worth preserving: `system_prompt` is resolved from the
@@ -54,14 +63,38 @@ re-attached to the provider whenever the `/model` picker rebuilds it.
 
 - `ExitCode::SUCCESS` — normal end of session / successful listing
 - `ExitCode::FAILURE` — config load failure, selection failure, listing
-  failure, TUI error; message printed as `hi: <message>` on stderr
-  (`fail()`), so scripts can tell success from failure
+  failure, TUI error, headless turn failure, missing `--print` prompt;
+  message printed as `hi: <message>` on stderr (`fail()`), so scripts
+  can tell success from failure
 
+## Headless mode (`--print`)
+
+`--print` runs exactly one turn and exits — the scripting interface:
+
+```sh
+hi -p "Summarize this repository"       # positional prompt
+git diff | hi -p "Review this change"   # piped stdin is prepended
+hi -p --continue "and the follow-up?"   # resume this project's session
+hi -p --mock "ping"                     # no network, no config
+hi -p --no-session "throwaway"          # don't touch the session dir
+```
+
+- The prompt is piped stdin (first) and/or the positional `PROMPT`
+  (both may be present, joined by a newline); neither → exit FAILURE.
+- Output contract (pi's): the final assistant text and nothing else on
+  stdout; every diagnostic on stderr. A failed turn prints `hi: …` to
+  stderr and exits FAILURE with stdout left empty, so
+  `out=$(hi -p …)` never captures a half-answer.
+- Sessions behave exactly as in the TUI: written by default,
+  `--continue` keeps appending to the same file, `--no-session` skips.
+- The machinery is `hi_core::headless` — the same agent loop, tools,
+  and session files as the TUI (see [core.md](core.md)).
 ## Where new startup behavior goes
 
 - New flags → the `Cli` struct (clap derive handles help).
 - New selection rules → `hi_core::selection` (never in `main`).
 - New providers → construct here behind a config/flag branch; implement the
   `Provider` trait in `hi-core` (see [core.md](core.md)).
-- A headless `--print` mode → a second branch in `main`, linking no `hi-tui`
-  code paths at runtime (the dependency stays but is inert).
+- Headless runs → `hi_core::headless` owns the drain; `print_mode` here
+  only assembles the prompt, session, and exit code. JSONL event output
+  (`--mode json`) is issue #18; auto-print on non-TTY streams is #19.

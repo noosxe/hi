@@ -19,9 +19,10 @@ later.
 - `/model` picker in the TUI: arrows to move, Enter switches this session, Ctrl-S saves the default
 - Slash commands with completion: type `/` to see the menu, Tab completes, Enter runs
 - Session transcripts persist per project (JSONL, append-only); `hi --continue` resumes the newest one
-- 94 tests, including a fake HTTP server that records requests
+- Headless one-shot mode: `hi -p "prompt"` (or `git diff | hi -p "review"`) prints the final reply and exits
+- 99 tests, including a fake HTTP server that records requests
 
-Not yet: headless one-shot mode, an effort indicator, extensions.
+Not yet: JSONL event output for scripts, subagents, background tasks, extensions.
 The selection and settings layers are built so each slots in without
 rework.
 
@@ -30,7 +31,7 @@ rework.
 ```sh
 nix develop          # Rust toolchain + cargo (or any Rust 1.85+, edition 2024)
 cargo run            # builds the `hi` binary; `hi --mock` needs no config
-cargo test           # 94 tests; no network needed
+cargo test           # 99 tests; no network needed
 ```
 
 
