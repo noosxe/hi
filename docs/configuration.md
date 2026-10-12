@@ -54,6 +54,9 @@ configs never break older builds (tested for both files).
 - The model listing policy is hybrid: non-empty `models` wins (only config
   entries can carry `contextWindow`/`reasoning`); empty/absent means live
   discovery via `GET {baseUrl}/models` (`data[].id` or `models[].slug`).
+- `"vision": true` on a model entry (default false) declares image
+  input. Symmetric with `reasoning`; gates `read`'s image attachments
+  (see the settings section).
 - `thinkingLevelMap` is the only place provider-specific reasoning options
   exist: when the session's thinking level has an entry here, that JSON
   object merges top-level into the chat request body. No provider knowledge
@@ -76,6 +79,8 @@ A credential *source*, not necessarily a literal:
   "defaultModel": "zai/glm-5.3",   // "provider/model"; stale/malformed falls through to autopick
   "thinking": "high",              // off | minimal | low | medium | high; optional
   "defaultTools": "coding"         // none | read-only | coding | all; --tools overrides per run
+  "telemetry": false               // opt-in provider attribution; see below
+  "images": true                   // image upload master switch; default on
 }
 ```
 
@@ -98,6 +103,14 @@ A credential *source*, not necessarily a literal:
   endpoint family that displays them in its dashboard. The
   `HI_TELEMETRY` env var overrides the file when set (`1`/`true`/`yes`
   on, anything else off; pi's `PI_TELEMETRY` pattern).
+- **Image upload** (`images`, default on) is the master switch for
+  sending pictures to the model — `read`'s attachments today, pasted
+  attachments when they land (#41). Off means metadata notes only,
+  regardless of the model.
+- **Image policy resolves once at startup**: `images` AND the starting
+  model's `vision` flag (below) — both must be on for `read` to attach.
+  A `/model` switch doesn't re-evaluate; the safe direction (a note
+  instead of an image), never a burned request.
 
 ## System prompt files
 

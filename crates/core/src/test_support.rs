@@ -173,6 +173,34 @@ impl Provider for ScriptedProvider {
 /// wire tests.
 pub(crate) struct EchoTool;
 
+/// Always attaches one tiny PNG — the image-path stand-in for agent
+/// and wire tests. `data` is base64 of `img`.
+pub(crate) struct ImageTool;
+
+impl crate::tool::Tool for ImageTool {
+    fn name(&self) -> &str {
+        "imgtool"
+    }
+    fn description(&self) -> &str {
+        "attaches a tiny png"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    fn execute(&self, _arguments: &str) -> Result<String, String> {
+        Ok("Read image file [image/png] (attached)".into())
+    }
+    fn execute_with_images(&self, _arguments: &str) -> Result<crate::tool::ToolOutput, String> {
+        Ok(crate::tool::ToolOutput {
+            content: "Read image file [image/png] (attached)".into(),
+            images: vec![crate::tool::ImageBlock {
+                data: "aW1n".into(),
+                mime_type: "image/png".into(),
+            }],
+        })
+    }
+}
+
 impl crate::tool::Tool for EchoTool {
     fn name(&self) -> &str {
         "echo"

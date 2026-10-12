@@ -120,6 +120,7 @@ mod tests {
             name: "echo".into(),
             content: format!("echo{arguments}"),
             is_error: false,
+            images: Vec::new(),
         }
     }
 

@@ -273,7 +273,17 @@ fn resolve_target(
     };
     let cwd = std::env::current_dir()
         .map_err(|err| format!("cannot determine current directory: {err}"))?;
-    let tools = Arc::new(bundle.registry(&cwd));
+    // Image policy, resolved once: the master switch (settings, on by
+    // default) AND the starting model's declared vision. Unknown
+    // models have no vision entry, so they read as non-vision — the
+    // safe direction (a metadata note instead of a burned request).
+    let images = settings.images_enabled()
+        && entry
+            .models
+            .iter()
+            .find(|m| m.id == selected.model)
+            .is_some_and(|m| m.vision);
+    let tools = Arc::new(bundle.registry(&cwd, images));
     let system_prompt = {
         let mut prompt = hi_core::system_prompt::resolve();
         let notes = tools.prompt_notes();

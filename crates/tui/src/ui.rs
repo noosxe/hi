@@ -468,8 +468,31 @@ fn tool_rows(exec: &ToolExec, width: usize) -> Vec<Line<'static>> {
                 THEME.fg(Fg::Muted),
             )));
         }
+        inner.extend(image_notes(result));
     }
     padded_block(inner, width, fill)
+}
+
+/// One dim line per attached image: mime type plus decoded size. The
+/// terminal renders no pixels — the kitty graphics protocol is issue
+/// #42 — so this note is the honest placeholder.
+fn image_notes(result: &ToolResult) -> Vec<Line<'static>> {
+    result
+        .images
+        .iter()
+        .map(|image| {
+            let bytes = image.data.len() as u64 * 3 / 4;
+            let size = if bytes < 1024 * 1024 {
+                format!("{:.1} KB", bytes as f64 / 1024.0)
+            } else {
+                format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
+            };
+            Line::from(Span::styled(
+                format!("· image: {}, {size}", image.mime_type),
+                THEME.fg(Fg::Muted),
+            ))
+        })
+        .collect()
 }
 
 /// Collapse call arguments to pi's `key=value key2=value2` preview,
@@ -555,12 +578,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn image_attachments_render_as_dim_notes() {
+        // No pixels in a terminal (#42) — the note is the placeholder.
+        let mut result = tool_result("Read image file [image/png] (attached)", false);
+        result.images.push(hi_core::tool::ImageBlock {
+            data: "aW1n".into(),
+            mime_type: "image/png".into(),
+        });
+        let exec = ToolExec {
+            call: None,
+            result: Some(result),
+        };
+        let rows = tool_rows(&exec, 60);
+        let text: Vec<String> = rows
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.to_string())
+                    .collect()
+            })
+            .collect();
+        // `aW1n` decodes to 3 bytes — the size renders honest and small.
+        assert!(
+            text.iter()
+                .any(|t| t.contains("· image: image/png, ") && t.contains(" KB")),
+            "rows: {text:?}"
+        );
+    }
+
     fn tool_result(content: &str, is_error: bool) -> ToolResult {
         ToolResult {
             call_id: "c1".into(),
             name: "bash".into(),
             content: content.into(),
             is_error,
+            images: Vec::new(),
         }
     }
 

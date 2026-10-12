@@ -35,6 +35,18 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// One image a tool hands back for the model to see — base64 bytes
+/// plus their mime type, exactly what the OpenAI-compat wire needs to
+/// build a `data:` URL. camelCase like every session field.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageBlock {
+    /// The image bytes, base64-encoded.
+    pub data: String,
+    /// IANA mime type, e.g. `image/png`.
+    pub mime_type: String,
+}
+
 /// The harness's answer to one [`ToolCall`] — success or failure, both
 /// are *content* for the model.
 ///
@@ -55,6 +67,36 @@ pub struct ToolResult {
     /// the tool reported failure. The OpenAI wire has no such flag, so
     /// it is dropped in serialization — the *content* carries the news.
     pub is_error: bool,
+    /// Images the tool produced for the model (v1: `read` on an image
+    /// file). Facts, not policy — whether attaching them was allowed
+    /// was decided before the tool ran. Empty for every other tool,
+    /// and skipped on disk so pre-image session files load unchanged
+    /// (unknown fields are ignored going the other way).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageBlock>,
+}
+
+/// What a tool produced: a text note plus optional image attachments.
+/// The plain [`Tool::execute`] returns text only;
+/// [`Tool::execute_with_images`] is the image-aware path and defaults
+/// to wrapping `execute` with no images, so image support stays
+/// opt-in per tool (v1: `read` only).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ToolOutput {
+    /// Text for the model — always present; describes what was
+    /// attached, or why nothing was.
+    pub content: String,
+    /// Images to attach after the tool message on the wire.
+    pub images: Vec<ImageBlock>,
+}
+
+impl From<String> for ToolOutput {
+    fn from(content: String) -> Self {
+        Self {
+            content,
+            images: Vec::new(),
+        }
+    }
 }
 
 /// Hints about what a tool does to the world.
@@ -104,6 +146,12 @@ pub trait Tool: Send + Sync {
     /// owns its schema). `Ok` is a success result, `Err` an error
     /// result; both go back to the model as content.
     fn execute(&self, arguments: &str) -> Result<String, String>;
+    /// Run the tool with image attachments allowed. The default wraps
+    /// [`Self::execute`] with no images; the agent loop calls only
+    /// this, so a tool gains image support by overriding it.
+    fn execute_with_images(&self, arguments: &str) -> Result<ToolOutput, String> {
+        self.execute(arguments).map(ToolOutput::from)
+    }
 }
 
 /// Name-keyed collection of available tools.
