@@ -27,7 +27,10 @@ pub use status::Status;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ratatui::crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event};
+use ratatui::crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
 use ratatui::crossterm::execute;
 use ratatui::{TerminalOptions, Viewport};
 
@@ -87,6 +90,20 @@ pub fn run(
     // but not this mode — a panic mid-paste may leak a stray `200~`
     // into the shell, the standard crossterm trade-off.
     execute!(std::io::stdout(), EnableBracketedPaste)?;
+    // Kitty keyboard protocol, minimal enhancement (AD-0013): under
+    // `disambiguate`, every key event that does not generate text —
+    // Cmd+V among them — arrives as CSI u with its modifier bits, so
+    // supporting terminals (Ghostty, kitty, WezTerm) can let Cmd+V
+    // through to the app. Non-supporting terminals ignore the
+    // sequence and nothing changes. Enter/Tab/Backspace keep their
+    // legacy bytes (the spec's explicit exception), plain typing is
+    // untouched; Ctrl+C stops hitting SIGINT and arrives as an event
+    // instead, which raw mode had already made harmless. Pair-push
+    // with the pop below; the panic-hook caveat above applies.
+    execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )?;
     terminal.insert_before(1, ui::welcome_into)?;
 
     let mut app = App::new(provider, status, catalog, config, init, telemetry);
@@ -108,6 +125,7 @@ pub fn run(
     // Mirror the enable: leave the terminal the way we found it.
     // Best-effort — teardown must not mask the run's result.
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+    let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
     // restore() reports its own errors to stderr and returns () —
     // the try_restore() variant is the Result-returning one.
     ratatui::restore();

@@ -17,6 +17,16 @@ use crate::status::{Status, location_label};
 /// event handling *mutates* this struct (`handle_key`, `pump`),
 /// rendering only *reads* it. No widget, no terminal handle, no
 /// drawing inside here.
+/// The paste chord: Ctrl+V always; Cmd+V too where the kitty
+/// keyboard protocol reports it (`KeyModifiers::SUPER` — the terminal
+/// only forwards the chord in that mode, so this can never collide
+/// with a terminal that still owns Cmd+V for its own text paste).
+fn paste_key(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('v')
+        && (key.modifiers.contains(KeyModifiers::CONTROL)
+            || key.modifiers.contains(KeyModifiers::SUPER))
+}
+
 pub struct App {
     /// Set when the user wants to exit; the event loop watches this.
     pub quit: bool,
@@ -217,8 +227,11 @@ impl App {
         }
         // Ctrl-V pastes from the system clipboard off-thread. The
         // outcome stages a *reference* — text, or a temp-file path —
-        // into the input; nothing sends until Enter (AD-0011).
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('v') {
+        // into the input; nothing sends until Enter (AD-0011). Cmd+V
+        // aliases it where the kitty keyboard protocol lets the event
+        // through (AD-0013); elsewhere the terminal pastes text only
+        // and this arm never fires for Cmd.
+        if paste_key(&key) {
             self.request_paste();
             return;
         }
@@ -873,6 +886,23 @@ mod tests {
             app.messages[0],
             Message::User("/tmp/hi-clipboard-1.png".into())
         );
+    }
+
+    #[test]
+    fn paste_chord_covers_ctrl_v_and_cmd_v_only() {
+        use KeyModifiers as M;
+        assert!(paste_key(&KeyEvent::new(KeyCode::Char('v'), M::CONTROL)));
+        assert!(paste_key(&KeyEvent::new(KeyCode::Char('v'), M::SUPER)));
+        // A terminal that reports both (protocol edge) still pastes.
+        assert!(paste_key(&KeyEvent::new(
+            KeyCode::Char('v'),
+            M::CONTROL | M::SUPER
+        )));
+        // Everything else is typing.
+        assert!(!paste_key(&KeyEvent::new(KeyCode::Char('v'), M::NONE)));
+        assert!(!paste_key(&KeyEvent::new(KeyCode::Char('v'), M::SHIFT)));
+        assert!(!paste_key(&KeyEvent::new(KeyCode::Char('c'), M::SUPER)));
+        assert!(!paste_key(&KeyEvent::new(KeyCode::Char('x'), M::CONTROL)));
     }
 
     #[test]

@@ -195,7 +195,12 @@ the transcript or the session. Text paste rides bracketed paste
 (`Event::Paste` → verbatim insert, newlines normalized) — without the
 mode enabled, pasted newlines would submit mid-paste. Command
 dispatch disambiguation: a leading `/` is a command only while the
-rest contains no `/`, so staged paths send as messages.
+rest contains no `/`, so staged paths send as messages. The chord is
+Ctrl+V everywhere, and **Cmd+V aliases it** where the kitty keyboard
+protocol reports the chord (AD-0013: `DISAMBIGUATE_ESCAPE_CODES` is
+pushed at startup — supporting terminals forward Cmd+V as
+`Char('v') + SUPER`; the rest ignore the enable and keep their own
+text paste).
 
 ## markdown.rs — markdown → themed terminal rows
 
