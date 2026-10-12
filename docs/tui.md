@@ -80,7 +80,7 @@ Behaviors (each pinned by a test in `app.rs`):
 
 ```rust
 pub struct Command { pub name: &'static str, pub description: &'static str }
-pub const COMMANDS: &[Command]  // sorted: exit, model, quit, resume
+pub const COMMANDS: &[Command]  // sorted: exit, model, quit, resume, tools
 pub fn matching(typed: &str) -> Vec<&'static Command>   // case-insensitive prefix
 pub fn find_exact(name: &str) -> Option<&'static Command>
 ```
@@ -88,7 +88,13 @@ pub fn find_exact(name: &str) -> Option<&'static Command>
 Adding a command = one entry in `COMMANDS` **plus** one arm in
 `App::run_command`. The completion menu inherits both order and descriptions.
 `/exit` and `/quit` (alias) stop the session; `/model` opens the picker;
-`/resume` opens the session picker (see [picker.rs](#pickerrs--session-selection)).
+`/resume` opens the session picker (see [picker.rs](#pickerrs--session-selection));
+`/tools` pushes a dim local-only notice listing the registry — name,
+annotation badges (`read-only` / `destructive`, only when the tool claims
+them), and the first sentence of each description (`ToolRegistry::info()`
+in core snapshots the facts; the TUI formats). Like unknown-command
+reports, the notice persists in the session file but never reaches the
+provider.
 
 ## catalog.rs — what the `/model` picker offers
 

@@ -27,6 +27,10 @@ pub const COMMANDS: &[Command] = &[
         name: "resume",
         description: "switch to another session from this directory",
     },
+    Command {
+        name: "tools",
+        description: "list the registered tools",
+    },
 ];
 
 /// Commands whose name starts with `typed` (lowercased, without the

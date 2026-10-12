@@ -154,6 +154,20 @@ pub trait Tool: Send + Sync {
     }
 }
 
+/// The UI-facing snapshot of one registered tool: its key, its
+/// one-paragraph model-facing description, and its annotations. A
+/// plain owned value so UIs can hold the set without keeping the
+/// registry (and every `Arc<dyn Tool>`) alive.
+#[derive(Debug, Clone)]
+pub struct ToolInfo {
+    /// Registry key and the name the model calls.
+    pub name: String,
+    /// The tool's `description()`, verbatim.
+    pub description: String,
+    /// Behavior hints, as registered.
+    pub annotations: ToolAnnotations,
+}
+
 /// Name-keyed collection of available tools.
 ///
 /// A `BTreeMap` so the wire order of `tools` is stable and sorted —
@@ -199,6 +213,18 @@ impl ToolRegistry {
     /// How many tools are registered.
     pub fn len(&self) -> usize {
         self.tools.len()
+    }
+
+    /// The UI-facing snapshot of the registry, in wire (sorted) order.
+    pub fn info(&self) -> Vec<ToolInfo> {
+        self.tools
+            .values()
+            .map(|tool| ToolInfo {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                annotations: tool.annotations(),
+            })
+            .collect()
     }
 
     /// The wire form: `{"type":"function","function":{…}}` entries in
@@ -257,3 +283,61 @@ pub enum ToolDecision {
 /// back it with whatever runtime it likes (AD-0001's "swappable host"
 /// rule); nothing in this signature mentions Lua.
 pub type ToolGate = dyn Fn(&ToolCall) -> ToolDecision + Send + Sync;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    struct PlainTool;
+    impl Tool for PlainTool {
+        fn name(&self) -> &str {
+            "zeta"
+        }
+        fn description(&self) -> &str {
+            "plain tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn execute(&self, _arguments: &str) -> Result<String, String> {
+            Ok(String::new())
+        }
+    }
+
+    struct AnnotatedTool;
+    impl Tool for AnnotatedTool {
+        fn name(&self) -> &str {
+            "alpha"
+        }
+        fn description(&self) -> &str {
+            "annotated tool"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn annotations(&self) -> ToolAnnotations {
+            ToolAnnotations {
+                read_only: true,
+                destructive: false,
+            }
+        }
+        fn execute(&self, _arguments: &str) -> Result<String, String> {
+            Ok(String::new())
+        }
+    }
+
+    #[test]
+    fn info_snapshots_the_registry_in_wire_order() {
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(PlainTool)).unwrap();
+        registry.register(Arc::new(AnnotatedTool)).unwrap();
+        let info = registry.info();
+        assert_eq!(info.len(), 2);
+        assert_eq!(info[0].name, "alpha"); // BTreeMap order, not insertion order
+        assert!(info[0].annotations.read_only);
+        assert_eq!(info[1].name, "zeta");
+        assert!(!info[1].annotations.read_only);
+        assert_eq!(info[1].description, "plain tool");
+    }
+}
