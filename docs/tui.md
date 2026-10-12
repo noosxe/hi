@@ -123,8 +123,12 @@ long input:  [stream 2] [input 8] [status 1]
 - Transcript is NOT drawn here — finalized messages go to scrollback via
   `block_rows` + `rows_into` (pi-style role blocks, no text labels; see the
   markdown.rs and theme.rs sections below). The insert height is the
-  wrapped row count — never one row per message — and one blank row
-  separates consecutive blocks (pi's `outputPad`). While a tool runs, the
+  wrapped row count — never one row per message. Spacing is each block's
+  own padding, not a separator: every block carries one blank row above
+  and below its content (pi's `paddingY`), so two blank rows separate any
+  adjacent content rows — tinted with the fill for blocks that have a
+  background (user, tool), plain for blocks that don't (assistant, system,
+  error). While a tool runs, the
   streaming area shows its **live pending block** (pending fill); when the
   result lands, one merged block (bold tool name + collapsed args over the
   output preview) prints to scrollback with a success- or error-tinted
