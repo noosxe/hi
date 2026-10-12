@@ -492,3 +492,42 @@ duplicate semantics `read` already owns.
 not expose), attachment chips, pasted-image preview in the composer,
 WSL PowerShell fallback.
 
+---
+
+## AD-0012 — image policy is fail-open, pi's direction; the gate follows model switches (2026-10-15)
+
+**Status:** implemented. Supersedes the *default direction* of #29
+(the "safe direction"): unknown models now read as vision-capable.
+
+**The field report that overturned it:** models loaded dynamically via
+`GET /models` — no `models.json` entry — matched the policy's `find`
+nothing, so *every* discovered model was blind while pi attached
+fine for the same endpoint. The pessimistic default assumed a curated
+model list; with discovery, the list is the API's, and the safe
+direction became "always off".
+
+**pi's rule, verified in source** (`core/tools/read.js`):
+`if (!model || model.input.includes("image"))` — no metadata at all
+**attaches**; only metadata explicitly excluding image input withholds.
+pi's own custom-model definitions default `input` to
+`["text", "image"]`. hi now mirrors that at every layer:
+
+- `vision` defaults **true** on configured entries; `vision: false`
+  is the explicit opt-out (the note path survives for exactly that).
+- No entry (API discovery) → attach.
+- `settings.images` master switch still wins over everything.
+
+**The gate follows the model.** The policy used to be baked into the
+registry at startup; `/model` switches re-buildded the provider around
+the same registry and silently kept the startup model's policy. The
+policy now lives in a shared `ImageGate` (an `Arc<AtomicBool>` inside
+`read`); `rebuild_provider` — the one construction path for `/model`
+and `/resume` — re-resolves it per switch: master switch, then
+configured `vision: false`, then fail-open. The registry never
+rebuilds; the wire never loses its tools.
+
+**Honest cost:** a text-only model that reads an image now sends an
+`image_url` part it may reject — pi's exact exposure. The failure is
+loud, one turn, and self-explanatory; versus the old cost, which was
+silently blinding models that could see.
+

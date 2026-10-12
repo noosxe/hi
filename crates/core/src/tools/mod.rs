@@ -45,6 +45,25 @@ pub fn parse_bundle(raw: &str) -> Result<ToolBundle, String> {
     ToolBundle::parse(raw)
 }
 
+/// The shared image-attachment policy flag. `read` reads it at
+/// execution time; front ends flip it when the model changes
+/// (AD-0012) instead of rebuilding the registry the switch must not
+/// drop from the wire.
+#[derive(Debug, Clone)]
+pub struct ImageGate(Arc<std::sync::atomic::AtomicBool>);
+
+impl ImageGate {
+    pub fn new(allowed: bool) -> Self {
+        Self(Arc::new(std::sync::atomic::AtomicBool::new(allowed)))
+    }
+    pub fn set(&self, allowed: bool) {
+        self.0.store(allowed, std::sync::atomic::Ordering::Relaxed);
+    }
+    pub fn allowed(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// Which built-in tools a session runs with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolBundle {
@@ -83,27 +102,29 @@ impl ToolBundle {
     }
 
     /// Build the registry for this bundle, rooted at `cwd`.
-    /// Build the registry. `allow_images` is the startup image
-    /// policy (`settings.images` AND the starting model's `vision`
-    /// flag) — handed to `read`, the one built-in that produces
-    /// attachments.
-    pub fn registry(self, cwd: &Path, allow_images: bool) -> ToolRegistry {
+    /// Build the registry. `images` is the shared attachment gate
+    /// (the resolved startup policy — `settings.images` AND the
+    /// starting model's `vision` rule) — handed to `read`, the one
+    /// built-in that produces attachments. The gate is shared so the
+    /// front end can re-resolve it when the model changes (AD-0012):
+    /// the registry outlives model switches, the policy follows.
+    pub fn registry(self, cwd: &Path, images: ImageGate) -> ToolRegistry {
         let tools: Vec<Arc<dyn Tool>> = match self {
             Self::None => Vec::new(),
             Self::ReadOnly => vec![
-                Arc::new(ReadTool::new(cwd).allow_images(allow_images)),
+                Arc::new(ReadTool::new(cwd).images_gate(images.clone())),
                 Arc::new(GrepTool::new(cwd)),
                 Arc::new(FindTool::new(cwd)),
                 Arc::new(LsTool::new(cwd)),
             ],
             Self::Coding => vec![
-                Arc::new(ReadTool::new(cwd).allow_images(allow_images)),
+                Arc::new(ReadTool::new(cwd).images_gate(images.clone())),
                 Arc::new(BashTool::new(cwd)),
                 Arc::new(EditTool::new(cwd)),
                 Arc::new(WriteTool::new(cwd)),
             ],
             Self::All => vec![
-                Arc::new(ReadTool::new(cwd).allow_images(allow_images)),
+                Arc::new(ReadTool::new(cwd).images_gate(images.clone())),
                 Arc::new(BashTool::new(cwd)),
                 Arc::new(EditTool::new(cwd)),
                 Arc::new(WriteTool::new(cwd)),
@@ -195,13 +216,17 @@ mod tests {
     fn bundles_build_the_expected_registries() {
         let cwd = std::env::temp_dir();
         let names = |bundle: ToolBundle| -> Vec<String> {
-            let reg = bundle.registry(&cwd, false);
+            let reg = bundle.registry(&cwd, ImageGate::new(false));
             reg.definitions()
                 .iter()
                 .filter_map(|d| d["function"]["name"].as_str().map(str::to_string))
                 .collect()
         };
-        assert!(ToolBundle::None.registry(&cwd, false).is_empty());
+        assert!(
+            ToolBundle::None
+                .registry(&cwd, ImageGate::new(false))
+                .is_empty()
+        );
         assert_eq!(
             names(ToolBundle::ReadOnly),
             vec!["find", "grep", "ls", "read"]
@@ -210,13 +235,18 @@ mod tests {
             names(ToolBundle::Coding),
             vec!["bash", "edit", "read", "write"]
         );
-        assert_eq!(ToolBundle::All.registry(&cwd, false).len(), 7);
+        assert_eq!(
+            ToolBundle::All.registry(&cwd, ImageGate::new(false)).len(),
+            7
+        );
     }
 
     #[test]
     fn registry_prompt_notes_collect_bullets_in_wire_order() {
         let cwd = std::env::temp_dir();
-        let notes = ToolBundle::Coding.registry(&cwd, false).prompt_notes();
+        let notes = ToolBundle::Coding
+            .registry(&cwd, ImageGate::new(false))
+            .prompt_notes();
         assert!(notes.starts_with("- "), "got: {notes}");
         assert!(notes.contains("Use read to examine files"));
         assert!(notes.contains("complete rewrites"));

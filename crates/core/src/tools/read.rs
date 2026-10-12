@@ -4,6 +4,7 @@
 //! [`super::image_resize`] ladder fits them to a universal budget
 //! (AD-0009).
 
+use super::ImageGate;
 use super::truncate;
 use super::{args_object, is_probably_binary, opt_str, opt_usize, resolve_path};
 use crate::tool::{ImageBlock, Tool, ToolAnnotations, ToolOutput};
@@ -13,23 +14,33 @@ use std::path::PathBuf;
 pub struct ReadTool {
     cwd: PathBuf,
     /// Whether produced images may be attached for the model — the
-    /// combined `settings.images && model.vision` policy, resolved
-    /// once at startup. Policy lives here, at the only place images
-    /// enter the system; the wire layer stays unconditional.
-    images: bool,
+    /// combined `settings.images && model.vision` policy, resolved at
+    /// startup and re-resolved on model switches (AD-0012): the gate
+    /// is shared with the front end, which flips it when the model
+    /// changes. Policy lives here, at the only place images enter the
+    /// system; the wire layer stays unconditional.
+    images: ImageGate,
 }
 
 impl ReadTool {
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
         Self {
             cwd: cwd.into(),
-            images: false,
+            images: ImageGate::new(false),
         }
     }
 
-    /// Turn image attachments on (the `resolve_target` policy wiring).
+    /// Turn image attachments on (tests, and bundles that pass a bare
+    /// flag). The registry path uses [`Self::images_gate`] so the
+    /// front end holds the same gate.
     pub fn allow_images(mut self, yes: bool) -> Self {
-        self.images = yes;
+        self.images = ImageGate::new(yes);
+        self
+    }
+
+    /// Install the shared gate (the `registry` policy wiring).
+    pub fn images_gate(mut self, gate: ImageGate) -> Self {
+        self.images = gate;
         self
     }
 
@@ -43,7 +54,7 @@ impl ReadTool {
             "Read image file [{mime}, {}]",
             human_size(bytes.len() as u64)
         );
-        if !self.images {
+        if !self.images.allowed() {
             return ToolOutput {
                 content: format!("{note} (not attached: image input is disabled for this model)"),
                 images: Vec::new(),
@@ -332,6 +343,28 @@ mod tests {
         base64::engine::general_purpose::STANDARD
             .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
             .unwrap()
+    }
+
+    #[test]
+    fn a_shared_gate_flip_takes_effect_mid_session() {
+        // AD-0012: the front end flips the gate when the model
+        // changes; the registry (and this tool) never rebuild.
+        let root = temp_root("gate");
+        std::fs::write(root.join("shot.png"), tiny_png_bytes()).unwrap();
+        let gate = ImageGate::new(true);
+        let tool = ReadTool::new(&root).images_gate(gate.clone());
+        let out = tool.execute_with_images(r#"{"path":"shot.png"}"#).unwrap();
+        assert_eq!(out.images.len(), 1);
+        gate.set(false);
+        let out = tool.execute_with_images(r#"{"path":"shot.png"}"#).unwrap();
+        assert!(out.images.is_empty());
+        assert!(
+            out.content
+                .contains("not attached: image input is disabled")
+        );
+        gate.set(true);
+        let out = tool.execute_with_images(r#"{"path":"shot.png"}"#).unwrap();
+        assert_eq!(out.images.len(), 1);
     }
 
     #[test]

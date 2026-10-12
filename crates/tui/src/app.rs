@@ -85,6 +85,13 @@ pub struct App {
     /// paste is not an event worth persisting — never enters the
     /// transcript or the session.
     pub note: Option<String>,
+    /// The shared image-attachment gate (the same Arc inside `read`).
+    /// Flipped on model switches — the registry outlives them, the
+    /// policy follows (AD-0012).
+    pub images: hi_core::ImageGate,
+    /// The `settings.images` master switch, resolved at startup; the
+    /// switch-time re-resolution must honor it.
+    images_setting: bool,
     /// Session-storage root override — tests point this at a temp
     /// directory; production uses the real data dir (`None`).
     pub session_root: Option<std::path::PathBuf>,
@@ -149,6 +156,8 @@ impl App {
             tools,
             messages,
             session,
+            images,
+            images_setting,
         } = init;
         Self {
             quit: false,
@@ -172,6 +181,8 @@ impl App {
             session_picker: None,
             clipboard_rx: None,
             note: None,
+            images,
+            images_setting,
             printed: 0,
             session_root: None,
         }
@@ -383,6 +394,12 @@ impl App {
         let Some(entry) = self.config.providers.get(provider) else {
             return;
         };
+        // The image policy follows the model (AD-0012): same gate the
+        // registry's `read` holds, re-resolved per switch — configured
+        // models honor `vision: false`, discovered ones read as
+        // vision-capable, and the settings master switch still wins.
+        self.images
+            .set(entry.images_allowed(model, self.images_setting));
         self.provider = Arc::new(
             OpenAiCompatProvider::from_config(entry, model.to_string())
                 .with_system_prompt(self.system_prompt.clone())
@@ -818,6 +835,8 @@ mod tests {
                 tools: Arc::new(ToolRegistry::new()),
                 messages: Vec::new(),
                 session: None,
+                images: hi_core::ImageGate::new(false),
+                images_setting: true,
             },
             false,
         )
@@ -885,6 +904,42 @@ mod tests {
         app.handle_key(key(KeyCode::Char('h')));
         assert_eq!(app.note, None);
         assert_eq!(app.input, "h");
+    }
+
+    #[test]
+    fn model_switches_re_resolve_the_image_policy() {
+        let mut app = app();
+        let mut providers = std::collections::BTreeMap::new();
+        providers.insert(
+            "p".to_string(),
+            hi_core::ProviderConfig {
+                base_url: "http://x/v1".into(),
+                api_key: None,
+                models: vec![
+                    hi_core::ModelConfig {
+                        id: "blind".into(),
+                        vision: false,
+                        ..Default::default()
+                    },
+                    hi_core::ModelConfig {
+                        id: "seer".into(),
+                        ..Default::default()
+                    },
+                ],
+            },
+        );
+        app.config = ModelsConfig { providers };
+        app.images = hi_core::ImageGate::new(true);
+        // Discovered model (no entry): vision-capable — pi's `!model` arm.
+        app.apply_model_choice("p/unknown".into());
+        assert!(app.images.allowed());
+        // A configured opt-out is honored, on the same Arc `read` holds.
+        app.apply_model_choice("p/blind".into());
+        assert!(!app.images.allowed());
+        // The master switch pins the policy off regardless of model.
+        app.images_setting = false;
+        app.apply_model_choice("p/seer".into());
+        assert!(!app.images.allowed());
     }
 
     #[test]

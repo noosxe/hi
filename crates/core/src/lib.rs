@@ -35,6 +35,6 @@ pub use settings::Settings;
 pub use thinking::ThinkingLevel;
 
 pub use tool::{Tool, ToolAnnotations, ToolCall, ToolDecision, ToolGate, ToolRegistry, ToolResult};
-pub use tools::ToolBundle;
+pub use tools::{ImageGate, ToolBundle};
 /// The program's name, shared by every crate in the workspace.
 pub const NAME: &str = "hi";
