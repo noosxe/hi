@@ -49,6 +49,12 @@ pub struct ModelConfig {
     /// Whether the model supports reasoning output.
     #[serde(default)]
     pub reasoning: bool,
+    /// Whether the model accepts image input. Gates `read`'s image
+    /// attachments: without it the tool returns a metadata note and
+    /// the request is never burned (issue #29 ruling: "no point in
+    /// sending if not supported").
+    #[serde(default)]
+    pub vision: bool,
     /// Context window size, in tokens. Informational for now — the
     /// harness will use it for truncation policy later.
     #[serde(rename = "contextWindow", default)]
@@ -194,6 +200,17 @@ mod tests {
         assert!(provider.models[0].reasoning);
         assert_eq!(provider.models[0].context_window, Some(8192));
         assert_eq!(provider.models[0].max_tokens, Some(2048));
+    }
+
+    #[test]
+    fn vision_defaults_to_false_and_parses() {
+        let raw = r#"{"providers":{"p":{"baseUrl":"http://x/v1","models":[
+            {"id":"plain"},{"id":"seer","vision":true}]}}}"#;
+        let cfg: ModelsConfig = serde_json::from_str(raw).unwrap();
+        let models = &cfg.providers.get("p").unwrap().models;
+        // Unnamed capability = no image input: the safe direction.
+        assert!(!models[0].vision);
+        assert!(models[1].vision);
     }
 
     #[test]

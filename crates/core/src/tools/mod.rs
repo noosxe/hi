@@ -82,23 +82,27 @@ impl ToolBundle {
     }
 
     /// Build the registry for this bundle, rooted at `cwd`.
-    pub fn registry(self, cwd: &Path) -> ToolRegistry {
+    /// Build the registry. `allow_images` is the startup image
+    /// policy (`settings.images` AND the starting model's `vision`
+    /// flag) — handed to `read`, the one built-in that produces
+    /// attachments.
+    pub fn registry(self, cwd: &Path, allow_images: bool) -> ToolRegistry {
         let tools: Vec<Arc<dyn Tool>> = match self {
             Self::None => Vec::new(),
             Self::ReadOnly => vec![
-                Arc::new(ReadTool::new(cwd)),
+                Arc::new(ReadTool::new(cwd).allow_images(allow_images)),
                 Arc::new(GrepTool::new(cwd)),
                 Arc::new(FindTool::new(cwd)),
                 Arc::new(LsTool::new(cwd)),
             ],
             Self::Coding => vec![
-                Arc::new(ReadTool::new(cwd)),
+                Arc::new(ReadTool::new(cwd).allow_images(allow_images)),
                 Arc::new(BashTool::new(cwd)),
                 Arc::new(EditTool::new(cwd)),
                 Arc::new(WriteTool::new(cwd)),
             ],
             Self::All => vec![
-                Arc::new(ReadTool::new(cwd)),
+                Arc::new(ReadTool::new(cwd).allow_images(allow_images)),
                 Arc::new(BashTool::new(cwd)),
                 Arc::new(EditTool::new(cwd)),
                 Arc::new(WriteTool::new(cwd)),
@@ -190,13 +194,13 @@ mod tests {
     fn bundles_build_the_expected_registries() {
         let cwd = std::env::temp_dir();
         let names = |bundle: ToolBundle| -> Vec<String> {
-            let reg = bundle.registry(&cwd);
+            let reg = bundle.registry(&cwd, false);
             reg.definitions()
                 .iter()
                 .filter_map(|d| d["function"]["name"].as_str().map(str::to_string))
                 .collect()
         };
-        assert!(ToolBundle::None.registry(&cwd).is_empty());
+        assert!(ToolBundle::None.registry(&cwd, false).is_empty());
         assert_eq!(
             names(ToolBundle::ReadOnly),
             vec!["find", "grep", "ls", "read"]
@@ -205,13 +209,13 @@ mod tests {
             names(ToolBundle::Coding),
             vec!["bash", "edit", "read", "write"]
         );
-        assert_eq!(ToolBundle::All.registry(&cwd).len(), 7);
+        assert_eq!(ToolBundle::All.registry(&cwd, false).len(), 7);
     }
 
     #[test]
     fn registry_prompt_notes_collect_bullets_in_wire_order() {
         let cwd = std::env::temp_dir();
-        let notes = ToolBundle::Coding.registry(&cwd).prompt_notes();
+        let notes = ToolBundle::Coding.registry(&cwd, false).prompt_notes();
         assert!(notes.starts_with("- "), "got: {notes}");
         assert!(notes.contains("Use read to examine files"));
         assert!(notes.contains("complete rewrites"));

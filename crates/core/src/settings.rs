@@ -35,6 +35,11 @@ pub struct Settings {
     /// regardless; hi sends no analytics ever.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry: Option<bool>,
+    /// Master switch for sending images to the model (v1: `read`
+    /// attachments; the paste path (#41) will honor it too). Defaults
+    /// to on; the starting model's `vision` flag gates it further.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<bool>,
 }
 
 /// The effective telemetry choice: `HI_TELEMETRY` wins when set (pi's
@@ -80,6 +85,13 @@ impl Settings {
             self.telemetry,
             std::env::var("HI_TELEMETRY").ok().as_deref(),
         )
+    }
+
+    /// Image upload is on unless switched off — the reverse of
+    /// telemetry's opt-in, because attaching a file is a per-turn
+    /// convenience, not an identification fact.
+    pub fn images_enabled(&self) -> bool {
+        self.images.unwrap_or(true)
     }
 
     /// Persist to `<config-dir>/settings.json` (pretty-printed, so
@@ -136,6 +148,7 @@ mod tests {
             thinking: None,
             default_tools: Some("read-only".into()),
             telemetry: None,
+            images: None,
         };
         original.save_to(&path).unwrap();
         let loaded = Settings::load_from(&path).unwrap();
@@ -165,6 +178,15 @@ mod tests {
 
         let settings: Settings = serde_json::from_str("{\"telemetry\": true}").unwrap();
         assert_eq!(settings.telemetry, Some(true));
+    }
+
+    #[test]
+    fn images_default_on_and_parse_camel_case() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(settings.images_enabled());
+        assert_eq!(settings.images, None);
+        let settings: Settings = serde_json::from_str("{\"images\": false}").unwrap();
+        assert!(!settings.images_enabled());
     }
 
     #[test]

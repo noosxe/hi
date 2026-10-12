@@ -179,6 +179,7 @@ fn decide_and_execute(
         name: call.name.clone(),
         content,
         is_error: true,
+        images: Vec::new(),
     };
     let arguments = match gate {
         Some(gate) => match gate(call) {
@@ -203,12 +204,13 @@ fn decide_and_execute(
     let Some(tool) = registry.get(&call.name) else {
         return denied(format!("unknown tool: {}", call.name));
     };
-    match tool.execute(&arguments) {
-        Ok(content) => ToolResult {
+    match tool.execute_with_images(&arguments) {
+        Ok(output) => ToolResult {
             call_id: call.id.clone(),
             name: call.name.clone(),
-            content,
+            content: output.content,
             is_error: false,
+            images: output.images,
         },
         Err(err) => denied(err),
     }
@@ -218,7 +220,7 @@ fn decide_and_execute(
 mod tests {
     use super::*;
     use crate::test_support::{EchoTool, ScriptedProvider};
-    use crate::tool::Tool;
+    use crate::tool::{ImageBlock, Tool, ToolOutput};
 
     fn registry_with(tool: Arc<dyn Tool>) -> Arc<ToolRegistry> {
         let mut registry = ToolRegistry::new();
@@ -315,6 +317,7 @@ mod tests {
                     name: "echo".into(),
                     content: r#"echo{"msg":"hey"}"#.into(),
                     is_error: false,
+                    images: Vec::new(),
                 }),
                 Event::Token("All done.".into()),
                 Event::TurnEnd,
@@ -337,6 +340,7 @@ mod tests {
                     name: "echo".into(),
                     content: r#"echo{"msg":"hey"}"#.into(),
                     is_error: false,
+                    images: Vec::new(),
                 }),
             ]
         );
@@ -520,5 +524,66 @@ mod tests {
                 .any(|event| matches!(event, Event::Error(msg) if msg == "connection reset"))
         );
         assert_eq!(events.last(), Some(&Event::TurnEnd));
+    }
+    #[test]
+    fn image_tool_outputs_flow_into_results() {
+        // A tool overriding `execute_with_images` lands its images on
+        // the ToolResult — the loop's only job is to carry them.
+        struct ImageEcho;
+        impl Tool for ImageEcho {
+            fn name(&self) -> &str {
+                "imgecho"
+            }
+            fn description(&self) -> &str {
+                "attaches"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+            fn execute(&self, _arguments: &str) -> Result<String, String> {
+                unreachable!("the loop calls execute_with_images only")
+            }
+            fn execute_with_images(&self, _arguments: &str) -> Result<ToolOutput, String> {
+                Ok(ToolOutput {
+                    content: "Read image file [image/png] (attached)".into(),
+                    images: vec![ImageBlock {
+                        data: "aW1n".into(),
+                        mime_type: "image/png".into(),
+                    }],
+                })
+            }
+        }
+
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                Event::TurnStart,
+                Event::ToolCall(call("c1", "imgecho", "{}")),
+                Event::TurnEnd,
+            ],
+            vec![
+                Event::TurnStart,
+                Event::Token("seen".into()),
+                Event::TurnEnd,
+            ],
+        ]));
+        let events = collect(spawn_agent_turn(
+            provider.clone(),
+            registry_with(Arc::new(ImageEcho)),
+            None,
+            &[Message::User("look".into())],
+            DEFAULT_MAX_TOOL_ROUNDS,
+        ));
+        let results = tool_results(&events);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].images.len(), 1);
+        assert_eq!(results[0].images[0].mime_type, "image/png");
+        // The replayed history carries the images too — sessions keep
+        // the facts even though the wire re-derives the carrier.
+        let received = provider.received.lock().unwrap();
+        let replayed = &received[1];
+        let Message::ToolResult(result) = &replayed[2] else {
+            panic!("expected the tool result in the replay");
+        };
+        assert_eq!(result.images.len(), 1);
     }
 }

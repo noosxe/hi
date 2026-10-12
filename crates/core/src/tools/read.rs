@@ -1,17 +1,100 @@
 //! `read` — file contents, line-numbered, paged with `offset`/`limit`.
+//! Image files (png/jpeg/webp/gif, magic-byte sniffed) are attached
+//! for the model when the startup policy allows it.
 
 use super::truncate;
 use super::{args_object, is_probably_binary, opt_str, opt_usize, resolve_path};
-use crate::tool::{Tool, ToolAnnotations};
+use crate::tool::{ImageBlock, Tool, ToolAnnotations, ToolOutput};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::path::PathBuf;
+
+/// Above this, an image is noted but not attached — the wire ceiling
+/// is far higher, but models rasterize to a fixed input size anyway,
+/// so past ~5 MB the bytes are cost without detail (downscaling is
+/// issue #43).
+pub(crate) const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
 pub struct ReadTool {
     cwd: PathBuf,
+    /// Whether produced images may be attached for the model — the
+    /// combined `settings.images && model.vision` policy, resolved
+    /// once at startup. Policy lives here, at the only place images
+    /// enter the system; the wire layer stays unconditional.
+    images: bool,
 }
 
 impl ReadTool {
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
-        Self { cwd: cwd.into() }
+        Self {
+            cwd: cwd.into(),
+            images: false,
+        }
+    }
+
+    /// Turn image attachments on (the `resolve_target` policy wiring).
+    pub fn allow_images(mut self, yes: bool) -> Self {
+        self.images = yes;
+        self
+    }
+
+    /// Build the image result: a metadata note for the model, plus the
+    /// attachment when policy and size allow. The note always tells
+    /// the truth about what happened — attached, disabled, or too
+    /// large — so a non-vision model never wonders where its image
+    /// went.
+    fn read_image(&self, mime: &'static str, bytes: &[u8]) -> ToolOutput {
+        let note = format!(
+            "Read image file [{mime}, {}]",
+            human_size(bytes.len() as u64)
+        );
+        if !self.images {
+            return ToolOutput {
+                content: format!("{note} (not attached: image input is disabled for this model)"),
+                images: Vec::new(),
+            };
+        }
+        if bytes.len() > MAX_IMAGE_BYTES {
+            return ToolOutput {
+                content: format!(
+                    "{note} (not attached: {} exceeds the 5 MB attachment limit)",
+                    human_size(bytes.len() as u64)
+                ),
+                images: Vec::new(),
+            };
+        }
+        ToolOutput {
+            content: format!("{note} (attached)"),
+            images: vec![ImageBlock {
+                data: STANDARD.encode(bytes),
+                mime_type: mime.into(),
+            }],
+        }
+    }
+}
+
+/// Magic-byte sniffing, never extension guessing: a file named `.png`
+/// with text inside is text, and vice versa. Covers the four formats
+/// the OpenAI-compat `image_url` wire accepts.
+pub(crate) fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() > 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+fn human_size(bytes: u64) -> String {
+    let kb = bytes as f64 / 1024.0;
+    if kb < 1024.0 {
+        format!("{kb:.1} KB")
+    } else {
+        format!("{:.1} MB", kb / 1024.0)
     }
 }
 
@@ -24,7 +107,9 @@ impl Tool for ReadTool {
         "Read the contents of a text file. Output is line-numbered and clamped to 2000 \
          lines or 50KB, whichever hits first; page through larger files with offset \
          (1-indexed) and limit. Binary files are refused. When you need more of the \
-         file, call again with a later offset."
+         file, call again with a later offset. Image files (png, jpeg, webp, gif) \
+         are attached for you to look at when image input is enabled; otherwise \
+         only their metadata comes back."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -57,6 +142,23 @@ impl Tool for ReadTool {
 
     fn prompt_note(&self) -> Option<String> {
         Some("Use read to examine files instead of cat or sed.".into())
+    }
+    fn execute_with_images(&self, arguments: &str) -> Result<ToolOutput, String> {
+        let args = args_object(arguments)?;
+        let Some(raw) = opt_str(&args, "path")? else {
+            return Err("read needs a path".into());
+        };
+        let path = resolve_path(&self.cwd, &raw);
+        let bytes =
+            std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        // Sniff before the text path — an image is "probably binary"
+        // and the text path would refuse what we're about to attach.
+        if let Some(mime) = sniff_image_mime(&bytes) {
+            return Ok(self.read_image(mime, &bytes));
+        }
+        // Text (or unknown binary, which `execute` refuses with its
+        // own note): one text path, unchanged behavior.
+        self.execute(arguments).map(ToolOutput::from)
     }
 
     fn execute(&self, arguments: &str) -> Result<String, String> {
@@ -217,5 +319,75 @@ mod tests {
         let root = temp_root("missing");
         let err = tool(&root).execute(r#"{"path":"nope.txt"}"#).unwrap_err();
         assert!(err.contains("cannot read"), "got: {err}");
+    }
+    #[test]
+    fn images_are_attached_when_policy_allows() {
+        let root = temp_root("image");
+        let bytes: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4];
+        std::fs::write(root.join("shot.png"), bytes).unwrap();
+        let out = tool(&root)
+            .allow_images(true)
+            .execute_with_images(r#"{"path":"shot.png"}"#)
+            .unwrap();
+        assert_eq!(out.images.len(), 1);
+        assert_eq!(out.images[0].mime_type, "image/png");
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&out.images[0].data)
+            .unwrap();
+        assert_eq!(decoded, bytes);
+        assert!(out.content.contains("Read image file [image/png"));
+        assert!(out.content.contains("(attached)"));
+    }
+
+    #[test]
+    fn image_formats_are_sniffed_by_magic_bytes_not_extensions() {
+        assert_eq!(
+            sniff_image_mime(b"\xff\xd8\xff\xe0jpeg"),
+            Some("image/jpeg")
+        );
+        assert_eq!(sniff_image_mime(b"GIF89a...."), Some("image/gif"));
+        assert_eq!(sniff_image_mime(b"RIFF1234WEBPVP8 "), Some("image/webp"));
+        assert_eq!(sniff_image_mime(b"just text"), None);
+        // A .png name with text inside is text: content decides.
+        let root = temp_root("sniff");
+        std::fs::write(root.join("fake.png"), "hello\n").unwrap();
+        let out = tool(&root)
+            .allow_images(true)
+            .execute_with_images(r#"{"path":"fake.png"}"#)
+            .unwrap();
+        assert!(out.images.is_empty());
+        assert!(out.content.contains("1│hello"));
+    }
+
+    #[test]
+    fn oversized_images_are_noted_not_attached() {
+        let root = temp_root("big");
+        let bytes = vec![0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+            .into_iter()
+            .chain(std::iter::repeat_n(0u8, MAX_IMAGE_BYTES))
+            .collect::<Vec<_>>();
+        std::fs::write(root.join("big.png"), &bytes).unwrap();
+        let out = tool(&root)
+            .allow_images(true)
+            .execute_with_images(r#"{"path":"big.png"}"#)
+            .unwrap();
+        assert!(out.images.is_empty());
+        assert!(out.content.contains("exceeds the 5 MB attachment limit"));
+    }
+
+    #[test]
+    fn images_are_withheld_when_policy_disallows() {
+        let root = temp_root("withheld");
+        let png: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        std::fs::write(root.join("shot.png"), png).unwrap();
+        // `new` is the disabled default — the startup policy wiring is
+        // the only thing that turns this on.
+        let out = tool(&root)
+            .execute_with_images(r#"{"path":"shot.png"}"#)
+            .unwrap();
+        assert!(out.images.is_empty());
+        assert!(out.content.contains("not attached"));
+        assert!(out.content.contains("image input is disabled"));
     }
 }

@@ -484,7 +484,7 @@ struct ChatRequest<'a> {
 struct WireMessage<'a> {
     role: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<Cow<'a, str>>,
+    content: Option<WireContent<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<WireToolCall<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "tool_call_id")]
@@ -493,11 +493,36 @@ struct WireMessage<'a> {
     name: Option<&'a str>,
 }
 
+/// A message's `content` in either legal shape: a plain string (every
+/// text turn) or an array of typed parts (the only way to carry an
+/// image). `untagged` serializes the inner value directly, which is
+/// exactly the wire's "string or array" contract.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum WireContent<'a> {
+    Text(Cow<'a, str>),
+    Parts(Vec<WirePart<'a>>),
+}
+
+/// One content part. Tagged by `type`, snake-cased: `{"type":"text",
+/// "text":…}` and `{"type":"image_url","image_url":{"url":"data:…"}}`.
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WirePart<'a> {
+    Text { text: Cow<'a, str> },
+    ImageUrl { image_url: WireImageUrl<'a> },
+}
+
+#[derive(Serialize)]
+struct WireImageUrl<'a> {
+    url: Cow<'a, str>,
+}
+
 impl<'a> WireMessage<'a> {
     fn text(role: &'static str, content: &'a str) -> Self {
         Self {
             role,
-            content: Some(Cow::Borrowed(content)),
+            content: Some(WireContent::Text(Cow::Borrowed(content))),
             tool_calls: None,
             tool_call_id: None,
             name: None,
@@ -505,12 +530,44 @@ impl<'a> WireMessage<'a> {
     }
 
     fn tool_result(result: &'a ToolResult) -> Self {
+        // A result that is only images has no text to keep — pi's
+        // placeholder tells the model where to look (the next user
+        // message).
+        let text: Cow<'a, str> = if result.content.is_empty() && !result.images.is_empty() {
+            Cow::Borrowed("(see attached image)")
+        } else {
+            Cow::Borrowed(result.content.as_str())
+        };
         Self {
             role: "tool",
-            content: Some(Cow::Borrowed(&result.content)),
+            content: Some(WireContent::Text(text)),
             tool_calls: None,
             tool_call_id: Some(&result.call_id),
             name: Some(&result.name),
+        }
+    }
+
+    /// The synthetic user message that carries a tool result's images.
+    /// The OpenAI-compat `role: "tool"` message is text-only, so —
+    /// exactly as pi-ai does — the tool message keeps its note and the
+    /// images ride a follow-up user turn. Wire-only: history keeps the
+    /// images on the result, and every turn re-derives this shape.
+    fn image_carrier(result: &'a ToolResult) -> Self {
+        let mut parts = Vec::with_capacity(result.images.len() + 1);
+        parts.push(WirePart::Text {
+            text: Cow::Owned(format!("Attached image(s) from {}:", result.name)),
+        });
+        parts.extend(result.images.iter().map(|image| WirePart::ImageUrl {
+            image_url: WireImageUrl {
+                url: Cow::Owned(format!("data:{};base64,{}", image.mime_type, image.data)),
+            },
+        }));
+        Self {
+            role: "user",
+            content: Some(WireContent::Parts(parts)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
         }
     }
 }
@@ -551,7 +608,7 @@ impl<'a> AssistantGroup<'a> {
         let calls = std::mem::take(&mut self.calls);
         out.push(WireMessage {
             role: "assistant",
-            content: text,
+            content: text.map(WireContent::Text),
             tool_calls: if calls.is_empty() { None } else { Some(calls) },
             tool_call_id: None,
             name: None,
@@ -607,6 +664,9 @@ fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
                 // its results on the wire.
                 group.flush(&mut out);
                 out.push(WireMessage::tool_result(result));
+                if !result.images.is_empty() {
+                    out.push(WireMessage::image_carrier(result));
+                }
             }
         }
     }
@@ -1259,5 +1319,146 @@ mod tests {
             })
         );
         assert_eq!(second["messages"].as_array().unwrap().len(), first_len + 2);
+    }
+    // ---- images in read: the synthetic user carrier ----
+
+    fn image_result() -> Message {
+        Message::ToolResult(ToolResult {
+            call_id: "call_1".into(),
+            name: "imgtool".into(),
+            content: "Read image file [image/png] (attached)".into(),
+            is_error: false,
+            images: vec![crate::tool::ImageBlock {
+                data: "aW1n".into(),
+                mime_type: "image/png".into(),
+            }],
+        })
+    }
+
+    #[test]
+    fn tool_result_images_ride_a_synthetic_user_message() {
+        // The OpenAI-compat `role: "tool"` message is text-only, so the
+        // images must move to a follow-up user turn — pi-ai's exact
+        // transformation, asserted here on the real wire.
+        let api = FakeApi::start_sequence(vec![
+            sse_response(&[
+                "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"imgtool\",\"arguments\":\"{}\"}}]}}]}",
+                "[DONE]",
+            ]),
+            sse_response(&[
+                "{\"choices\":[{\"delta\":{\"content\":\"done\"}}]}",
+                "[DONE]",
+            ]),
+        ]);
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(crate::test_support::ImageTool))
+            .unwrap();
+        let tools = Arc::new(registry.clone());
+        let provider =
+            OpenAiCompatProvider::new(api.base_url.clone(), None, "m").with_tools(tools.clone());
+        let events: Vec<Event> = spawn_agent_turn(
+            Arc::new(provider),
+            tools,
+            None,
+            &[Message::User("look".into())],
+            3,
+        )
+        .iter()
+        .collect();
+        assert!(matches!(events.last(), Some(Event::TurnEnd)));
+        let body = api.request(1).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(body.split("\r\n\r\n").nth(1).unwrap_or(&body)).unwrap();
+        let messages = json["messages"].as_array().unwrap();
+        let tool = messages
+            .iter()
+            .find(|m| m["role"] == "tool")
+            .expect("tool message on the wire");
+        assert_eq!(tool["content"], "Read image file [image/png] (attached)");
+        // The carrier follows the tool message: text label, then parts.
+        let carrier = &messages[messages.iter().position(|m| m["role"] == "tool").unwrap() + 1];
+        assert_eq!(carrier["role"], "user");
+        let parts = carrier["content"].as_array().unwrap();
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "Attached image(s) from imgtool:");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,aW1n");
+    }
+
+    #[test]
+    fn image_only_tool_results_send_a_placeholder() {
+        let api = FakeApi::start(sse_response(&[
+            "{\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}",
+            "[DONE]",
+        ]));
+        let provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "m");
+        let history = vec![
+            Message::User("q".into()),
+            Message::ToolResult(ToolResult {
+                call_id: "c1".into(),
+                name: "imgtool".into(),
+                content: String::new(),
+                is_error: false,
+                images: vec![crate::tool::ImageBlock {
+                    data: "aW1n".into(),
+                    mime_type: "image/png".into(),
+                }],
+            }),
+        ];
+        let _: Vec<Event> = spawn_turn(Arc::new(provider), &history).iter().collect();
+        let compact = compact_body(api.first_request());
+        assert!(compact.contains("(seeattachedimage)"));
+        assert!(compact.contains("Attachedimage(s)fromimgtool:"));
+    }
+
+    #[test]
+    fn image_payloads_keep_the_prefix_stable() {
+        // The caching invariant (AD-0007) survives images: the
+        // synthetic carrier is derived, not stored, and serializes
+        // byte-identically on every replay.
+        let frames = |tail: &str| {
+            sse_response(&[
+                "{\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}",
+                &format!("{{\"choices\":[{{\"delta\":{{\"content\":\"{tail}\"}}}}]}}"),
+                "[DONE]",
+            ])
+        };
+        let api = FakeApi::start_sequence(vec![frames("one"), frames("two")]);
+        let provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "m");
+        let base = vec![
+            Message::User("q1".into()),
+            Message::Assistant("Checking.".into()),
+            Message::ToolCall(crate::tool::ToolCall {
+                id: "call_1".into(),
+                name: "imgtool".into(),
+                arguments: "{}".into(),
+            }),
+            image_result(),
+        ];
+        let turn1 = base.clone();
+        let _: Vec<Event> = spawn_turn(Arc::new(provider.clone()), &turn1)
+            .iter()
+            .collect();
+        let mut turn2 = base.clone();
+        turn2.push(Message::Assistant("one".into()));
+        turn2.push(Message::User("q2".into()));
+        let _: Vec<Event> = spawn_turn(Arc::new(provider), &turn2).iter().collect();
+
+        let parse = |request: String| -> serde_json::Value {
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap_or(&request)).unwrap()
+        };
+        let first = parse(api.request(0).unwrap());
+        let second = parse(api.request(1).unwrap());
+        let first_len = first["messages"].as_array().unwrap().len();
+        for (i, old) in first["messages"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(second["messages"][i], *old, "prefix message {i} moved");
+        }
+        assert_eq!(first_len, 4);
+        // The carrier is exactly where it was, byte-for-byte.
+        assert_eq!(
+            second["messages"][3]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,aW1n"
+        );
     }
 }

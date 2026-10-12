@@ -329,6 +329,7 @@ impl App {
                         // bundle stays whatever the user configured.
                         default_tools: None,
                         telemetry: None,
+                        images: None,
                     };
                     match settings.save() {
                         Ok(()) => self

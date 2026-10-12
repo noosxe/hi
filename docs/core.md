@@ -49,9 +49,15 @@ structured payloads instead).
 - `ToolRegistry`: `BTreeMap<String, Arc<dyn Tool>>` — stable sorted wire order, duplicate-name
   rejection, `definitions()` for the request's `tools` array. Empty registry ⇒ no `tools` field
   on the wire at all.
-- `ToolCall { id, name, arguments }` / `ToolResult { call_id, name, content, is_error }`:
+- `ToolCall { id, name, arguments }` / `ToolResult { call_id, name, content, is_error, images }`:
   `arguments` stays **raw JSON text** (the model's exact words; the tool owns its schema).
-  `is_error` is harness-side only — the OpenAI wire has no such flag.
+  `is_error` is harness-side only — the OpenAI wire has no such flag. `images`
+  (`Vec<ImageBlock>`, base64 + mime type) carries what a tool produced **for the model to
+  see** (v1: `read` on an image file) — facts on the result, policy applied before the tool
+  ran, `serde(default)` + skipped when empty so pre-image session files load unchanged.
+- Image-producing tools override `execute_with_images -> ToolOutput { content, images }`;
+  the default wraps `execute` with no images, so image support stays opt-in per tool and the
+  loop calls only the image-aware path.
 - The interception seam: `ToolGate = dyn Fn(&ToolCall) -> ToolDecision`, with
   `ToolDecision::{ Allow, Deny(reason), Mutate(arguments) }`. A plain function type on purpose —
   the extension host (#6) backs this seam from outside core, so core stays runtime-free.
@@ -74,7 +80,10 @@ The harness ships tools, not just a loop. One file per tool under
 output contract) and `walk.rs` (gitignore-aware directory walking for
 grep/find).
 
-- **The seven built-ins**: `read` (line-numbered, `offset`/`limit` paging),
+- **The seven built-ins**: `read` (line-numbered, `offset`/`limit` paging;
+  image files — png/jpeg/webp/gif, magic-byte sniffed, never extension-guessed — are
+  base64-attached for the model when the startup image policy allows, with an honest
+  metadata note when disabled or over the 5 MB gate),
   `bash` (optional `timeout` seconds, no default; tail-kept output; non-zero
   exit is an error result with the output inside), `edit` (`edits[]` matched
   against the ORIGINAL file, each exactly once, overlaps rejected),
@@ -177,6 +186,14 @@ Construction chain:
   `stamp_session_cache_key` once the session exists) and re-applied by
   every TUI provider rebuild, so a `/model` or `/resume` switch never
   drops them.
+
+Images on the wire (AD-0008): `role: "tool"` is text-only in the OpenAI-compat
+  protocol, so a result's images move into a **synthetic follow-up user message** —
+  `{"role":"user","content":[{"type":"text","text":"Attached image(s) from read:"},
+  {"type":"image_url","image_url":{"url":"data:image/png;base64,…"}}]}` — pi-ai's exact
+  transformation. Wire-only: history keeps images on the result, every turn re-derives the
+  carrier (deterministic base64, so the AD-0007 prefix invariant holds), an image-only
+  result sends `(see attached image)` as its tool text.
 
 Wire identity (see also [decisions.md](decisions.md) AD-0007):
 - **`User-Agent: hi/<version> (<os>; <arch>)` rides on every outbound
@@ -282,9 +299,9 @@ default_model: Option<&str>) -> Result<Selected, String>` where
 
 ## settings.rs — `settings.json`
 
-`Settings { default_model: Option<String> ("defaultModel"), thinking:
-Option<ThinkingLevel> }`, camelCase, unknown fields ignored. Path: next to
-`models.json` (`settings_path()`).
+`Settings { default_model, thinking, default_tools, telemetry, images }` — all
+`Option<_>`, camelCase, unknown fields ignored. Path: next to `models.json`
+(`settings_path()`). See [configuration.md](configuration.md) for what each means.
 
 - Missing file = `Settings::default()` (normal first-run state; tested).
 - Unparseable file = `Err` (surfaced, not silently ignored; tested).

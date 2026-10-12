@@ -283,3 +283,45 @@ Everything beyond that identity is opt-in.
   server-side), `prompt_cache_retention`/ttl knobs (extra cost, niche),
   cost display. Surfacing `cached_tokens` from the final usage chunk is
   issue #39.
+
+---
+
+## AD-0008 — images in read: tool-result image blocks, policy at the only entry point (2026-10-14)
+
+**Status:** implemented (issue #29; rulings recorded on the issue). Deferred:
+#42 kitty rendering, #43 resize/transcode, #41 user-attached images.
+
+**The decision:** images enter the system in exactly one place — the `read`
+tool — and the policy that decides whether they may be attached is resolved
+exactly once, at startup, where both inputs exist:
+
+- **`ToolResult.images: Vec<ImageBlock>`** (base64 + mime type) — facts, not
+  policy: the result records what the tool produced. Additive serde
+  (`default` + skip-when-empty), so pre-image session files load unchanged
+  and old builds ignore the field — no `Message` variant churn anywhere.
+- **Policy = `settings.images && startingModel.vision`**, computed in
+  `resolve_target` and handed to the registry → `read`. The tool attaches
+  only when policy allows, and its content note always tells the truth
+  (attached / disabled / over the 5 MB gate) — a non-vision model never
+  wonders where its image went. `/model` does not re-evaluate; the failure
+  direction is a metadata note, never a burned request. "No point in
+  sending if not supported" (ruling).
+- **The wire transform is wire-only** and mirrors pi-ai exactly: OpenAI-compat
+  `role: "tool"` is text-only, so the tool message keeps its note (or
+  `(see attached image)` when image-only) and the images ride a synthetic
+  follow-up user message of typed parts. History stays clean; every turn
+  re-derives the carrier from stored facts; deterministic base64 keeps the
+  AD-0007 prefix invariant intact.
+- **Magic-byte sniffing, never extensions**: a `.png` full of text is text.
+  Hand-rolled (png/jpeg/webp/gif — the four formats the `image_url` wire
+  accepts); the only new dependency is `base64` (canonical, zero-transitive).
+- **`execute_with_images` is the only execution path the loop calls**; the
+  default wraps `execute` with no images, so the other ten tools are
+  untouched and image support stays opt-in per tool.
+
+**Recorded non-goals (each filed):** resize/transcode to model input limits
+(#43 — the dep question is the whole question there), kitty graphics
+rendering in the TUI (#42 — v1 shows dim metadata notes), pasted/user
+attachments (#41 — takes the `Message::User` enum churn this decision
+deliberately avoided), Anthropic-native content blocks (OpenRouter
+translates), sixel.

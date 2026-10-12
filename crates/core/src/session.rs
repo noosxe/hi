@@ -507,7 +507,7 @@ fn read_summary_header(path: &Path) -> Option<SessionHeader> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool::{ToolCall, ToolResult};
+    use crate::tool::{ImageBlock, ToolCall, ToolResult};
 
     fn temp_root(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("hi-session-{}-{}", tag, std::process::id()));
@@ -529,12 +529,14 @@ mod tests {
                 name: "read".into(),
                 content: "fn main() {}".into(),
                 is_error: false,
+                images: Vec::new(),
             }),
             Message::ToolResult(ToolResult {
                 call_id: "call_9".into(),
                 name: "write".into(),
                 content: "disk full".into(),
                 is_error: true,
+                images: Vec::new(),
             }),
             Message::Error("local annotation — persisted, never sent to the model".into()),
             Message::System("dim note".into()),
@@ -599,6 +601,7 @@ mod tests {
                 name: "t".into(),
                 content: "ok".into(),
                 is_error: true,
+                images: Vec::new(),
             })])
             .unwrap();
         let raw = std::fs::read_to_string(session.path()).unwrap();
@@ -814,5 +817,57 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.name, None);
         assert_eq!(legacy.forked_from, None);
+    }
+    #[test]
+    fn images_round_trip_through_the_session_file() {
+        let root = temp_root("images");
+        let cwd = Path::new("/p");
+        let mut session = Session::start_in(&root, cwd, "prov", "mod", None, None).unwrap();
+        session
+            .append(&[Message::ToolResult(ToolResult {
+                call_id: "c1".into(),
+                name: "read".into(),
+                content: "Read image file [image/png] (attached)".into(),
+                is_error: false,
+                images: vec![ImageBlock {
+                    data: "aW1n".into(),
+                    mime_type: "image/png".into(),
+                }],
+            })])
+            .unwrap();
+        // On disk: camelCase, and only when non-empty.
+        let raw = std::fs::read_to_string(session.path()).unwrap();
+        assert!(
+            raw.contains("\"images\":[{\"data\":\"aW1n\",\"mimeType\":\"image/png\"}]"),
+            "raw: {raw}"
+        );
+        // Back in memory through the loader.
+        let loaded = latest_in_root(&root, cwd).unwrap().unwrap();
+        let Message::ToolResult(result) = &loaded.messages[0] else {
+            panic!("expected the tool result");
+        };
+        assert_eq!(result.images.len(), 1);
+        assert_eq!(result.images[0].mime_type, "image/png");
+    }
+
+    #[test]
+    fn pre_image_session_files_load_without_images() {
+        // serde(default) on `images` is the forward-compat seam: a
+        // session written before images existed loads with none.
+        let root = temp_root("preimage");
+        let cwd = Path::new("/p");
+        let session = Session::start_in(&root, cwd, "prov", "mod", None, None).unwrap();
+        let header = std::fs::read_to_string(session.path()).unwrap();
+        let legacy = format!(
+            "{header}{{\"type\":\"message\",\"message\":{{\"toolResult\":{{\"callId\":\"c1\",\"name\":\"read\",\"content\":\"text only\",\"isError\":false}}}}}}\n"
+        );
+        std::fs::write(session.path(), legacy).unwrap();
+        let loaded = latest_in_root(&root, cwd).unwrap().unwrap();
+        assert_eq!(loaded.messages.len(), 1, "got: {:?}", loaded.messages);
+        let Message::ToolResult(result) = &loaded.messages[0] else {
+            panic!("expected the tool result");
+        };
+        assert!(result.images.is_empty());
+        assert_eq!(result.content, "text only");
     }
 }
