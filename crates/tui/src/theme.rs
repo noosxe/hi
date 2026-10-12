@@ -26,6 +26,9 @@ pub enum Fg {
     ToolTitle,
     /// Tool output body text.
     ToolOutput,
+    /// The selection accent: menu markers and the selected row
+    /// (pi's selectList `accent` role; the palette's lavender).
+    Accent,
     /// Markdown roles (pi's `md*` family).
     Heading,
     Link,
@@ -73,6 +76,7 @@ impl Theme {
             Fg::Error => rgb(0xea7f81),
             Fg::UserText => rgb(0xdee0e1),
             Fg::ToolTitle => rgb(0xdee0e1),
+            Fg::Accent => rgb(0xa798d7),
             Fg::Heading => rgb(0xcd9a22),
             Fg::Link => rgb(0x69add0),
             Fg::LinkUrl | Fg::Quote | Fg::QuoteBorder | Fg::Hr | Fg::CodeBlockBorder => {
@@ -103,6 +107,7 @@ mod tests {
 
     #[test]
     fn fg_roles_resolve_to_pi_dark_values() {
+        assert_eq!(THEME.fg(Fg::Accent).fg, Some(rgb(0xa798d7)));
         assert_eq!(THEME.fg(Fg::Error).fg, Some(rgb(0xea7f81)));
         assert_eq!(THEME.fg(Fg::Heading).fg, Some(rgb(0xcd9a22)));
         assert_eq!(THEME.fg(Fg::Link).fg, Some(rgb(0x69add0)));

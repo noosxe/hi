@@ -57,6 +57,14 @@ Behaviors (each pinned by a test in `app.rs`):
   plain Enter sends.
 - `/` opens the completion menu; typing filters case-insensitively by
   prefix; Tab completes without executing; Esc dismisses the menu and keeps
+  the text. The menu renders pi's SelectList look (grounded on
+  `select-list.js`): no box, plain rows under the input, `→ ` on the
+  selected row, the command in a primary column sized to the widest match
+  (clamped 12–32) with the description muted in a second column, the whole
+  selected row in `Fg::Accent`. The visible window is five rows, centered
+  on the selection, with a muted `  (n/m)` row when the matches overflow —
+  and Up/Down wrap. Descriptions only render when the terminal is wider
+  than 40 columns with room left, pi's exact rule.
   the typed text; unknown commands report instead of sending.
 - Enter mid-turn queues; Esc mid-turn cancels **and** restores the queue
   into the input box.
@@ -302,7 +310,7 @@ preview).
 ## theme.rs — the palette behind roles
 
 `THEME.fg(Fg::…) -> Style` and `THEME.bg(Bg::…) -> Style` — renderers ask
-for roles (`Heading`, `Link`, `ToolTitle`, `UserMessage`, `ToolPending`,
+for roles (`Accent`, `Heading`, `Link`, `ToolTitle`, `UserMessage`, `ToolPending`,
 `ToolSuccess`, `ToolError`…), never colors, so palettes stay swappable.
 Every value is pi's `dark.json` OKHSL token resolved to sRGB through pi's
 own color math at authoring time; hi renders pi's exact tints. One built-in
