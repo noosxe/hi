@@ -104,13 +104,16 @@ Works today (see also README "What works today"):
   kwargs merged into the request body; the active level is shown in the
   status row.
 - System-prompt override chain (user + project `.hi/` markdown files)
-- 76 `#[test]` functions, no network needed (see [testing.md](testing.md))
+- Tool system + multi-turn agent loop: `Tool` trait, registry, `ToolGate` interception seam
+  (allow/deny/mutate), `spawn_agent_turn` rounds — the model can call tools and the loop
+  executes them until it settles (see [decisions.md](decisions.md), AD-0003)
+- 88 `#[test]` functions, no network needed (see [testing.md](testing.md))
 
 Deliberately not yet built:
 
-- **Tools / tool calls** — `Message`/`Event` have no tool variants; no
-  registry, no multi-turn agent loop. This is the prerequisite for most of
-  the extension wishlist (see [decisions.md](decisions.md)).
+- **Built-in tools** — the tool *system* is in (registry, gate, loop); no tools are shipped
+  yet, so sessions still run with an empty registry. Subagents (#4), background tasks (#5),
+  and the Lua host (#6) build on it.
 - **Session persistence** — history is in-memory only, one process lifetime.
 - **Headless one-shot mode** — planned as a second branch in `crates/cli`.
 - **Extensions** — direction decided (Luau), nothing implemented.
