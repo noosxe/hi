@@ -153,10 +153,12 @@ fn main() -> ExitCode {
                 messages: Vec::new(),
                 session: None,
             },
+            // The mock never touches the wire — nothing to attribute.
+            false,
         );
     }
 
-    let target = match resolve_target(
+    let mut target = match resolve_target(
         cli.provider.as_deref(),
         cli.model.as_deref(),
         cli.tools.as_deref(),
@@ -209,6 +211,9 @@ fn main() -> ExitCode {
     let Some((messages, session)) = opened else {
         return ExitCode::SUCCESS;
     };
+    if let Some(session) = session.as_ref() {
+        stamp_session_cache_key(&mut target, session);
+    }
     let init = SessionInit {
         system_prompt: target.system_prompt,
         thinking: target.thinking,
@@ -216,7 +221,14 @@ fn main() -> ExitCode {
         messages,
         session,
     };
-    launch(target.provider, target.status, catalog, target.config, init)
+    launch(
+        target.provider,
+        target.status,
+        catalog,
+        target.config,
+        init,
+        target.telemetry,
+    )
 }
 
 /// Everything a run needs once the interface is chosen: the resolved
@@ -231,6 +243,10 @@ struct Target {
     /// The registry built from the selected bundle, handed to SessionInit
     /// and headless runs.
     tools: Arc<ToolRegistry>,
+    /// The user's attribution opt-in, resolved once here so provider
+    /// rebuilds (the session cache-key stamp, the TUI's /model and
+    /// /resume switches) never drop it.
+    telemetry: bool,
 }
 
 fn resolve_target(
@@ -276,7 +292,8 @@ fn resolve_target(
         OpenAiCompatProvider::from_config(entry, selected.model.clone())
             .with_system_prompt(system_prompt.clone())
             .with_thinking_level(thinking)
-            .with_tools(Arc::clone(&tools)),
+            .with_tools(Arc::clone(&tools))
+            .with_telemetry(settings.telemetry_enabled()),
     );
     Ok(Target {
         provider,
@@ -289,7 +306,27 @@ fn resolve_target(
         system_prompt,
         thinking,
         tools,
+        telemetry: settings.telemetry_enabled(),
     })
+}
+
+/// Stamp the open session's id onto the provider as the prompt-cache
+/// routing key. The provider is built in `resolve_target` — before a
+/// session exists — so the stamp rebuilds it once; nothing shares the
+/// `Arc` yet, so no live thread sees the swap. Provider rebuilds in
+/// the TUI (`/model`, `/resume`) re-apply both stamps themselves.
+fn stamp_session_cache_key(target: &mut Target, session: &Session) {
+    let Some(entry) = target.config.providers.get(&target.status.provider) else {
+        return; // mock or unknown provider — nothing on the wire to stamp
+    };
+    target.provider = Arc::new(
+        OpenAiCompatProvider::from_config(entry, target.status.model.clone())
+            .with_system_prompt(target.system_prompt.clone())
+            .with_thinking_level(target.thinking)
+            .with_tools(Arc::clone(&target.tools))
+            .with_telemetry(target.telemetry)
+            .with_cache_key(Some(session.id().to_string())),
+    );
 }
 
 /// `--print`: one prompt in, final assistant text out, no interface.
@@ -301,9 +338,29 @@ fn print_mode(cli: &Cli) -> ExitCode {
         Err(err) => return fail(&err),
     };
 
-    let (provider, status, thinking, tools) = if cli.mock {
-        (
-            Arc::new(MockProvider::default()) as Arc<dyn Provider>,
+    // Kept whole: the session stamp below must rebuild the provider,
+    // which needs the config entry and system prompt alongside it.
+    let mut target = if cli.mock {
+        None
+    } else {
+        Some(
+            match resolve_target(
+                cli.provider.as_deref(),
+                cli.model.as_deref(),
+                cli.tools.as_deref(),
+            ) {
+                Ok(target) => target,
+                Err(err) => return fail(&err),
+            },
+        )
+    };
+    let (status, thinking, tools) = match &target {
+        Some(target) => (
+            target.status.clone(),
+            target.thinking,
+            Arc::clone(&target.tools),
+        ),
+        None => (
             Status {
                 provider: "mock".into(),
                 model: "mock".into(),
@@ -312,21 +369,7 @@ fn print_mode(cli: &Cli) -> ExitCode {
             None,
             // The mock never emits tool calls — keep its registry empty.
             Arc::new(ToolRegistry::new()),
-        )
-    } else {
-        match resolve_target(
-            cli.provider.as_deref(),
-            cli.model.as_deref(),
-            cli.tools.as_deref(),
-        ) {
-            Ok(target) => (
-                target.provider,
-                target.status,
-                target.thinking,
-                target.tools,
-            ),
-            Err(err) => return fail(&err),
-        }
+        ),
     };
 
     let cwd = match std::env::current_dir() {
@@ -351,6 +394,14 @@ fn print_mode(cli: &Cli) -> ExitCode {
         return ExitCode::SUCCESS;
     };
 
+    if let (Some(target), Some(session)) = (target.as_mut(), session.as_ref()) {
+        stamp_session_cache_key(target, session);
+    }
+    let provider: Arc<dyn Provider> = match target {
+        Some(target) => target.provider,
+        // The mock path: no wire, no stamp.
+        None => Arc::new(MockProvider::default()),
+    };
     match headless::run(
         provider,
         tools,
@@ -515,8 +566,9 @@ fn launch(
     catalog: Catalog,
     config: ModelsConfig,
     init: SessionInit,
+    telemetry: bool,
 ) -> ExitCode {
-    match run(provider, status, catalog, config, init) {
+    match run(provider, status, catalog, config, init, telemetry) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => fail(&err.to_string()),
     }

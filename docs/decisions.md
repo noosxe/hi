@@ -245,3 +245,41 @@ error (`--print`, pointing at `--fork`).
 - **Flag surface** mirrors pi: `-r/--resume`, `--session`, `--fork`,
   `-n/--name`, mutually exclusive per pi's conflict matrix; `--name`
   pairs with fresh starts and forks only.
+
+---
+
+## AD-0007 — wire identity: honest UA, opt-in telemetry, session-id cache affinity (2026-10-14)
+
+**Status:** implemented (issue #38; design rulings in the issue). Deferred
+usage display: issue #39.
+
+**The decision:** every outbound request carries
+`User-Agent: hi/<version> (<os>; <arch>)` — honest product identification,
+never gated, because providers and proxies use it for support triage and
+abuse attribution and a bare `ureq/3.x` misidentifies every hi user.
+Everything beyond that identity is opt-in.
+
+- **`telemetry` (settings, default off; `HI_TELEMETRY` env wins — pi's
+  `PI_TELEMETRY` pattern) gates exactly one thing**: attribution headers
+  toward hosts that display them (OpenRouter's `HTTP-Referer`/`X-Title`,
+  host-matched exactly, never suffix-matched). hi has no analytics, no
+  install pings, no update checks — the documented statement is "the
+  User-Agent is the whole always-on telemetry surface."
+- **Session affinity is routing, not tracking, and is not gated**: with an
+  open session, requests carry `prompt_cache_key: <session id>` (and
+  `x-session-id` toward OpenRouter). The value is the session's random
+  uuid — no user content, no cross-session linkability beyond what the
+  provider already sees. The session id is the *correct* key: stable
+  across `--continue`/`--resume`/`--session`, follows `/resume` switches
+  (the TUI rebuilds the provider with the new id), fresh on forks.
+- **Prefix stability is enforced, not hoped for**: caches on
+  OpenAI-compatible servers match by request prefix, so the test
+  `consecutive_turns_keep_a_byte_stable_prefix` pins the invariant that
+  turn N+1 re-serializes turn N's system prompt, tool definitions, and
+  history byte-for-byte. Session headers carry `name`/`forkedFrom`
+  skipped-when-absent so old headers never perturb the wire.
+- **Recorded non-goals**: Anthropic-native `cache_control` breakpoints
+  (hi speaks OpenAI-compat only; OpenRouter handles Anthropic caching
+  server-side), `prompt_cache_retention`/ttl knobs (extra cost, niche),
+  cost display. Surfacing `cached_tokens` from the final usage chunk is
+  issue #39.

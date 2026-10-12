@@ -102,6 +102,10 @@ Works today (see also README "What works today"):
   in-session), `--session <path|id>`, `--fork <path|id>`, `--name` —
   core returns facts (listing, resolution), the CLI owns policy (see
   [cli.md](cli.md), [decisions.md](decisions.md) AD-0006)
+- Wire identity & caching: honest `User-Agent` always, telemetry-gated
+  attribution, session-id prompt-cache affinity with a tested
+  byte-stable payload prefix (see [core.md](core.md),
+  [decisions.md](decisions.md) AD-0007)
 - `mock` + `hi_core::OpenAiCompatProvider` behind the one `Provider` trait
 - pi-style `models.json` with `$ENV` key interpolation, model discovery,
   hybrid listing policy
@@ -124,7 +128,7 @@ Works today (see also README "What works today"):
   selected by bundle (`--tools`, default `coding`), results clamped by one
   truncation contract, prompt notes woven into the system prompt (see
   [decisions.md](decisions.md), AD-0004)
-- 201 `#[test]` functions, no network needed (see [testing.md](testing.md))
+- 208 `#[test]` functions, no network needed (see [testing.md](testing.md))
 
 Deliberately not yet built:
 

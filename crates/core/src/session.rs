@@ -206,6 +206,12 @@ impl Session {
     }
 
     /// The file this session writes to.
+    /// The session's id — also the prompt-cache routing key on the
+    /// wire, so every turn of one session routes to the same cache.
+    pub fn id(&self) -> &str {
+        &self.header.id
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }

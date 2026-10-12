@@ -27,6 +27,10 @@ pub struct App {
     /// The backend producing assistant turns. A trait object (`dyn`),
     /// so swapping mock → real LLM later is a one-line change here.
     pub provider: Arc<dyn Provider>,
+    /// The user's attribution opt-in, resolved at startup — applied to
+    /// every provider rebuild here (/model, /resume) so the stamp the
+    /// CLI put on at launch is never dropped.
+    telemetry: bool,
     /// Tools the model may call this session. Empty until built-ins
     /// land; the agent loop already runs whatever is registered here.
     pub tools: Arc<ToolRegistry>,
@@ -128,6 +132,7 @@ impl App {
         catalog: Catalog,
         config: ModelsConfig,
         init: crate::SessionInit,
+        telemetry: bool,
     ) -> Self {
         let crate::SessionInit {
             system_prompt,
@@ -147,6 +152,7 @@ impl App {
             config,
             system_prompt,
             thinking,
+            telemetry,
             tools,
             session,
             picker: None,
@@ -322,6 +328,7 @@ impl App {
                         // Ctrl-S persists only the model choice; the tool
                         // bundle stays whatever the user configured.
                         default_tools: None,
+                        telemetry: None,
                     };
                     match settings.save() {
                         Ok(()) => self
@@ -345,6 +352,28 @@ impl App {
         }
     }
 
+    /// Rebuild the OpenAI-compat provider from the live session facts
+    /// — system prompt, thinking, tools — plus the wire-identity
+    /// stamps: the telemetry opt-in and the prompt-cache routing key.
+    /// One construction path for every post-startup rebuild (/model,
+    /// /resume) so a switch can never drop a stamp startup applied.
+    /// Mock providers (no config entry) are left alone.
+    fn rebuild_provider(&mut self, provider: &str, model: &str, cache_key: Option<String>) {
+        let Some(entry) = self.config.providers.get(provider) else {
+            return;
+        };
+        self.provider = Arc::new(
+            OpenAiCompatProvider::from_config(entry, model.to_string())
+                .with_system_prompt(self.system_prompt.clone())
+                .with_thinking_level(self.thinking)
+                // The switch must not drop the tool registry from the
+                // wire — re-attach exactly what startup attached.
+                .with_tools(Arc::clone(&self.tools))
+                .with_telemetry(self.telemetry)
+                .with_cache_key(cache_key),
+        );
+    }
+
     /// Switch this session to `provider/model`. Safe even mid-turn:
     /// the running turn thread holds its own `Arc` to the old provider
     /// and finishes on it; only new turns pick up the new one.
@@ -352,17 +381,9 @@ impl App {
         let Some((provider, model)) = item.split_once('/') else {
             return;
         };
-        let Some(entry) = self.config.providers.get(provider) else {
-            return;
-        };
-        self.provider = Arc::new(
-            OpenAiCompatProvider::from_config(entry, model)
-                .with_system_prompt(self.system_prompt.clone())
-                .with_thinking_level(self.thinking)
-                // The /model switch must not drop the tool registry from
-                // the wire — re-attach exactly what startup attached.
-                .with_tools(Arc::clone(&self.tools)),
-        );
+        // Cache routing follows the live session across model switches.
+        let cache_key = self.session.as_ref().map(|s| s.id().to_string());
+        self.rebuild_provider(provider, model, cache_key);
         self.status = Status {
             provider: provider.to_string(),
             model: model.to_string(),
@@ -592,7 +613,12 @@ impl App {
             Message::System(format!("resumed {count} messages from {}", path.display())),
         );
         self.messages = messages;
+        // Cache routing follows the session: the new id becomes the
+        // prompt-cache key before any further turn is spawned.
+        let cache_key = session.id().to_string();
         self.session = Some(session);
+        let (provider, model) = (self.status.provider.clone(), self.status.model.clone());
+        self.rebuild_provider(&provider, &model, Some(cache_key));
         self.printed = 0;
         self.queued = None;
     }
@@ -713,6 +739,7 @@ mod tests {
                 messages: Vec::new(),
                 session: None,
             },
+            false,
         )
     }
 
