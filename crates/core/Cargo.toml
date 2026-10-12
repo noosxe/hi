@@ -8,6 +8,14 @@ license = "MIT OR Apache-2.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+# Image decode/resize/encode for `read`'s attachments (AD-0009): the four
+# wire formats only, everything else trimmed.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "webp",
+] }
 ureq = { version = "3", features = ["json"] }
 uuid = { version = "1", features = ["v4"] }
 regex = "1"

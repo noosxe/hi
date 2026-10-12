@@ -76,14 +76,15 @@ mutates the caller's history — consumers mirror the event stream (details in
 ## tools/ — the built-in capabilities (#26)
 
 The harness ships tools, not just a loop. One file per tool under
-`crates/core/src/tools/`, plus two support modules: `truncate.rs` (the
-output contract) and `walk.rs` (gitignore-aware directory walking for
-grep/find).
+`crates/core/src/tools/`, plus support modules: `truncate.rs` (the
+output contract), `walk.rs` (gitignore-aware directory walking for
+grep/find), and `image_resize.rs` (read's attachment ladder —
+[decisions.md](decisions.md) AD-0009).
 
 - **The seven built-ins**: `read` (line-numbered, `offset`/`limit` paging;
   image files — png/jpeg/webp/gif, magic-byte sniffed, never extension-guessed — are
-  base64-attached for the model when the startup image policy allows, with an honest
-  metadata note when disabled or over the 5 MB gate),
+  base64-attached for the model when the startup image policy allows, after the
+  `image_resize` ladder fits them to a universal budget; notes always say what happened)
   `bash` (optional `timeout` seconds, no default; tail-kept output; non-zero
   exit is an error result with the output inside), `edit` (`edits[]` matched
   against the ORIGINAL file, each exactly once, overlaps rejected),

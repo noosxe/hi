@@ -109,6 +109,9 @@ Works today (see also README "What works today"):
 - Images in read: magic-byte sniffed, policy-gated (`vision` +
   `images`), attached via pi's synthetic-user-message wire transform
   (see [core.md](core.md), [decisions.md](decisions.md) AD-0008)
+- Image resize: pi's ladder — 2000×2000 / 4.5 MB base64 budget, PNG
+  + JPEG-quality candidates, run once before history (see
+  [core.md](core.md), [decisions.md](decisions.md) AD-0009)
 - `mock` + `hi_core::OpenAiCompatProvider` behind the one `Provider` trait
 - pi-style `models.json` with `$ENV` key interpolation, model discovery,
   hybrid listing policy
@@ -131,7 +134,7 @@ Works today (see also README "What works today"):
   selected by bundle (`--tools`, default `coding`), results clamped by one
   truncation contract, prompt notes woven into the system prompt (see
   [decisions.md](decisions.md), AD-0004)
-- 224 `#[test]` functions, no network needed (see [testing.md](testing.md))
+- 231 `#[test]` functions, no network needed (see [testing.md](testing.md))
 
 Deliberately not yet built:
 

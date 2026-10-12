@@ -325,3 +325,54 @@ rendering in the TUI (#42 — v1 shows dim metadata notes), pasted/user
 attachments (#41 — takes the `Message::User` enum churn this decision
 deliberately avoided), Anthropic-native content blocks (OpenRouter
 translates), sixel.
+
+---
+
+## AD-0009 — image resize follows pi: one universal budget, no per-model knowledge (2026-10-14)
+
+**Status:** implemented (issue #43). Supersedes AD-0008's 5 MB raw gate;
+that gate described v1, before resizing existed.
+
+**The question that shaped it:** how do we know a model's image limits?
+Verified answer: we don't, and can't. The OpenAI-compat wire has no
+capabilities endpoint; the documented limits disagree per provider
+(Anthropic 10 MB/image API-direct, 5 MB on Bedrock/GCP, 8000×8000 —
+collapsing to 2000 px for every image in a request that carries >20;
+OpenAI has no per-image byte cap at all, resizing for itself and
+rejecting only past 30k patches); some rules depend on request
+context, which no catalog field can express. pi's own generated model
+catalog defines the `inputLimits` type and populates it zero times —
+even the biggest practitioner ships no per-model numbers and runs on
+fallbacks. When the guess is wrong, the API's 4xx quotes the real
+limit, and the note surfaces it verbatim.
+
+**The decision:** pi's ladder, step for step (`image-resize-core.js` →
+`tools/image_resize.rs`):
+
+- **Budget: 2000×2000 px and 4.5 MB of base64 payload** — headroom
+  under the tightest mainstream per-image cap (Bedrock/GCP's 5 MB
+  base64). The budget counts encoded bytes, because that is what
+  rides the wire; hi v1's 5 MB *file* gate encoded to ~6.7 MB and
+  was tuned to folklore, not to a provider.
+- **An image already within limits is never re-encoded** — original
+  bytes, byte-identical, so small screenshots cost nothing.
+- **Otherwise: PNG first, then JPEG at q{80, 85, 70, 55, 40}, first
+  candidate under budget wins; still over → shrink 0.75× and repeat,
+  to 1×1.** Unshrinkable is reported honestly, never sent.
+- **Runs once, in `read`, before history.** The `ToolResult` stores
+  the resized bytes; replays re-derive the same carrier, and the
+  AD-0007 prefix invariant keeps holding (tested).
+- **Guards, hi's additions**: a 64 MB raw-file cap (OOM guard, not a
+  provider limit) and an 8192×8192 decode cap (a hostile PNG header
+  must not become a 4 TB allocation). EXIF orientation is applied
+  before anything else, like pi.
+- **Dependency:** the `image` crate (AD-0004 canonical), features
+  trimmed to the four wire formats. pi avoids native deps with
+  Photon/WASM; in Rust the canonical pure-Rust crate is the same
+  trade without the wasm.
+- **No per-model config seam** — pi's `inputLimits` field is populated
+  by nobody; hi adds nothing until a real model needs it (YAGNI,
+  recorded so the absence is a decision, not an oversight).
+
+**Non-goal:** per-model limits, image protocols (#42), resize outside
+`read`.
