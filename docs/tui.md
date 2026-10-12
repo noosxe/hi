@@ -139,7 +139,10 @@ at ~8 lines on any screen), bottom-up via the pure `layout()` helper:
   markdown.rs and theme.rs sections below). The insert height is the
   wrapped row count — never one row per message. Spacing is each block's
   own padding, not a separator: every block carries one blank row above
-  and below its content (pi's `paddingY`), so two blank rows separate any
+  and below its content (pi's `paddingY`) and one blank column on its
+  left and right (paddingX — content wraps at width−2; the fill of a
+  filled block still runs the full width behind it), so two blank rows
+  separate any
   adjacent content rows — tinted with the fill for blocks that have a
   background (user, tool), plain for blocks that don't (assistant, system,
   error). While a tool runs, the

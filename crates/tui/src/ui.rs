@@ -406,42 +406,47 @@ pub fn block_segments(
     caps: Option<crate::kitty::Protocol>,
 ) -> Vec<Segment> {
     let width = width.max(1) as usize;
+    // paddingX: every block's content is inset one column on each side
+    // (ruled: mirror the paddingY rows — fill-tinted for filled blocks,
+    // whose fill still runs the full width; plain for transparent ones).
+    let inner = width.saturating_sub(2).max(1);
     match block {
         // Filled blocks pad in their own fill (padded_block / tool_rows).
         TranscriptBlock::Message(Message::User(text)) => vec![Segment::Text(padded_block(
-            markdown_rows(text, width as u16, THEME.fg(Fg::UserText)),
+            markdown_rows(text, inner as u16, THEME.fg(Fg::UserText)),
             width,
             THEME.bg(Bg::UserMessage),
         ))],
         // Transparent blocks pad with plain blank rows. Either way every
-        // block carries one blank row above and below (pi's paddingY):
-        // two blank rows separate any adjacent content rows, some tinted
-        // by their block's background, some not.
+        // block carries one blank row above and below (pi's paddingY)
+        // and one blank column each side (paddingX): two blank rows
+        // separate any adjacent content rows, some tinted by their
+        // block's background, some not.
         TranscriptBlock::Message(Message::Assistant(text)) => {
             // Plain markdown, terminal-default text, no fill (pi).
             vec![Segment::Text(pad_plain(markdown_rows(
                 text,
-                width as u16,
+                inner as u16,
                 Style::new(),
             )))]
         }
         TranscriptBlock::Message(Message::System(text)) => vec![Segment::Text(pad_plain(
-            wrap_plain(text, width, THEME.fg(Fg::Dim)),
+            wrap_plain(text, inner, THEME.fg(Fg::Dim)),
         ))],
         TranscriptBlock::Message(Message::Error(text)) => vec![Segment::Text(pad_plain(
-            wrap_plain(text, width, THEME.fg(Fg::Error)),
+            wrap_plain(text, inner, THEME.fg(Fg::Error)),
         ))],
         // derive_blocks routes tool messages to TranscriptBlock::Tool;
         // if one ever lands here, render defensively instead of panicking.
         TranscriptBlock::Message(Message::ToolCall(call)) => {
             vec![Segment::Text(pad_plain(wrap_plain(
                 &format!("{}({})", call.name, call.arguments),
-                width,
+                inner,
                 THEME.fg(Fg::Dim),
             )))]
         }
         TranscriptBlock::Message(Message::ToolResult(result)) => vec![Segment::Text(pad_plain(
-            wrap_plain(&result.content, width, THEME.fg(Fg::Dim)),
+            wrap_plain(&result.content, inner, THEME.fg(Fg::Dim)),
         ))],
         TranscriptBlock::Tool(exec) => tool_segments(exec, width, caps),
     }
@@ -463,9 +468,11 @@ fn wrap_plain(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
 }
 
 /// Extend rows into a solid pi-style block: every span patched with the
-/// fill (so every cell carries the background), each row padded to the
-/// full width inside it, one blank fill row above and below (pi's
-/// paddingY), one space of side padding (paddingX).
+/// fill (so every cell — including the padding columns — carries the
+/// background at full width), one blank fill row above and below (pi's
+/// paddingY), and the content inset one column on each side (paddingX):
+/// callers wrap at `width - 2`, so one fill column borders the content
+/// left and right.
 fn padded_block(rows: Vec<Line<'static>>, width: usize, fill: Style) -> Vec<Line<'static>> {
     let mut out = Vec::with_capacity(rows.len() + 2);
     out.push(fill_row(width, fill));
@@ -486,12 +493,19 @@ fn padded_block(rows: Vec<Line<'static>>, width: usize, fill: Style) -> Vec<Line
     out
 }
 
-/// One plain blank row above and below — the transparent block's
-/// paddingY, mirroring what `padded_block` does with a fill.
+/// One plain blank row above and below (paddingY) and one plain blank
+/// column each side (paddingX) — the transparent block's mirror of
+/// what `padded_block` does with a fill. Callers wrap at `width - 2`.
 fn pad_plain(rows: Vec<Line<'static>>) -> Vec<Line<'static>> {
     let mut out = Vec::with_capacity(rows.len() + 2);
     out.push(Line::raw(""));
-    out.extend(rows);
+    for row in rows {
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(row.spans.len() + 2);
+        spans.push(Span::raw(" "));
+        spans.extend(row.spans);
+        spans.push(Span::raw(" "));
+        out.push(Line::from(spans));
+    }
     out.push(Line::raw(""));
     out
 }
@@ -1000,17 +1014,39 @@ mod tests {
     }
 
     #[test]
+    fn every_block_insets_its_content_one_column_each_side() {
+        // Transparent: plain spaces flank the content.
+        let rows = block_rows(
+            &TranscriptBlock::Message(Message::Assistant("hello".into())),
+            30,
+        );
+        assert_eq!(rows[1].spans.len(), 3);
+        assert_eq!(rows[1].spans[0].content, " ");
+        assert_eq!(rows[1].spans[1].content, "hello");
+        assert_eq!(rows[1].spans[2].content, " ");
+        // Filled: the fill still runs the FULL width (ruled), with the
+        // content inset one column inside it. "hello" fills its row:
+        // 1 pad + 28 content + 1 pad = 30.
+        let rows = block_rows(&TranscriptBlock::Message(Message::User("x".repeat(28))), 30);
+        assert_eq!(rows[1].spans[0].content, " ");
+        let total: usize = rows[1].spans.iter().map(|s| s.content.width()).sum();
+        assert_eq!(total, 30);
+        assert_eq!(rows[1].spans[1].content, "x".repeat(28));
+    }
+
+    #[test]
     fn assistant_block_has_no_fill_and_its_own_padding() {
         let rows = block_rows(
             &TranscriptBlock::Message(Message::Assistant("plain reply".into())),
             30,
         );
-        // paddingY: one plain blank row above and below the content.
+        // paddingY: one plain blank row above and below; paddingX:
+        // one plain column each side of the content.
         assert_eq!(rows.len(), 3);
         let buf = &mut Buffer::empty(Rect::new(0, 0, 30, 3));
         segments_into(vec![Segment::Text(rows)], buf);
         assert_eq!(text_of(buf, 0, 30), "");
-        assert_eq!(text_of(buf, 1, 30), "plain reply");
+        assert_eq!(text_of(buf, 1, 30), " plain reply"); // trailing pad trimmed
         assert_eq!(text_of(buf, 2, 30), "");
         for y in 0..3 {
             assert_eq!(buf[(0, y)].bg, ratatui::style::Color::Reset);
@@ -1023,8 +1059,9 @@ mod tests {
             &TranscriptBlock::Message(Message::Assistant("# Plan".into())),
             30,
         );
+        // rows[1] spans: [paddingX " ", heading, paddingX " "].
         assert!(
-            rows[1].spans[0]
+            rows[1].spans[1]
                 .style
                 .add_modifier
                 .contains(ratatui::style::Modifier::BOLD)
@@ -1038,10 +1075,10 @@ mod tests {
             20,
         );
         assert_eq!(system.len(), 3); // paddingY rows flank the content
-        assert_eq!(system[1].spans[0].style.fg, THEME.fg(Fg::Dim).fg);
+        assert_eq!(system[1].spans[1].style.fg, THEME.fg(Fg::Dim).fg); // [pad, text, pad]
         let error = block_rows(&TranscriptBlock::Message(Message::Error("boom".into())), 20);
         assert_eq!(error.len(), 3);
-        assert_eq!(error[1].spans[0].style.fg, THEME.fg(Fg::Error).fg);
+        assert_eq!(error[1].spans[1].style.fg, THEME.fg(Fg::Error).fg);
     }
 
     #[test]
