@@ -606,3 +606,29 @@ the cancel-edit-resend workflow the user asked for.
 Shift+Enter newline (crossterm cannot report it), page-scroll. Each is
 a clean later PR.
 
+---
+
+## AD-0015 — the live viewport is the whole terminal (2026-10-15)
+
+**Status:** implemented. Revises the first layout sketch, which fixed
+the managed region at 12 rows and capped every streaming reply at ~8
+lines on any screen — the transcript above stayed visible, but the
+reply was a keyhole.
+
+**The ruling:** pi's live viewport is the bottom `terminal.rows` lines
+of its working buffer — the whole screen. hi already had pi's other
+half (commit-on-completion to scrollback); only the viewport size was
+wrong. The partition is now computed from the real height, bottom-up:
+status 1 pinned, input (3–8) above it, menu at its natural height
+above that, and the stream keeps every remaining row. The `min(9 −
+input_height)` menu cap existed only to keep the stream ≥ 2 inside
+the 12-row sketch and is gone; item caps in `menu_height()` already
+bind.
+
+**The trade, named:** while a reply streams, the scrollback above the
+viewport is not visible — pi behaves identically. The completed block
+commits to scrollback as always, so nothing is lost, only deferred.
+`layout()` is a pure function over `(area, input_height, menu_h)`,
+saturating by construction: on absurdly short terminals the stream
+shrinks first, to nothing; nothing panics.
+

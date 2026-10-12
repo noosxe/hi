@@ -109,19 +109,24 @@ parse is reported, not overwritten — Esc closes.
 
 ## ui.rs — drawing (the only file allowed to draw)
 
-`draw(frame, app)` lays out the fixed 12-row viewport, bottom-up:
+`draw(frame, app)` lays out the live viewport — **the whole terminal**
+(AD-0015; the first sketch fixed it at 12 rows, which capped every reply
+at ~8 lines on any screen), bottom-up via the pure `layout()` helper:
 
 ```
-resting:     [stream 8] [input 3] [status 1]
-menu open:   [stream 5] [menu 3]  [input 3] [status 1]
-long input:  [stream 2] [input 8] [status 1]
+50 rows, resting:  [stream 46] [input 3] [status 1]
+50 rows, menu:     [stream 42] [menu 4]  [input 3] [status 1]
 ```
 
 - Status row pinned at the bottom; input grows upward with its wrapped text
   (`wrapped_row_count` clamped 1–6, +2 rule rows); the menu (completion or
-  picker, whichever is open, height from `App::menu_height()`) takes rows
-  above the input; the streaming area keeps the rest, never fewer than 2
-  rows.
+  picker, whichever is open, natural height from `App::menu_height()`) takes
+  rows above the input; the streaming area keeps every row that remains —
+  a reply fills the window, pi's live viewport is likewise the full
+  terminal. Scrollback above the viewport is not visible while the reply
+  streams; the committed block lands there on completion. Saturating
+  arithmetic: on absurdly short terminals the stream shrinks first, to
+  nothing; nothing panics.
 - `draw_input`: top/bottom rules only, no side walls (pi-style); the real
   terminal cursor parks **at the logical cursor** (`wrap::cursor_pos` maps the
   byte offset into wrapped row/column — mid-text while editing, AD-0014);
