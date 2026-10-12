@@ -38,6 +38,10 @@ pub struct ProviderConfig {
     pub models: Vec<ModelConfig>,
 }
 
+fn default_vision() -> bool {
+    true
+}
+
 /// One model entry.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ModelConfig {
@@ -49,11 +53,13 @@ pub struct ModelConfig {
     /// Whether the model supports reasoning output.
     #[serde(default)]
     pub reasoning: bool,
-    /// Whether the model accepts image input. Gates `read`'s image
-    /// attachments: without it the tool returns a metadata note and
-    /// the request is never burned (issue #29 ruling: "no point in
-    /// sending if not supported").
-    #[serde(default)]
+    /// Whether the model accepts image input. Defaults to **true**
+    /// (pi-parity, AD-0012): models omitted from this file — e.g.
+    /// discovered from the API — read as vision-capable, and
+    /// `vision: false` is the explicit opt-out that makes `read`
+    /// return a metadata note instead of attaching. The old default
+    /// (false, #29) blinded every dynamically discovered model.
+    #[serde(default = "default_vision")]
     pub vision: bool,
     /// Context window size, in tokens. Informational for now — the
     /// harness will use it for truncation policy later.
@@ -69,6 +75,24 @@ pub struct ModelConfig {
     /// `{"thinking": {"type": "enabled"}}` for GLM.
     #[serde(rename = "thinkingLevelMap", default)]
     pub thinking_level_map: Option<BTreeMap<String, serde_json::Value>>,
+}
+
+impl ProviderConfig {
+    /// The image-attachment policy for `model_id` — pi's fail-open
+    /// rule (AD-0012): the settings master switch wins first; a model
+    /// configured here honors an explicit `vision: false`; a model
+    /// with no entry (API-discovered) reads as vision-capable. The
+    /// pessimistic #29 default blinded every dynamically discovered
+    /// model, which is most of them in practice.
+    pub fn images_allowed(&self, model_id: &str, settings_enabled: bool) -> bool {
+        if !settings_enabled {
+            return false;
+        }
+        match self.models.iter().find(|m| m.id == model_id) {
+            Some(model) => model.vision,
+            None => true,
+        }
+    }
 }
 
 impl ProviderConfig {
@@ -203,14 +227,31 @@ mod tests {
     }
 
     #[test]
-    fn vision_defaults_to_false_and_parses() {
+    fn vision_defaults_to_true_and_parses() {
         let raw = r#"{"providers":{"p":{"baseUrl":"http://x/v1","models":[
-            {"id":"plain"},{"id":"seer","vision":true}]}}}"#;
+            {"id":"plain"},{"id":"blind","vision":false}]}}}"#;
         let cfg: ModelsConfig = serde_json::from_str(raw).unwrap();
         let models = &cfg.providers.get("p").unwrap().models;
-        // Unnamed capability = no image input: the safe direction.
-        assert!(!models[0].vision);
-        assert!(models[1].vision);
+        // Unnamed capability = vision-capable (pi's default, AD-0012);
+        // only an explicit `vision: false` opts out.
+        assert!(models[0].vision);
+        assert!(!models[1].vision);
+    }
+
+    #[test]
+    fn image_policy_is_fail_open_for_unknown_models() {
+        let raw = r#"{"providers":{"p":{"baseUrl":"http://x/v1","models":[
+            {"id":"blind","vision":false},{"id":"seer"}]}}}"#;
+        let cfg: ModelsConfig = serde_json::from_str(raw).unwrap();
+        let entry = cfg.providers.get("p").unwrap();
+        // Master switch off wins over everything.
+        assert!(!entry.images_allowed("seer", false));
+        assert!(!entry.images_allowed("blind", false));
+        // Configured model: the explicit opt-out is honored.
+        assert!(!entry.images_allowed("blind", true));
+        assert!(entry.images_allowed("seer", true));
+        // No entry (API discovery): attach — pi's `!model ||` arm.
+        assert!(entry.images_allowed("gpt-who-knows", true));
     }
 
     #[test]

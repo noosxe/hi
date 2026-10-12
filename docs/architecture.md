@@ -106,8 +106,9 @@ Works today (see also README "What works today"):
   attribution, session-id prompt-cache affinity with a tested
   byte-stable payload prefix (see [core.md](core.md),
   [decisions.md](decisions.md) AD-0007)
-- Images in read: magic-byte sniffed, policy-gated (`vision` +
-  `images`), attached via pi's synthetic-user-message wire transform
+- Images in read: magic-byte sniffed, fail-open policy (pi-parity:
+  off only via the `images` master switch or an explicit
+  `vision: false`), attached via pi's synthetic-user-message wire
   (see [core.md](core.md), [decisions.md](decisions.md) AD-0008)
 - Image resize: pi's ladder — 2000×2000 / 4.5 MB base64 budget, PNG
   + JPEG-quality candidates, run once before history (see
@@ -143,7 +144,7 @@ Works today (see also README "What works today"):
   selected by bundle (`--tools`, default `coding`), results clamped by one
   truncation contract, prompt notes woven into the system prompt (see
   [decisions.md](decisions.md), AD-0004)
-- 260 `#[test]` functions, no network needed (see [testing.md](testing.md))
+- 263 `#[test]` functions, no network needed (see [testing.md](testing.md))
 
 Deliberately not yet built:
 

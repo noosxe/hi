@@ -49,6 +49,13 @@ pub struct SessionInit {
     pub messages: Vec<Message>,
     /// Open session file for turn-end appends (`None` = not persisting).
     pub session: Option<Session>,
+    /// The shared image-attachment gate (the same Arc inside `read`).
+    /// The app flips it on model switches — the registry outlives
+    /// them, the policy follows (AD-0012).
+    pub images: hi_core::ImageGate,
+    /// The `settings.images` master switch, resolved at startup;
+    /// re-resolution on a switch must honor it.
+    pub images_setting: bool,
 }
 
 /// Run the interactive interface until the user quits.

@@ -54,9 +54,10 @@ configs never break older builds (tested for both files).
 - The model listing policy is hybrid: non-empty `models` wins (only config
   entries can carry `contextWindow`/`reasoning`); empty/absent means live
   discovery via `GET {baseUrl}/models` (`data[].id` or `models[].slug`).
-- `"vision": true` on a model entry (default false) declares image
-  input. Symmetric with `reasoning`; gates `read`'s image attachments
-  (see the settings section).
+- `"vision": false` on a model entry opts out of image input — the
+  default is **true** (pi-parity: models discovered from the API have
+  no entry and read as vision-capable, AD-0012). Gates `read`'s image
+  attachments (see the settings section).
 - `thinkingLevelMap` is the only place provider-specific reasoning options
   exist: when the session's thinking level has an entry here, that JSON
   object merges top-level into the chat request body. No provider knowledge
@@ -107,10 +108,11 @@ A credential *source*, not necessarily a literal:
   sending pictures to the model — `read`'s attachments today, pasted
   attachments when they land (#41). Off means metadata notes only,
   regardless of the model.
-- **Image policy resolves once at startup**: `images` AND the starting
-  model's `vision` flag (below) — both must be on for `read` to attach.
-  A `/model` switch doesn't re-evaluate; the safe direction (a note
-  instead of an image), never a burned request.
+- **Image policy**: `images` master switch first; then the model's
+  rule — a configured `vision: false` opts out, and a model with no
+  entry (API-discovered) reads as vision-capable (AD-0012, pi's
+  fail-open). The gate is re-resolved on every `/model` and `/resume`
+  switch; only an explicit opt-out makes `read` return metadata notes.
 
 ## System prompt files
 

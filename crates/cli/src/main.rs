@@ -11,8 +11,8 @@ use std::sync::Arc;
 use clap::Parser;
 
 use hi_core::{
-    Message, MockProvider, ModelsConfig, OpenAiCompatProvider, Provider, Session, Settings,
-    ThinkingLevel, ToolBundle, ToolRegistry, headless,
+    ImageGate, Message, MockProvider, ModelsConfig, OpenAiCompatProvider, Provider, Session,
+    Settings, ThinkingLevel, ToolBundle, ToolRegistry, headless,
 };
 use hi_tui::{Catalog, SessionInit, Status, run};
 
@@ -152,6 +152,8 @@ fn main() -> ExitCode {
                 tools: Arc::new(ToolRegistry::new()),
                 messages: Vec::new(),
                 session: None,
+                images: ImageGate::new(false),
+                images_setting: true,
             },
             // The mock never touches the wire — nothing to attribute.
             false,
@@ -220,6 +222,8 @@ fn main() -> ExitCode {
         tools: target.tools,
         messages,
         session,
+        images: target.images,
+        images_setting: target.images_setting,
     };
     launch(
         target.provider,
@@ -247,6 +251,11 @@ struct Target {
     /// rebuilds (the session cache-key stamp, the TUI's /model and
     /// /resume switches) never drop it.
     telemetry: bool,
+    /// The shared image gate (inside the registry's `read`), plus the
+    /// settings master switch — handed to SessionInit so the TUI's
+    /// /model switch re-resolves the policy (AD-0012).
+    images: hi_core::ImageGate,
+    images_setting: bool,
 }
 
 fn resolve_target(
@@ -273,17 +282,14 @@ fn resolve_target(
     };
     let cwd = std::env::current_dir()
         .map_err(|err| format!("cannot determine current directory: {err}"))?;
-    // Image policy, resolved once: the master switch (settings, on by
-    // default) AND the starting model's declared vision. Unknown
-    // models have no vision entry, so they read as non-vision — the
-    // safe direction (a metadata note instead of a burned request).
-    let images = settings.images_enabled()
-        && entry
-            .models
-            .iter()
-            .find(|m| m.id == selected.model)
-            .is_some_and(|m| m.vision);
-    let tools = Arc::new(bundle.registry(&cwd, images));
+    // Image policy (AD-0012, pi-parity): the master switch first,
+    // then the model's rule — configured models honor an explicit
+    // `vision: false`, discovered models (no entry) read as
+    // vision-capable. The gate is shared: /model switches re-resolve
+    // it without rebuilding the registry.
+    let images_setting = settings.images_enabled();
+    let images = ImageGate::new(entry.images_allowed(&selected.model, images_setting));
+    let tools = Arc::new(bundle.registry(&cwd, images.clone()));
     let system_prompt = {
         let mut prompt = hi_core::system_prompt::resolve();
         let notes = tools.prompt_notes();
@@ -317,6 +323,8 @@ fn resolve_target(
         thinking,
         tools,
         telemetry: settings.telemetry_enabled(),
+        images,
+        images_setting,
     })
 }
 
