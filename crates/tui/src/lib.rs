@@ -111,7 +111,12 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io
         // terminal owns the line — we never redraw history.
         while printed < app.messages.len() {
             let msg = app.messages[printed].clone();
-            terminal.insert_before(1, |buf| ui::message_into(msg, buf))?;
+            // Re-read the width per message: a resize mid-burst must
+            // not measure new rows against the old width.
+            let width = terminal.size()?.width;
+            let rows = ui::message_rows(msg, width);
+            let height = rows.len().clamp(1, u16::MAX as usize) as u16;
+            terminal.insert_before(height, |buf| ui::rows_into(rows, buf))?;
             printed += 1;
         }
 

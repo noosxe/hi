@@ -6,6 +6,7 @@ use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Widget, Wrap};
 use unicode_width::UnicodeWidthChar;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::App;
 
@@ -205,31 +206,109 @@ fn draw_stream(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
-/// Format one transcript message and render it into a scrollback row.
-/// Called via `Terminal::insert_before`; after this runs, the line is
-/// terminal-owned history — scrolling it is the emulator's job.
-pub fn message_into(msg: Message, buf: &mut Buffer) {
-    // We own the message, so its String moves straight into the line —
-    // no clones. The dim label marks who spoke.
-    let line = match msg {
-        Message::User(text) => Line::from(vec!["you ".dim(), text.into()]),
-        Message::Assistant(text) => Line::from(vec!["assistant ".dim(), text.into()]),
-        Message::Error(text) => Line::from(vec!["error ".red(), text.into()]),
-        Message::System(text) => Line::from(text).style(Style::new().dim()),
-        Message::ToolCall(call) => Line::from(vec![
-            "tool ".dim(),
-            format!("{}({})", call.name, call.arguments).yellow(),
-        ]),
-        Message::ToolResult(result) => Line::from(vec![
-            if result.is_error {
-                "result ".red()
+/// Tool-call and tool-result bodies are capped to this many wrapped
+/// rows plus a marker row. Without the cap, a full tool result (up to
+/// 2000 lines under the truncation contract) would paste thousands of
+/// rows into scrollback. The full output still lives in the session
+/// file; #33 replaces this with expandable blocks.
+const TOOL_PREVIEW_ROWS: usize = 10;
+
+/// Compose a transcript message into wrapped terminal rows — one
+/// `Line` per scrollback row. The label sits on the first row and
+/// shrinks that row's wrap capacity; continuation rows get the full
+/// width. Measuring and rendering share this function, so the row
+/// count a caller passes to `Terminal::insert_before` always matches
+/// what `rows_into` draws.
+pub fn message_rows(msg: Message, width: u16) -> Vec<Line<'static>> {
+    let width = width.max(1) as usize;
+    match msg {
+        Message::User(text) => labeled_rows("you ", Style::new().dim(), text, Style::new(), width),
+        Message::Assistant(text) => {
+            labeled_rows("assistant ", Style::new().dim(), text, Style::new(), width)
+        }
+        Message::Error(text) => {
+            labeled_rows("error ", Style::new().red(), text, Style::new(), width)
+        }
+        Message::System(text) => labeled_rows("", Style::new(), text, Style::new().dim(), width),
+        Message::ToolCall(call) => {
+            let body = format!("{}({})", call.name, call.arguments);
+            let mut rows = labeled_rows(
+                "tool ",
+                Style::new().dim(),
+                body,
+                Style::new().yellow(),
+                width,
+            );
+            cap_tool_rows(&mut rows);
+            rows
+        }
+        Message::ToolResult(result) => {
+            let label = if result.is_error {
+                Style::new().red()
             } else {
-                "result ".dim()
-            },
-            result.content.into(),
-        ]),
-    };
-    Paragraph::new(line).render(buf.area, buf);
+                Style::new().dim()
+            };
+            let mut rows = labeled_rows("result ", label, result.content, Style::new(), width);
+            cap_tool_rows(&mut rows);
+            rows
+        }
+    }
+}
+
+/// Render pre-wrapped transcript rows into a scrollback buffer. Called
+/// via `Terminal::insert_before`; after this runs, the rows are
+/// terminal-owned history — scrolling them is the emulator's job.
+pub fn rows_into(rows: Vec<Line<'static>>, buf: &mut Buffer) {
+    // The rows are already wrapped to the buffer's width, so this is a
+    // plain placement pass — no `Wrap`, no reflow, no surprises.
+    Paragraph::new(Text::from(rows)).render(buf.area, buf);
+}
+
+/// Word-wrap `body` into row strings: the first row reserves the
+/// label's columns, later rows the full width. Source newlines split
+/// first, so a message's own line breaks survive wrapping.
+fn wrap_body(label: &str, body: &str, width: usize) -> Vec<String> {
+    let first_cap = width.saturating_sub(label.width()).max(1);
+    let mut rows: Vec<String> = Vec::new();
+    for segment in body.split('\n') {
+        let cap = if rows.is_empty() { first_cap } else { width };
+        rows.extend(crate::wrap::wrap(segment, cap));
+    }
+    rows
+}
+
+/// Build message rows: the label prefixes the first row, the wrapped
+/// body follows in `body_style`.
+fn labeled_rows(
+    label: &'static str,
+    label_style: Style,
+    body: String,
+    body_style: Style,
+    width: usize,
+) -> Vec<Line<'static>> {
+    wrap_body(label, &body, width)
+        .into_iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let mut spans = Vec::with_capacity(2);
+            if i == 0 && !label.is_empty() {
+                spans.push(Span::styled(label.to_string(), label_style));
+            }
+            spans.push(Span::styled(row, body_style));
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// Keep tool rows to the preview budget, collapsing the rest into one
+/// dim marker row — pi's collapsed-preview pattern for scrollback.
+fn cap_tool_rows(rows: &mut Vec<Line<'static>>) {
+    if rows.len() <= TOOL_PREVIEW_ROWS {
+        return;
+    }
+    let hidden = rows.len() - TOOL_PREVIEW_ROWS;
+    rows.truncate(TOOL_PREVIEW_ROWS);
+    rows.push(Line::from(format!("\u{2026} {hidden} more lines").dim()));
 }
 
 /// One-row welcome banner, printed above the viewport on startup.
@@ -238,4 +317,111 @@ pub fn message_into(msg: Message, buf: &mut Buffer) {
 pub fn welcome_into(buf: &mut Buffer) {
     let line = Line::from(vec!["hi".bold(), " · say something, ctrl-c to quit".dim()]);
     Paragraph::new(line).render(buf.area, buf);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hi_core::ToolResult;
+
+    /// All cell symbols of one buffer row, trailing blanks trimmed.
+    fn text_of(buf: &Buffer, y: u16, width: u16) -> String {
+        (0..width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn long_reply_wraps_at_word_boundaries() {
+        // 10 label columns + 12 wrap columns: "alpha beta " fits, "gamma" wraps.
+        let width = 22;
+        let rows = message_rows(Message::Assistant("alpha beta gamma".into()), width);
+        assert_eq!(rows.len(), 2);
+        let buf = &mut Buffer::empty(Rect::new(0, 0, width, rows.len() as u16));
+        rows_into(rows, buf);
+        assert_eq!(text_of(buf, 0, width), "assistant alpha beta");
+        assert_eq!(text_of(buf, 1, width), "gamma");
+    }
+
+    #[test]
+    fn continuation_rows_have_no_label() {
+        let width = 20;
+        let rows = message_rows(
+            Message::User("one two three four five six seven".into()),
+            width,
+        );
+        assert!(rows.len() > 1);
+        let buf = &mut Buffer::empty(Rect::new(0, 0, width, rows.len() as u16));
+        rows_into(rows, buf);
+        assert!(text_of(buf, 0, width).starts_with("you "));
+        assert!(!text_of(buf, 1, width).starts_with("you "));
+    }
+
+    #[test]
+    fn source_newlines_become_row_breaks() {
+        let rows = message_rows(Message::User("a\nb".into()), 40);
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn oversized_words_hard_split() {
+        let width = 10;
+        let rows = message_rows(Message::User("abcdefgh".into()), width);
+        assert_eq!(rows.len(), 2);
+        let buf = &mut Buffer::empty(Rect::new(0, 0, width, 2));
+        rows_into(rows, buf);
+        assert_eq!(text_of(buf, 0, width), "you abcdef");
+        assert_eq!(text_of(buf, 1, width), "gh");
+    }
+
+    #[test]
+    fn tool_result_is_capped_with_a_marker_row() {
+        let content: String = (0..50).map(|i| format!("line{i}\n")).collect();
+        let rows = message_rows(
+            Message::ToolResult(ToolResult {
+                call_id: "c1".into(),
+                name: "bash".into(),
+                content,
+                is_error: false,
+            }),
+            40,
+        );
+        assert_eq!(rows.len(), TOOL_PREVIEW_ROWS + 1);
+        let height = rows.len() as u16;
+        let buf = &mut Buffer::empty(Rect::new(0, 0, 40, height));
+        rows_into(rows, buf);
+        let marker = text_of(buf, height - 1, 40);
+        assert!(marker.contains("41 more lines"), "marker: {marker}");
+    }
+
+    #[test]
+    fn error_result_keeps_red_label() {
+        let rows = message_rows(
+            Message::ToolResult(ToolResult {
+                call_id: "c2".into(),
+                name: "bash".into(),
+                content: "boom".into(),
+                is_error: true,
+            }),
+            40,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].spans[0].style, Style::new().red());
+    }
+
+    #[test]
+    fn system_rows_have_no_label() {
+        let rows = message_rows(Message::System("note".into()), 40);
+        assert_eq!(rows.len(), 1);
+        let buf = &mut Buffer::empty(Rect::new(0, 0, 40, 1));
+        rows_into(rows, buf);
+        assert_eq!(text_of(buf, 0, 40), "note");
+    }
+
+    #[test]
+    fn degenerate_width_yields_one_row() {
+        assert_eq!(message_rows(Message::Assistant(String::new()), 0).len(), 1);
+    }
 }
