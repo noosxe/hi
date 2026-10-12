@@ -11,10 +11,10 @@ use std::sync::Arc;
 use clap::Parser;
 
 use hi_core::{
-    MockProvider, ModelsConfig, OpenAiCompatProvider, Provider, Settings, ThinkingLevel,
+    Message, MockProvider, ModelsConfig, OpenAiCompatProvider, Provider, Session, Settings,
     ToolRegistry,
 };
-use hi_tui::{Catalog, Status, run};
+use hi_tui::{Catalog, SessionInit, Status, run};
 
 #[derive(Parser)]
 #[command(
@@ -39,6 +39,10 @@ struct Cli {
     /// Print the selected provider's models and exit
     #[arg(long)]
     list_models: bool,
+
+    /// Resume the most recent session for this directory
+    #[arg(long = "continue", conflicts_with = "mock")]
+    resume: bool,
 }
 
 fn main() -> ExitCode {
@@ -54,9 +58,13 @@ fn main() -> ExitCode {
             Catalog::default(),
             ModelsConfig::default(),
             // The mock ignores system prompts — nothing to resolve.
-            None,
-            None,
-            Arc::new(ToolRegistry::new()),
+            SessionInit {
+                system_prompt: None,
+                thinking: None,
+                tools: Arc::new(ToolRegistry::new()),
+                messages: Vec::new(),
+                session: None,
+            },
         );
     }
 
@@ -127,36 +135,70 @@ fn main() -> ExitCode {
         provider: selected.provider,
         model: selected.model,
     };
-    launch(
-        provider,
-        status,
-        catalog,
-        config,
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(err) => return fail(&format!("cannot determine current directory: {err}")),
+    };
+    // Session persistence: every run writes a session file; --continue
+    // reopens the newest one for this directory. Failures degrade to a
+    // warning — chat never depends on the disk.
+    let (messages, session) = if cli.resume {
+        match open_resumed(&cwd) {
+            Ok(pair) => pair,
+            Err(warning) => {
+                eprintln!("hi: {warning}");
+                (Vec::new(), None)
+            }
+        }
+    } else {
+        match Session::start(
+            &status.provider,
+            &status.model,
+            thinking.as_ref().map(|level| level.name()),
+        ) {
+            Ok(session) => (Vec::new(), Some(session)),
+            Err(warning) => {
+                eprintln!("hi: {warning}");
+                (Vec::new(), None)
+            }
+        }
+    };
+    let init = SessionInit {
         system_prompt,
         thinking,
-        Arc::new(ToolRegistry::new()),
-    )
+        tools: Arc::new(ToolRegistry::new()),
+        messages,
+        session,
+    };
+    launch(provider, status, catalog, config, init)
 }
 
 /// Hand the session to the interactive interface.
+/// Reopen the newest session file for `cwd` and prepare it for
+/// continued appending. A system note marks the seam in the transcript.
+fn open_resumed(cwd: &std::path::Path) -> Result<(Vec<Message>, Option<Session>), String> {
+    let loaded = hi_core::session::latest(cwd)?.ok_or("no previous session in this directory")?;
+    let session = Session::resume(&loaded.path)?;
+    let count = loaded.messages.len();
+    let mut messages = loaded.messages;
+    messages.insert(
+        0,
+        Message::System(format!(
+            "resumed {count} messages from {}",
+            loaded.path.display()
+        )),
+    );
+    Ok((messages, Some(session)))
+}
+
 fn launch(
     provider: Arc<dyn Provider>,
     status: Status,
     catalog: Catalog,
     config: ModelsConfig,
-    system_prompt: Option<String>,
-    thinking: Option<ThinkingLevel>,
-    tools: Arc<ToolRegistry>,
+    init: SessionInit,
 ) -> ExitCode {
-    match run(
-        provider,
-        status,
-        catalog,
-        config,
-        system_prompt,
-        thinking,
-        tools,
-    ) {
+    match run(provider, status, catalog, config, init) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => fail(&err.to_string()),
     }

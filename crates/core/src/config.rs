@@ -124,6 +124,28 @@ fn config_dir_from(
     Some(base.join("hi"))
 }
 
+/// hi's data directory: `~/.local/share/hi`, honoring `$XDG_DATA_HOME`
+/// with the same precedence rules as [`config_dir`] (explicit override
+/// wins, empty counts as unset). Sessions are user *data*, not
+/// configuration, so they live here — big, machine-generated, safe to
+/// back up separately from the hand-written config files.
+pub fn data_dir() -> Option<PathBuf> {
+    data_dir_from(
+        std::env::var_os("XDG_DATA_HOME").as_deref(),
+        std::env::home_dir().as_deref(),
+    )
+}
+
+/// The pure decision, split out for testing — mirrors
+/// [`config_dir_from`] with the `.local/share` base.
+fn data_dir_from(xdg: Option<&std::ffi::OsStr>, home: Option<&std::path::Path>) -> Option<PathBuf> {
+    let base = match xdg {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => home?.join(".local/share"),
+    };
+    Some(base.join("hi"))
+}
+
 /// The expected path of `models.json` inside the config directory.
 pub fn models_path() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("models.json"))
@@ -221,5 +243,14 @@ mod tests {
 
         // No home anywhere — no directory to speak of.
         assert!(config_dir_from(None, None).is_none());
+
+        // The data directory mirrors the same precedence rules, with
+        // `.local/share` as the base.
+        let data_xdg =
+            data_dir_from(Some("/custom/xdg".as_ref()), Some("/home/u".as_ref())).unwrap();
+        assert_eq!(data_xdg, PathBuf::from("/custom/xdg/hi"));
+        let data_home = data_dir_from(None, Some("/home/u".as_ref())).unwrap();
+        assert_eq!(data_home, PathBuf::from("/home/u/.local/share/hi"));
+        assert!(data_dir_from(None, None).is_none());
     }
 }

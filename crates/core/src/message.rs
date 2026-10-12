@@ -6,7 +6,8 @@ use crate::tool::{ToolCall, ToolResult};
 /// one speaker's data out of another's variant, and `match` over the
 /// variants is exhaustive — the tool-call kinds leaned on exactly that:
 /// every consumer must handle them at compile time.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum Message {
     /// Something the human typed.
     User(String),

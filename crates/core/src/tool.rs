@@ -21,7 +21,8 @@
 /// dispatch step's job, not the type's: the tool itself is the authority
 /// on its own schema, and keeping the raw text means the UI and the wire
 /// replay show exactly what was said, errors included.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolCall {
     /// Correlation id. The provider supplies it (OpenAI-style
     /// `call_…` ids); when a server omits one, the stream layer
@@ -41,7 +42,8 @@ pub struct ToolCall {
 /// successful step of the conversation (the model learns the call failed
 /// and adapts). `Event::Error` stays reserved for the turn itself
 /// failing — the single-finalization-path contract.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolResult {
     /// The `ToolCall::id` this result answers.
     pub call_id: String,

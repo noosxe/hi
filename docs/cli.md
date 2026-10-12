@@ -14,6 +14,7 @@ here without touching either library.
 | `--mock` | Built-in mock provider; conflicts with `--provider`, `--model`, `--list-models` |
 | `--list-models` | Print the selected provider's models and exit |
 | `-h, --help` / `-V, --version` | clap-standard |
+| `--continue` | Resume the most recent session for this directory (conflicts with `--mock`) |
 
 `after_help` points at `~/.config/hi/models.json` and the README schema.
 
@@ -22,7 +23,8 @@ here without touching either library.
 ```
 --mock
   └─ launch(MockProvider::default(), Status{mock,mock}, Catalog::default(),
-            ModelsConfig::default(), system_prompt=None, thinking=None)
+  └─ launch(MockProvider::default(), Status{mock,mock}, Catalog::default(),
+            ModelsConfig::default(), SessionInit{no session, empty transcript})
      (the mock ignores prompts — nothing to resolve)
 
 otherwise:
@@ -38,6 +40,10 @@ otherwise:
        .with_system_prompt(system_prompt::resolve())
        .with_thinking_level(settings.thinking)
   6. launch(...) → hi_tui::run(...)
+ 6. Session file: `--continue` → session::latest + Session::resume
+       (warn + fresh start when nothing to resume); otherwise Session::start
+       — failures degrade to a stderr warning either way
+ 7. launch(...) → hi_tui::run(...)
 ```
 
 Note the asymmetry worth preserving: `system_prompt` is resolved from the
