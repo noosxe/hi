@@ -86,7 +86,9 @@ simply don't appear (their errors are visible via `--list-models`).
 
 Picker keys: arrows move, Enter switches the session's model (safe mid-turn;
 running turn finishes on its original provider), **Ctrl-S saves** the choice
-to `settings.json` as `defaultModel`, Esc closes.
+to `settings.json` as `defaultModel` — load-modify-save: your other settings
+(thinking, tools, telemetry, images) survive untouched; a file that won't
+parse is reported, not overwritten — Esc closes.
 
 ## status.rs — status-bar facts (pure filesystem, no subprocesses)
 

@@ -322,16 +322,9 @@ impl App {
             // default; Enter only switches this session.
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(item) = picker.items.get(picker.selected) {
-                    let settings = Settings {
-                        default_model: Some(item.clone()),
-                        thinking: None,
-                        // Ctrl-S persists only the model choice; the tool
-                        // bundle stays whatever the user configured.
-                        default_tools: None,
-                        telemetry: None,
-                        images: None,
-                    };
-                    match settings.save() {
+                    // Load-modify-save: only the model choice is written;
+                    // every other user setting survives (#45).
+                    match Settings::persist_default_model(item) {
                         Ok(()) => self
                             .messages
                             .push(Message::System(format!("default model saved: {item}"))),

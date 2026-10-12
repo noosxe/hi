@@ -24,7 +24,7 @@ later.
 - Honest wire identity: `hi/<version> (<os>; <arch>)` on every request; prompt-cache affinity via the session id so multi-turn runs hit server-side caches; telemetry beyond that is strictly opt-in
 - `read` attaches image files (png/jpeg/webp/gif) for vision models — policy-gated (`vision` on the model, `images` master switch), metadata notes otherwise
 - Built-in agent tools: the model can read, search, list, write, edit, and run commands — the `coding` bundle by default, `--tools read-only|none|all` to change
-- 221 tests, including a fake HTTP server that records requests
+- 224 tests, including a fake HTTP server that records requests
 
 Not yet: JSONL event output for scripts, subagents, background tasks, extensions.
 The selection and settings layers are built so each slots in without
@@ -35,7 +35,7 @@ rework.
 ```sh
 nix develop          # Rust toolchain + cargo (or any Rust 1.85+, edition 2024)
 cargo run            # builds the `hi` binary; `hi --mock` needs no config
-cargo test           # 221 tests; no network needed
+cargo test           # 224 tests; no network needed
 ```
 
 

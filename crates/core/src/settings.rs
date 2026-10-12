@@ -94,6 +94,23 @@ impl Settings {
         self.images.unwrap_or(true)
     }
 
+    /// Persist `default_model` while keeping every other setting — the
+    /// Ctrl-S path (#45). Load-modify-save, never reconstruct: building a
+    /// fresh `Settings` here would silently erase the user's thinking,
+    /// tools, telemetry, and image choices. An unparseable file is an
+    /// error and is left untouched — surfacing beats destroying.
+    pub fn persist_default_model(model: &str) -> Result<(), String> {
+        let path = settings_path().ok_or("could not determine config directory")?;
+        Self::persist_default_model_to(&path, model)
+    }
+
+    /// The path-independent half of `persist_default_model`.
+    fn persist_default_model_to(path: &Path, model: &str) -> Result<(), String> {
+        let mut settings = Self::load_from(path)?;
+        settings.default_model = Some(model.to_string());
+        settings.save_to(path)
+    }
+
     /// Persist to `<config-dir>/settings.json` (pretty-printed, so
     /// hand edits and tool writes stay compatible).
     pub fn save(&self) -> Result<(), String> {
@@ -136,6 +153,61 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hi-settings-{}-missing", std::process::id()));
         let settings = Settings::load_from(&dir.join("settings.json")).unwrap();
         assert_eq!(settings, Settings::default());
+    }
+
+    #[test]
+    fn persist_default_model_keeps_every_other_setting() {
+        // The #45 contract: Ctrl-S writes one field, not a fresh file.
+        let dir = std::env::temp_dir().join(format!("hi-settings-{}-persist", std::process::id()));
+        let path = dir.join("settings.json");
+        let existing = Settings {
+            default_model: None,
+            thinking: Some(ThinkingLevel::High),
+            default_tools: Some("all".into()),
+            telemetry: Some(true),
+            images: Some(false),
+        };
+        existing.save_to(&path).unwrap();
+
+        Settings::persist_default_model_to(&path, "zai/glm-5.3").unwrap();
+
+        let loaded = Settings::load_from(&path).unwrap();
+        assert_eq!(loaded.default_model.as_deref(), Some("zai/glm-5.3"));
+        assert_eq!(loaded.thinking, Some(ThinkingLevel::High));
+        assert_eq!(loaded.default_tools.as_deref(), Some("all"));
+        assert_eq!(loaded.telemetry, Some(true));
+        assert_eq!(loaded.images, Some(false));
+    }
+
+    #[test]
+    fn persist_default_model_on_missing_file_writes_just_the_choice() {
+        let dir =
+            std::env::temp_dir().join(format!("hi-settings-{}-firstsave", std::process::id()));
+        let path = dir.join("settings.json");
+
+        Settings::persist_default_model_to(&path, "local/llama").unwrap();
+
+        let loaded = Settings::load_from(&path).unwrap();
+        assert_eq!(loaded.default_model.as_deref(), Some("local/llama"));
+        // Nothing else existed to keep — every other field stays unset.
+        assert_eq!(loaded.thinking, None);
+        assert_eq!(loaded.default_tools, None);
+        assert_eq!(loaded.telemetry, None);
+        assert_eq!(loaded.images, None);
+    }
+
+    #[test]
+    fn persist_default_model_refuses_to_clobber_an_unparseable_file() {
+        let dir = std::env::temp_dir().join(format!("hi-settings-{}-broken", std::process::id()));
+        let path = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "{ not json").unwrap();
+
+        let err = Settings::persist_default_model_to(&path, "zai/glm-5.3").unwrap_err();
+
+        assert!(err.contains("cannot parse"), "got: {err}");
+        // The broken file survives untouched — surfacing beats destroying.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
     }
 
     #[test]
