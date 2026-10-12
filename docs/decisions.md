@@ -531,3 +531,37 @@ rebuilds; the wire never loses its tools.
 loud, one turn, and self-explanatory; versus the old cost, which was
 silently blinding models that could see.
 
+---
+
+## AD-0013 — Cmd+V aliases the paste chord under the kitty keyboard protocol (2026-10-15)
+
+**Status:** implemented. A deliberate hi-specific nicety — pi binds
+Ctrl+V everywhere and stops there.
+
+**The gap:** on macOS, Cmd+V is muscle memory, but a terminal owns it:
+the emulator performs its own text paste and no key event reaches the
+app, and clipboard pixels never cross a TTY — so image paste must be a
+chord the app actually receives (Ctrl+V is byte `0x16`).
+
+**The mechanism:** the kitty keyboard protocol's minimal enhancement,
+`DISAMBIGUATE_ESCAPE_CODES`. The spec guarantees that under this flag
+every key event that does not generate text — Cmd+V produces none —
+arrives as a `CSI u` sequence carrying its modifier bits, so
+supporting terminals (Ghostty, kitty, WezTerm) can forward the chord;
+crossterm reports it as `Char('v') + SUPER` and hi aliases it to the
+same paste path. Terminals without the protocol ignore the enable
+sequence and nothing changes — Ctrl+V remains the paste everywhere.
+
+**Scope discipline:** only the disambiguate flag is pushed — not
+`REPORT_ALL_KEYS_AS_ESCAPE_CODES` (repeat/release noise, text
+reporting changes) or alternate-keys. The spec's explicit exceptions
+hold: Enter/Tab/Backspace keep their legacy bytes, plain typing is
+untouched, Ctrl+C arrives as an event instead of SIGINT (raw mode had
+already disabled the signal). Paired pop at teardown; the panic-hook
+caveat from AD-0011 applies to both modes.
+
+**Whether a given terminal actually hands Cmd+V to the app is its own
+policy** (some keep Cmd+V bound to their text paste even under the
+protocol). The feature degrades to today's behavior wherever that
+happens — worst case is the status quo.
+
