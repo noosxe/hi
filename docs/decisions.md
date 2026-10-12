@@ -632,3 +632,62 @@ commits to scrollback as always, so nothing is lost, only deferred.
 saturating by construction: on absurdly short terminals the stream
 shrinks first, to nothing; nothing panics.
 
+---
+
+## Correction to AD-0015 (2026-10-15, recorded with AD-0016)
+
+AD-0015's claim that "a reply fills the window" was **false as
+shipped**. The inline viewport height is frozen at construction, and
+`lib.rs` still created `Viewport::Inline(12)` — so the full-height
+partition math in `draw()` never saw more than 12 rows at runtime.
+The layout code was right and fed by the wrong geometry; the 12-row
+sketch had simply moved from `draw()` into `lib.rs`. Discovered while
+designing AD-0016; the viewport is now sized from the real terminal
+at startup, and this note stands so the decision log never claims
+more than the code did.
+
+---
+
+## AD-0016 — the scrollback is a flushed prefix; the live area is its window (2026-10-15)
+
+**Status:** implemented. The blank band between the conversation and
+the input — reserved since the first 12-row sketch for menus and
+streaming — is gone by construction, not by sizing.
+
+**The problem:** the managed region owned its rows whether or not it
+had content. Idle, the stream area rendered nothing over the whole
+space between the last committed block and the input — after AD-0015
+the band was nearly the entire screen. Fullscreen mode was the
+assumed remedy; it is also the wrong one.
+
+**The architecture (pi's, verified in pi-tui's source):** the
+scrollback is a flushed prefix of the transcript; the live area is
+its window. `scroll.rs` caches each finalized block in both
+representations — `block_segments` (scrollback truth, images real)
+and `block_rows` (viewport truth, images dropped; the managed region
+re-renders every frame and cannot host graphics). A flush cursor in
+segment space advances row-wise through text and atomically through
+images, pushing rows into the scrollback via the existing
+`segments_into` path exactly once, in order; an image at the very end
+over-flushes so it can never strand invisible. The window renders
+`[flushed..total)`, hugging the input — the conversation flows
+straight down to the composer, menus included. The old commit batch
+(`printed` watermark, per-block `insert_before` at turn end) is gone:
+folding happens incrementally per frame, and a finished reply simply
+stops being live instead of teleporting into scrollback.
+
+**The rulings folded in:** the viewport is the whole terminal (the
+AD-0015 correction above); menus render UNDER the input, pi-style
+(editor.js appends the list after the bottom border), taking the
+bottom edge while the status row yields for their brief lifetime —
+menus outrank status, user-ruled. A session switch refolds so the new
+history replays below the old conversation. A resize re-wraps
+unflushed blocks and snaps the cursor to the partial block's start:
+at most one block re-prints at the seam, once — pi's behavior too.
+
+**Named costs:** the inline height is frozen at startup (a mid-run
+resize keeps it, clamped — the documented ratatui constraint); the
+finalization of a reply adds its two padding rows with a one-row
+settle, as pi's spacing does; a resize mid-block may re-print a
+couple of seam rows once.
+

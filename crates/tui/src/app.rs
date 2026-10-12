@@ -124,10 +124,12 @@ pub struct App {
     /// The open `/resume` session picker. `Some` means it owns the
     /// keyboard and the whole live area above the status row.
     pub session_picker: Option<SessionPicker>,
-    /// How much of `messages` the scrollback already shows; the event
-    /// loop advances it. A session switch resets it so the new history
-    /// prints below the old conversation.
-    pub(crate) printed: usize,
+    /// The flushed-prefix transcript window (AD-0016): cached
+    /// display blocks, the fold pointer, and the flush cursor. The
+    /// event loop syncs it against `messages` and drains flush chunks
+    /// from it; a session switch refolds so the new history replays
+    /// below the old conversation.
+    pub(crate) scroll: crate::scroll::Scroll,
     /// An in-flight clipboard read (Ctrl-V). `Some` until the thread
     /// reports and `pump` applies the outcome — a second Ctrl-V while
     /// one is pending is ignored, not queued.
@@ -239,7 +241,7 @@ impl App {
             note: None,
             images,
             images_setting,
-            printed: 0,
+            scroll: crate::scroll::Scroll::new(),
             session_root: None,
         }
     }
@@ -881,7 +883,7 @@ impl App {
         self.session = Some(session);
         let (provider, model) = (self.status.provider.clone(), self.status.model.clone());
         self.rebuild_provider(&provider, &model, Some(cache_key));
-        self.printed = 0;
+        self.scroll.refold();
         self.queued = None;
     }
 
@@ -1474,8 +1476,9 @@ mod tests {
             matches!(&app.messages[0], Message::System(note) if note.contains("resumed 1 messages"))
         );
         assert_eq!(app.messages[1], Message::User("keep me".into()));
-        // The print cursor reset so the event loop redraws the new history.
-        assert_eq!(app.printed, 0);
+        // The window refolds so the event loop replays the new
+        // history below the old conversation.
+        assert_eq!(app.scroll.seen(), 0);
         // And the live append handle now points at the chosen file.
         let resumed = app.session.as_ref().expect("session handle").path();
         assert!(resumed.ends_with("0001_22222222-aaaa.jsonl"));

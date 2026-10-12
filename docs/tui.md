@@ -15,14 +15,16 @@ data), `status.rs` (status-bar facts), `ui.rs` (widgets/drawing),
 
 `run(provider, status, catalog, config, system_prompt, thinking) -> io::Result<()>`:
 
-- **Inline viewport, no alternate screen**: `TerminalOptions { viewport:
-  Viewport::Inline(12) }` — hi manages only the bottom 12 rows; the
-  transcript is printed *above* the viewport and owned by the terminal's
-  native scrollback from then on (native scroll/search/copy for free;
-  same approach as pi's "regular mode").
+- **Inline viewport, no alternate screen**: `Viewport::Inline(rows at
+  startup)` — the live region is the whole screen (the inline height is
+  frozen at construction, so a mid-run resize keeps the startup height,
+  clamped). The scrollback above is the flushed prefix of the transcript
+  (AD-0016, `scroll.rs`); the viewport shows its live tail down to the
+  input. Native scroll/search/copy for free; same approach as pi's
+  "regular mode".
 - `ratatui::try_init_with_options` enables raw mode and installs a panic hook
-  that restores the terminal; a welcome line is inserted before the viewport
-  (`ui::welcome_into`).
+  that restores the terminal; the welcome line seeds the transcript window
+  (`Scroll::new`) and flushes into scrollback as the conversation grows.
 - `event_loop` = the frame clock: wait up to **50ms** for a key, then draw
   and `pump` either way. Loop exits when `app.quit`.
 - Teardown order: `terminal.clear()` (wipe managed region) →
@@ -123,10 +125,11 @@ at ~8 lines on any screen), bottom-up via the pure `layout()` helper:
   picker, whichever is open, natural height from `App::menu_height()`) takes
   rows above the input; the streaming area keeps every row that remains —
   a reply fills the window, pi's live viewport is likewise the full
-  terminal. Scrollback above the viewport is not visible while the reply
-  streams; the committed block lands there on completion. Saturating
-  arithmetic: on absurdly short terminals the stream shrinks first, to
-  nothing; nothing panics.
+  terminal. Scrollback above the viewport is the transcript's flushed
+  prefix; the stream area is its window — the conversation flows down
+  to the input, never a blank band (AD-0016). Saturating arithmetic: on
+  absurdly short terminals the stream shrinks first, to nothing;
+  nothing panics.
 - `draw_input`: top/bottom rules only, no side walls (pi-style); the real
   terminal cursor parks **at the logical cursor** (`wrap::cursor_pos` maps the
   byte offset into wrapped row/column — mid-text while editing, AD-0014);
@@ -312,6 +315,25 @@ Oversized words (longer than the width) hard-split. Styled markdown wraps
 through `markdown.rs`'s `wrap_segments`, which mirrors these semantics while
 carrying styles across breaks. Tests pin the width semantics and the
 hard-split behavior.
+
+## scroll.rs — the flushed-prefix transcript window (AD-0016)
+
+The scrollback above the viewport holds a prefix of the finalized
+transcript; the live stream area shows the tail that follows it. Rows
+move from tail to scrollback exactly once, in order — text segments
+sub-flush row by row, image segments move atomically (a kitty image
+cannot be split across the seam), and an image at the very end
+over-flushes past the window target so it can never strand invisible.
+The seam stays invisible because both sides are projections of the
+same cached blocks: `block_segments` (scrollback, images real) and
+`block_rows` (viewport, images dropped — the managed region re-renders
+every frame and cannot host graphics). `App.scroll` carries the cache,
+the fold pointer (the old `printed`), and the flush cursor; a session
+switch refolds so the new history replays below the old conversation.
+A resize re-wraps unflushed blocks and snaps the cursor to the partial
+block's start — at most one block re-prints at the seam, once (pi's
+behavior too). The window hugs the input: a short conversation sits
+directly above the composer, not floating at the top of the screen.
 
 ## Extension-relevant seams (see decisions.md before touching)
 
