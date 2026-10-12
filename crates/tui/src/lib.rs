@@ -7,12 +7,17 @@
 mod app;
 mod commands;
 mod markdown;
+mod picker;
 mod theme;
 mod ui;
 mod wrap;
 
 pub mod catalog;
 pub mod status;
+
+/// The standalone session chooser (`--resume`); `/resume` reuses the
+/// helpers from `picker` inside the running TUI.
+pub use picker::pick_session;
 
 pub use catalog::Catalog;
 pub use status::Status;
@@ -91,8 +96,6 @@ pub fn run(
 }
 
 fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<()> {
-    let mut printed = 0;
-
     while !app.quit {
         // The frame clock: wait up to 50ms for a key, then continue
         // either way. `poll` (unlike the blocking `read` we had
@@ -114,8 +117,8 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io
         // blocks are derived from the message stream (a call pairs with
         // its result); a trailing unpaired call stays in the live area
         // as the pending execution until its result lands.
-        while printed < app.messages.len() {
-            let (blocks, pending) = ui::derive_blocks(&app.messages[printed..]);
+        while app.printed < app.messages.len() {
+            let (blocks, pending) = ui::derive_blocks(&app.messages[app.printed..]);
             if blocks.is_empty() {
                 break; // only the pending execution — wait for its result
             }
@@ -130,7 +133,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io
                 let height = rows.len().clamp(1, u16::MAX as usize) as u16;
                 terminal.insert_before(height, |buf| ui::rows_into(rows, buf))?;
             }
-            printed = app.messages.len() - usize::from(pending.is_some());
+            app.printed = app.messages.len() - usize::from(pending.is_some());
         }
 
         // Redraw the managed region (live streaming area + input).

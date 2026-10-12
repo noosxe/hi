@@ -54,6 +54,13 @@ pub struct SessionHeader {
     /// Thinking level, if one was set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
+    /// Display name (`--name` / `-n`), shown in the session picker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// For forks: the source file's absolute path. The id, cwd, and
+    /// timestamp of a forked session are its own; this is the lineage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
 }
 
 fn default_version() -> u32 {
@@ -81,12 +88,17 @@ pub struct Session {
 
 impl Session {
     /// Start a new session for the current project (cwd) and the given
-    /// provider/model/thinking snapshot.
-    pub fn start(provider: &str, model: &str, thinking: Option<&str>) -> Result<Session, String> {
+    /// provider/model/thinking snapshot, optionally named.
+    pub fn start(
+        provider: &str,
+        model: &str,
+        thinking: Option<&str>,
+        name: Option<&str>,
+    ) -> Result<Session, String> {
         let cwd = std::env::current_dir()
             .map_err(|err| format!("cannot determine current directory: {err}"))?;
         let root = sessions_dir().ok_or("could not determine data directory")?;
-        Self::start_in(&root, &cwd, provider, model, thinking)
+        Self::start_in(&root, &cwd, provider, model, thinking, name)
     }
 
     /// The path-independent half of [`start`], so tests can use temp
@@ -97,6 +109,7 @@ impl Session {
         provider: &str,
         model: &str,
         thinking: Option<&str>,
+        name: Option<&str>,
     ) -> Result<Session, String> {
         let created_at = epoch_millis();
         let header = SessionHeader {
@@ -107,6 +120,8 @@ impl Session {
             provider: provider.to_string(),
             model: model.to_string(),
             thinking: thinking.map(str::to_string),
+            name: name.map(str::to_string),
+            forked_from: None,
         };
         let dir = root.join(project_key(cwd));
         std::fs::create_dir_all(&dir)
@@ -138,6 +153,56 @@ impl Session {
             path: path.to_path_buf(),
             header,
         })
+    }
+
+    /// Copy an existing session into a fresh file for `cwd` — the
+    /// `--fork` path. The source is only ever read: the copy gets a new
+    /// id and timestamp, the forking directory in its header, a
+    /// `forkedFrom` pointer to the source, and re-serialized copies of
+    /// the messages. An explicit name wins over the inherited one.
+    pub fn fork_from(source: &Path, cwd: &Path, name: Option<&str>) -> Result<Session, String> {
+        let root = sessions_dir().ok_or("could not determine data directory")?;
+        Self::fork_from_in(&root, source, cwd, name)
+    }
+
+    /// The root-parameterized half of [`fork_from`].
+    pub fn fork_from_in(
+        root: &Path,
+        source: &Path,
+        cwd: &Path,
+        name: Option<&str>,
+    ) -> Result<Session, String> {
+        let loaded = load(source)?;
+        let created_at = epoch_millis();
+        let header = SessionHeader {
+            version: 1,
+            id: uuid::Uuid::new_v4().to_string(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            created_at,
+            provider: loaded.header.provider.clone(),
+            model: loaded.header.model.clone(),
+            thinking: loaded.header.thinking.clone(),
+            name: name.map(str::to_string).or(loaded.header.name.clone()),
+            forked_from: Some(source.to_string_lossy().into_owned()),
+        };
+        let dir = root.join(project_key(cwd));
+        std::fs::create_dir_all(&dir)
+            .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
+        let path = dir.join(format!("{created_at}_{}.jsonl", header.id));
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(&path)
+            .map_err(|err| format!("cannot create {}: {err}", path.display()))?;
+        writeln!(file, "{}", header_line(&header)?)
+            .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
+        for message in &loaded.messages {
+            writeln!(file, "{}", message_line(message)?)
+                .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
+        }
+        file.flush()
+            .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
+        Ok(Session { file, path, header })
     }
 
     /// The file this session writes to.
@@ -172,24 +237,137 @@ impl Session {
 /// session it can actually read. `Ok(None)` means nothing resumable.
 pub fn latest(cwd: &Path) -> Result<Option<LoadedSession>, String> {
     let root = sessions_dir().ok_or("could not determine data directory")?;
+    latest_in_root(&root, cwd)
+}
+
+/// The root-parameterized half of [`latest`] (the `settings.rs` pattern).
+pub fn latest_in_root(root: &Path, cwd: &Path) -> Result<Option<LoadedSession>, String> {
+    Ok(sessions_in_root(root, cwd)?
+        .into_iter()
+        .find_map(|summary| load(&summary.path).ok()))
+}
+
+/// A session file's selection facts: where it is, what its header says,
+/// when it was last written.
+#[derive(Debug, Clone)]
+pub struct SessionSummary {
+    pub path: PathBuf,
+    pub header: SessionHeader,
+    pub modified: SystemTime,
+}
+
+/// List this project's sessions, newest first — the `--resume` picker's
+/// menu. Files whose header won't parse are skipped, not fatal: one
+/// broken file must not hide the rest.
+pub fn sessions_in(cwd: &Path) -> Result<Vec<SessionSummary>, String> {
+    let root = sessions_dir().ok_or("could not determine data directory")?;
+    sessions_in_root(&root, cwd)
+}
+
+/// The root-parameterized half of [`sessions_in`].
+pub fn sessions_in_root(root: &Path, cwd: &Path) -> Result<Vec<SessionSummary>, String> {
     let dir = root.join(project_key(cwd));
     let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(None); // no directory yet — nothing to resume, not an error
+        return Ok(Vec::new()); // no directory yet — no sessions, not an error
     };
-    let mut files: Vec<(SystemTime, PathBuf)> = entries
+    let mut summaries: Vec<SessionSummary> = entries
         .filter_map(|entry| {
             let path = entry.ok()?.path();
+            if path.extension()?.to_str()? != "jsonl" {
+                return None;
+            }
             let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
-            (path.extension()?.to_str()? == "jsonl").then_some((modified, path))
+            Some(SessionSummary {
+                header: read_summary_header(&path)?,
+                path,
+                modified,
+            })
         })
         .collect();
-    files.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
-    for (_, path) in files {
-        if let Ok(loaded) = load(&path) {
-            return Ok(Some(loaded));
+    summaries.sort_by_key(|summary| std::cmp::Reverse(summary.modified));
+    Ok(summaries)
+}
+
+/// List every project's sessions, newest first — the global half of
+/// `--session <id>` matching.
+pub fn sessions_all() -> Result<Vec<SessionSummary>, String> {
+    let root = sessions_dir().ok_or("could not determine data directory")?;
+    sessions_all_root(&root)
+}
+
+/// The root-parameterized half of [`sessions_all`].
+pub fn sessions_all_root(root: &Path) -> Result<Vec<SessionSummary>, String> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Ok(Vec::new());
+    };
+    let mut summaries = Vec::new();
+    for entry in entries.flatten() {
+        if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            summaries.extend(sessions_in_root(root, &project_dir_of(&entry.path()))?);
         }
     }
-    Ok(None)
+    summaries.sort_by_key(|summary| std::cmp::Reverse(summary.modified));
+    Ok(summaries)
+}
+
+/// Invert [`project_key`]: the encoded directory component back to the
+/// path it names (best-effort — a decoded cwd is display information).
+fn project_dir_of(dir: &Path) -> PathBuf {
+    let text = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    PathBuf::from(text.trim_matches('-').replace('-', "/"))
+}
+
+/// Where a `--session` / `--fork` argument points. Path-shaped
+/// arguments stay paths; ids are matched in the current project first,
+/// then across every project.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionRef {
+    /// A session for the current project (or an explicit file path).
+    Local(PathBuf),
+    /// A session from another project — forking territory.
+    Global { path: PathBuf, cwd: String },
+    /// No path or id matches, here or anywhere.
+    NotFound,
+}
+
+/// Resolve a `--session` / `--fork` argument: path shape wins, then
+/// exact id, then id prefix in this project, then exact/prefix across
+/// all projects (pi's order).
+pub fn resolve(cwd: &Path, arg: &str) -> Result<SessionRef, String> {
+    let root = sessions_dir().ok_or("could not determine data directory")?;
+    resolve_in_root(&root, cwd, arg)
+}
+
+/// The root-parameterized half of [`resolve`].
+pub fn resolve_in_root(root: &Path, cwd: &Path, arg: &str) -> Result<SessionRef, String> {
+    // Path-shaped: `/x/y.jsonl`, `sub/dir`, `x.jsonl` — opened relative
+    // to the process cwd, existence checked by the opener.
+    if arg.contains('/') || arg.contains('\\') || arg.ends_with(".jsonl") {
+        return Ok(SessionRef::Local(PathBuf::from(arg)));
+    }
+    let local = sessions_in_root(root, cwd)?;
+    if let Some(hit) = local
+        .iter()
+        .find(|s| s.header.id == arg)
+        .or_else(|| local.iter().find(|s| s.header.id.starts_with(arg)))
+    {
+        return Ok(SessionRef::Local(hit.path.clone()));
+    }
+    let all = sessions_all_root(root)?;
+    if let Some(hit) = all
+        .iter()
+        .find(|s| s.header.id == arg)
+        .or_else(|| all.iter().find(|s| s.header.id.starts_with(arg)))
+    {
+        return Ok(SessionRef::Global {
+            path: hit.path.clone(),
+            cwd: hit.header.cwd.clone(),
+        });
+    }
+    Ok(SessionRef::NotFound)
 }
 
 /// Parse one session file: header line, then one message per line.
@@ -251,7 +429,7 @@ pub fn sessions_dir() -> Option<PathBuf> {
 /// Encoded into one filesystem-safe component (no nested directories),
 /// unique per absolute path, and stable across machines with the same
 /// layout — which is exactly what a synced home directory needs.
-pub(crate) fn project_key(cwd: &Path) -> String {
+pub fn project_key(cwd: &Path) -> String {
     let text = cwd.to_string_lossy();
     let trimmed = text.strip_prefix('/').unwrap_or(&text);
     format!("--{}--", trimmed.replace('/', "-"))
@@ -309,6 +487,17 @@ fn read_header(path: &Path) -> Result<SessionHeader, String> {
     load(path).map(|loaded| loaded.header)
 }
 
+/// Parse just the header line — the listing path, which never needs the
+/// transcript bodies. `None` for anything unreadable or headerless.
+fn read_summary_header(path: &Path) -> Option<SessionHeader> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let first = raw.lines().map(str::trim).find(|line| !line.is_empty())?;
+    match parse_line(first) {
+        Ok(Entry::Header(header)) => Some(header),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,7 +551,8 @@ mod tests {
         let cwd = Path::new("/tmp/proj");
         let messages = sample_messages();
 
-        let mut session = Session::start_in(&root, cwd, "zai", "glm-5.3", Some("high")).unwrap();
+        let mut session =
+            Session::start_in(&root, cwd, "zai", "glm-5.3", Some("high"), None).unwrap();
         session.append(&messages).unwrap();
         let path = session.path().to_path_buf();
 
@@ -395,7 +585,8 @@ mod tests {
     #[test]
     fn lines_are_flat_camel_case_json() {
         let root = temp_root("format");
-        let mut session = Session::start_in(&root, Path::new("/p"), "prov", "mod", None).unwrap();
+        let mut session =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
         session
             .append(&[Message::ToolResult(ToolResult {
                 call_id: "c1".into(),
@@ -423,7 +614,8 @@ mod tests {
     #[test]
     fn torn_final_line_is_tolerated_mid_file_line_is_not() {
         let root = temp_root("torn");
-        let mut session = Session::start_in(&root, Path::new("/p"), "prov", "mod", None).unwrap();
+        let mut session =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
         session.append(&[Message::User("survives".into())]).unwrap();
         let path = session.path().to_path_buf();
 
@@ -446,18 +638,19 @@ mod tests {
     fn latest_picks_the_newest_readable_session_for_the_project() {
         let root = temp_root("latest");
         let cwd = Path::new("/tmp/proj");
-        let mut first = Session::start_in(&root, cwd, "p", "old", None).unwrap();
+        let mut first = Session::start_in(&root, cwd, "p", "old", None, None).unwrap();
         first.append(&[Message::User("first".into())]).unwrap();
         // A few milliseconds later → later mtime, later filename.
         std::thread::sleep(std::time::Duration::from_millis(5));
-        let mut second = Session::start_in(&root, cwd, "p", "new", None).unwrap();
+        let mut second = Session::start_in(&root, cwd, "p", "new", None, None).unwrap();
         second.append(&[Message::User("second".into())]).unwrap();
 
         // A different project's session must not interfere.
-        let mut other = Session::start_in(&root, Path::new("/tmp/other"), "p", "o", None).unwrap();
+        let mut other =
+            Session::start_in(&root, Path::new("/tmp/other"), "p", "o", None, None).unwrap();
         other.append(&[Message::User("elsewhere".into())]).unwrap();
 
-        let loaded = latest_for_root(&root, cwd).unwrap().unwrap();
+        let loaded = latest_in_root(&root, cwd).unwrap().unwrap();
         assert_eq!(loaded.header.model, "new");
         assert_eq!(loaded.messages, vec![Message::User("second".into())]);
     }
@@ -466,32 +659,154 @@ mod tests {
     fn latest_with_no_sessions_is_none_not_an_error() {
         let root = temp_root("empty");
         assert!(
-            latest_for_root(&root, Path::new("/nowhere"))
+            latest_in_root(&root, Path::new("/nowhere"))
                 .unwrap()
                 .is_none()
         );
     }
 
-    /// `latest` against a chosen root — the testable half (the real
-    /// `latest` derives the root from the environment).
-    fn latest_for_root(root: &Path, cwd: &Path) -> Result<Option<LoadedSession>, String> {
-        let dir = root.join(project_key(cwd));
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return Ok(None);
-        };
-        let mut files: Vec<(SystemTime, PathBuf)> = entries
-            .filter_map(|entry| {
-                let path = entry.ok()?.path();
-                let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
-                (path.extension()?.to_str()? == "jsonl").then_some((modified, path))
+    #[test]
+    fn sessions_in_lists_newest_first_and_skips_unreadable_files() {
+        let root = temp_root("list");
+        let cwd = Path::new("/tmp/proj");
+        let mut first = Session::start_in(&root, cwd, "p", "old", None, None).unwrap();
+        first.append(&[Message::User("first".into())]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let mut second = Session::start_in(&root, cwd, "p", "new", None, None).unwrap();
+        second.append(&[Message::User("second".into())]).unwrap();
+        // Garbage sharing the extension must not break the listing.
+        std::fs::write(
+            root.join(project_key(cwd)).join("garbage.jsonl"),
+            "not json",
+        )
+        .unwrap();
+
+        let listed = sessions_in_root(&root, cwd).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].header.model, "new");
+        assert_eq!(listed[1].header.model, "old");
+        assert!(listed[0].modified >= listed[1].modified);
+        assert_eq!(listed[0].path, second.path());
+        // Empty project: a list, not an error.
+        assert!(
+            sessions_in_root(&root, Path::new("/nowhere"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn resolve_prefers_path_then_local_id_then_global() {
+        let root = temp_root("resolve");
+        let here = Path::new("/tmp/proj");
+        let there = Path::new("/tmp/other");
+        let mut local = Session::start_in(&root, here, "p", "m", None, None).unwrap();
+        local.append(&[Message::User("local".into())]).unwrap();
+        let mut away = Session::start_in(&root, there, "p", "m", None, None).unwrap();
+        away.append(&[Message::User("away".into())]).unwrap();
+        let local_id = local.header().id.clone();
+        let away_id = away.header().id.clone();
+
+        // Path shape stays a path, un-exist-checked (the opener reports).
+        assert_eq!(
+            resolve_in_root(&root, here, "some/where.jsonl"),
+            Ok(SessionRef::Local(PathBuf::from("some/where.jsonl")))
+        );
+        // Exact and prefix ids match within the project first.
+        assert_eq!(
+            resolve_in_root(&root, here, &local_id),
+            Ok(SessionRef::Local(local.path().to_path_buf()))
+        );
+        assert_eq!(
+            resolve_in_root(&root, here, &local_id[..8]),
+            Ok(SessionRef::Local(local.path().to_path_buf()))
+        );
+        // Other projects come back as Global, carrying their cwd.
+        assert_eq!(
+            resolve_in_root(&root, here, &away_id),
+            Ok(SessionRef::Global {
+                path: away.path().to_path_buf(),
+                cwd: "/tmp/other".into(),
             })
-            .collect();
-        files.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
-        for (_, path) in files {
-            if let Ok(loaded) = load(&path) {
-                return Ok(Some(loaded));
-            }
-        }
-        Ok(None)
+        );
+        assert_eq!(
+            resolve_in_root(&root, here, &away_id[..8]),
+            Ok(SessionRef::Global {
+                path: away.path().to_path_buf(),
+                cwd: "/tmp/other".into(),
+            })
+        );
+        assert_eq!(
+            resolve_in_root(&root, here, "zzz"),
+            Ok(SessionRef::NotFound)
+        );
+    }
+
+    #[test]
+    fn fork_copies_messages_and_never_touches_the_source() {
+        let root = temp_root("fork");
+        let origin = Path::new("/tmp/origin");
+        let mut source = Session::start_in(
+            &root,
+            origin,
+            "prov",
+            "glm",
+            Some("high"),
+            Some("origin name"),
+        )
+        .unwrap();
+        source.append(&sample_messages()).unwrap();
+        let source_path = source.path().to_path_buf();
+        let before = std::fs::read_to_string(&source_path).unwrap();
+
+        let fork_cwd = Path::new("/tmp/forked");
+        let session = Session::fork_from_in(&root, &source_path, fork_cwd, None).unwrap();
+        assert_eq!(
+            before,
+            std::fs::read_to_string(&source_path).unwrap(),
+            "the source file is only ever read"
+        );
+
+        let header = session.header();
+        assert_ne!(header.id, source.header().id);
+        assert_eq!(header.cwd, "/tmp/forked");
+        assert_eq!(
+            header.forked_from.as_deref(),
+            Some(source_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(header.name.as_deref(), Some("origin name"));
+        assert_eq!(header.provider, "prov");
+        assert_eq!(header.thinking.as_deref(), Some("high"));
+
+        let loaded = load(session.path()).unwrap();
+        assert_eq!(loaded.messages, sample_messages());
+
+        // An explicit name wins over the inherited one.
+        let renamed = Session::fork_from_in(&root, &source_path, fork_cwd, Some("mine")).unwrap();
+        assert_eq!(renamed.header().name.as_deref(), Some("mine"));
+        assert_eq!(
+            renamed.header().forked_from.as_deref(),
+            Some(source_path.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn name_and_forked_from_are_optional_camel_case_fields() {
+        let root = temp_root("names");
+        let session =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, Some("my work"))
+                .unwrap();
+        let raw = std::fs::read_to_string(session.path()).unwrap();
+        let header: serde_json::Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+        assert_eq!(header["name"], "my work");
+        assert!(header.get("forkedFrom").is_none());
+
+        // Headers written before the fields existed still parse.
+        let legacy: SessionHeader = serde_json::from_str(
+            r#"{"type":"session","version":1,"id":"i","cwd":"/p","createdAt":1,"provider":"x","model":"y"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.name, None);
+        assert_eq!(legacy.forked_from, None);
     }
 }

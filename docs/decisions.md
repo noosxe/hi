@@ -208,3 +208,40 @@ sites (`THEME.fg(Fg::Heading)`), with the single dark palette being pi's
   blocks (pi uses cli-highlight), collapsed args preview sorts keys (serde
   maps vs marked's source order), no expand keybind on the preview marker
   (a fullscreen-mode feature), no OSC 8 hyperlinks or OSC 133 scroll zones.
+
+---
+
+## AD-0006 — session selection: core facts, CLI policy (2026-10-14)
+
+**Status:** implemented (issue #22, rulings ①–⑧ recorded in the issue).
+
+**The decision:** selection splits by crate. `hi-core::session` returns
+*facts* — `SessionSummary` listings (`sessions_in`/`sessions_all`, mtime
+newest, unreadable files skipped), argument resolution
+(`resolve → Local | Global { path, cwd } | NotFound`, pi's order:
+path shape, exact id, id prefix — project first, then global), and
+`Session::fork_from` (source read-only; copy gets fresh id + `createdAt`,
+the forking directory in its header, and a `forkedFrom` pointer to the
+source path). The CLI owns *policy*: which flag wins, what Esc means,
+when a cross-project hit is a prompt (interactive y/N, pi's) versus a hard
+error (`--print`, pointing at `--fork`).
+
+- **Headless determinism over pi's rough edge**: pi's print mode starts
+  the interactive picker with no guard. hi refuses `--resume` under
+  `-p` — `--session <id|path>` and `--continue` are the headless
+  selectors. Deliberate divergence, recorded.
+- **Two new optional header fields**, both camelCase and skipped when
+  absent (old builds read new files): `name` (`--name`/`-n`, shown in
+  the picker; fresh starts and forks only — renaming existing files is
+  future work) and `forkedFrom`. pi stores the name as a `session_info`
+  *entry* because its files are append-only trees; hi's header is
+  written once at creation, so fields are simpler.
+- **The picker lives in hi-tui over shared composition**
+  (`picker::picker_lines`): the standalone `--resume` chooser owns a
+  short terminal before the main TUI (pi's startup-TUI pattern);
+  `/resume` reuses the same lines in-session and swaps the live session
+  by resetting the print cursor — the previous conversation stays in
+  scrollback, terminal-owned, exactly like every other finalized block.
+- **Flag surface** mirrors pi: `-r/--resume`, `--session`, `--fork`,
+  `-n/--name`, mutually exclusive per pi's conflict matrix; `--name`
+  pairs with fresh starts and forks only.
