@@ -70,7 +70,9 @@ otherwise (interactive):
        entry.list_model_ids().ok() non-empty; failures/empty silently skipped
        (same 10s discovery timeout as --list-models)
   6. open_session per flags — hard errors for selection misses; disk
-       failures degrade to a stderr warning:
+       failures degrade to a stderr warning. Afterwards
+       stamp_session_cache_key re-stamps the provider with the session
+       id (the prompt-cache routing key, AD-0007):
        --fork      → session::resolve + Session::fork_from + load copy
        --session   → resolve → resume (Local) | fork prompt (Global,
                      interactive) | refusal (Global, --print)

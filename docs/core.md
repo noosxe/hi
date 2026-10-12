@@ -172,11 +172,41 @@ Construction chain:
 - `.with_system_prompt(Option<String>)` / `.with_thinking_level(Option<ThinkingLevel>)`
   — builder-style, re-applied by the TUI whenever the model picker rebuilds
   the provider.
+- `.with_telemetry(bool)` / `.with_cache_key(Option<String>)` — the
+  wire-identity stamps. Applied at startup (`resolve_target`, then
+  `stamp_session_cache_key` once the session exists) and re-applied by
+  every TUI provider rebuild, so a `/model` or `/resume` switch never
+  drops them.
+
+Wire identity (see also [decisions.md](decisions.md) AD-0007):
+- **`User-Agent: hi/<version> (<os>; <arch>)` rides on every outbound
+  request** — chat and discovery alike (`user_agent()`). Providers see
+  `hi`, never a bare HTTP library. Never gated.
+- **Attribution headers are opt-in**: settings `telemetry: true` (or
+  `HI_TELEMETRY=1`) adds `HTTP-Referer: https://github.com/noosxe/hi` +
+  `X-Title: hi` — **only** toward `openrouter.ai` (host-matched exactly,
+  `is_openrouter`), the one endpoint family that displays them. No
+  analytics exist; this is the whole telemetry surface.
+- **Prompt-cache affinity**: with an open session, the body carries
+  `prompt_cache_key: <session id>` and OpenRouter additionally gets
+  `x-session-id` (`wire_headers()`). The session id is the natural key —
+  stable across `--continue`/`--resume`/`--session`, following `/resume`
+  switches (`rebuild_provider` re-stamps), fresh on forks.
+- **Prefix stability is the caching lever** — locked by the test
+  `consecutive_turns_keep_a_byte_stable_prefix`: the system prompt is
+  constant per session, tool definitions serialize in registry order
+  once, and history is append-only, so each turn's payload reuses the
+  previous turn's bytes and servers can cache-hit the whole prefix.
+  Economics (OpenAI-compat): prefixes from ~1,024 tokens cache
+  automatically, entries live ~5–30 min refreshed by use, cached reads
+  bill at a fraction of input price (0.1× on OpenAI), and cached tokens
+  still count toward rate limits.
 
 Wire behavior:
 - Turns: `POST {baseUrl}/chat/completions`, body `{model, messages,
-  stream: true}`, optional leading `role: "system"` message from the resolved
-  system prompt. `Authorization: Bearer <key>` **only when a key resolves
+  stream: true}` (plus the optional cache key above), optional leading
+  `role: "system"` message from the resolved system prompt.
+  `Authorization: Bearer <key>` **only when a key resolves
   non-empty** (`authorized()` — some local servers reject the header).
 - Thinking kwargs: when the session level has an entry in the model's
   `thinkingLevelMap`, that JSON object is merged **top-level** into the

@@ -90,6 +90,14 @@ A credential *source*, not necessarily a literal:
 - `thinking` reaches the wire only through the selected model's
   `thinkingLevelMap`; the active level is shown in the status row
   (`(provider) model · thinking:high`).
+- **Telemetry is opt-in, and it is the only telemetry.** hi sends no
+  analytics, ever. The always-on identifier is the honest
+  `User-Agent: hi/<version> (<os>; <arch>)` on provider requests.
+  `telemetry: true` additionally sends attribution headers
+  (`HTTP-Referer`, `X-Title`) — and only toward `openrouter.ai`, the
+  endpoint family that displays them in its dashboard. The
+  `HI_TELEMETRY` env var overrides the file when set (`1`/`true`/`yes`
+  on, anything else off; pi's `PI_TELEMETRY` pattern).
 
 ## System prompt files
 

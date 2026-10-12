@@ -14,11 +14,11 @@ cargo run            # hi --mock needs no config
 
 CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI).
 
-Current count: **201 `#[test]` functions** (the README's count gets refreshed in passing;
+Current count: **208 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 55
 (grep 8, walk 7, truncate 7, read 7, edit 6, bundle 5, bash 5, find 4, write 3, ls 3),
-markdown 19, selection 14, app 17, openai 13, ui 12, agent 9, status 8, session 10,
-system_prompt 6, wrap 6, settings 5, headless 5, picker 4, commands 4, config 4,
+markdown 19, selection 14, app 17, openai 19, ui 12, agent 9, status 8, session 10,
+system_prompt 6, wrap 6, settings 7, headless 5, picker 4, commands 4, config 4,
 theme 3, mock 2, catalog 2, thinking 2, cli 1.
 ## The central tool: `FakeApi` (`crates/core/src/test_support.rs`, cfg(test))
 
@@ -91,6 +91,7 @@ assert!(api.first_request().contains("\"stream\":true"));
 | picker rows (age buckets, name-or-id, preview), filter matching, line composition incl. selection marker and empty-filter note | `tui/picker.rs` |
 | `/resume` opens/filters/switches, Esc closes untouched, refused mid-turn | `tui/app.rs` |
 | selection flags' clap conflict matrix (pi's rules; `--name` pairs with start/fork only) | `cli/main.rs` |
+| wire identity: UA format + presence on chat/discovery, gated attribution (host-exact OpenRouter), cache-key body field, byte-stable prefix across turns; `HI_TELEMETRY`-beats-setting resolution | `core/openai.rs`, `core/settings.rs` |
 | slash matching, exact dispatch, registry hygiene | `tui/commands.rs` |
 | catalog flattening, empty catalog | `tui/catalog.rs` |
 | queueing, Esc-cancel + queue restore, completion keys, unknown commands | `tui/app.rs` |

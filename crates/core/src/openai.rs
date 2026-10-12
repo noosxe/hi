@@ -52,6 +52,14 @@ pub struct OpenAiCompatProvider {
     /// Tools the model may call. An empty registry omits the request's
     /// `tools` field entirely (see `ChatRequest`).
     tools: Arc<ToolRegistry>,
+    /// The user's attribution opt-in (the `telemetry` setting). Gates
+    /// the extra attribution headers only — the honest `User-Agent`
+    /// rides on every request regardless.
+    telemetry: bool,
+    /// Prompt-cache routing key: the open session's id. Turns sharing
+    /// a key and a stable prefix route to the same server-side cache.
+    /// `None` (no session) sends nothing.
+    cache_key: Option<String>,
 }
 
 impl std::fmt::Debug for OpenAiCompatProvider {
@@ -90,6 +98,8 @@ impl OpenAiCompatProvider {
             system_prompt: None,
             thinking_level: None,
             tools: Arc::new(ToolRegistry::new()),
+            telemetry: false,
+            cache_key: None,
         }
     }
 
@@ -109,6 +119,8 @@ impl OpenAiCompatProvider {
             system_prompt: None,
             thinking_level: None,
             tools: Arc::new(ToolRegistry::new()),
+            telemetry: false,
+            cache_key: None,
         }
     }
 
@@ -130,6 +142,22 @@ impl OpenAiCompatProvider {
     /// behavior to not calling this.
     pub fn with_tools(mut self, tools: Arc<ToolRegistry>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    /// Stamp the attribution opt-in (the `telemetry` setting). Only the
+    /// extra attribution headers are gated — the `User-Agent` rides
+    /// always. Defaults to off, so the honest identity never carries
+    /// anything the user did not ask for.
+    pub fn with_telemetry(mut self, telemetry: bool) -> Self {
+        self.telemetry = telemetry;
+        self
+    }
+
+    /// Attach the prompt-cache routing key — the open session's id.
+    /// `None` (no session) sends no key and no affinity header.
+    pub fn with_cache_key(mut self, cache_key: Option<String>) -> Self {
+        self.cache_key = cache_key;
         self
     }
     /// The current model's `thinkingLevelMap`, if it has one.
@@ -159,6 +187,25 @@ impl OpenAiCompatProvider {
         format!("{}/{}", self.base_url.trim_end_matches('/'), path)
     }
 
+    /// Headers identifying hi on the wire. The `User-Agent` always
+    /// rides — honest product/version/platform, never gated. The
+    /// attribution pair only when telemetry is opted in *and* the
+    /// endpoint displays it (OpenRouter); the session-affinity header
+    /// only when a session is open. Both extras target OpenRouter
+    /// only, matched by host the way pi matches attribution hosts.
+    fn wire_headers(&self) -> Vec<(&'static str, String)> {
+        let openrouter = is_openrouter(&self.base_url);
+        let mut headers = vec![("User-Agent", user_agent())];
+        if self.telemetry && openrouter {
+            headers.push(("HTTP-Referer", "https://github.com/noosxe/hi".into()));
+            headers.push(("X-Title", "hi".into()));
+        }
+        if openrouter && let Some(key) = &self.cache_key {
+            headers.push(("x-session-id", key.clone()));
+        }
+        headers
+    }
+
     /// Attach the bearer token when one is configured — and only
     /// then. Some local servers reject requests that carry an
     /// unexpected `Authorization` header. Generic over ureq's
@@ -186,6 +233,7 @@ impl OpenAiCompatProvider {
             messages,
             stream: true,
             tools: self.tools.definitions(),
+            prompt_cache_key: self.cache_key.as_deref(),
         };
         let mut payload = serde_json::to_value(&chat_request)
             .map_err(|err| format!("cannot serialize request: {err}"))?;
@@ -203,8 +251,11 @@ impl OpenAiCompatProvider {
             }
         }
         let url = self.endpoint("chat/completions");
-        let response = self
-            .authorized(self.agent.post(&url))
+        let mut request = self.authorized(self.agent.post(&url));
+        for (name, value) in self.wire_headers() {
+            request = request.header(name, value);
+        }
+        let response = request
             .send_json(&payload)
             .map_err(|err| describe("chat request", err))?;
 
@@ -268,6 +319,30 @@ fn bounded_agent() -> ureq::Agent {
 /// `OpenAiCompatProvider` exists. Overall 10s timeout: discovery runs
 /// at startup/listing time, where hanging forever would be worse than
 /// failing. (Turn streams get no timeout — Esc cancels those.)
+/// The honest wire identity: product, version, platform. Providers
+/// see `hi`, not a bare HTTP library.
+fn user_agent() -> String {
+    format!(
+        "hi/{} ({}; {})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
+
+/// Hostname equality against OpenRouter: scheme stripped, everything
+/// from the first path segment or port off. `openrouter.ai.evil.example`
+/// does not match.
+fn is_openrouter(base_url: &str) -> bool {
+    let rest = base_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base_url);
+    rest.split(['/', ':'])
+        .next()
+        .is_some_and(|host| host.eq_ignore_ascii_case("openrouter.ai"))
+}
+
 pub(crate) fn discover_model_ids(
     base_url: &str,
     api_key: Option<&str>,
@@ -277,7 +352,8 @@ pub(crate) fn discover_model_ids(
         .get(&url)
         .config()
         .timeout_global(Some(Duration::from_secs(10)))
-        .build();
+        .build()
+        .header("User-Agent", user_agent());
     let request = match api_key {
         Some(key) => request.header("Authorization", format!("Bearer {key}")),
         None => request,
@@ -395,6 +471,10 @@ struct ChatRequest<'a> {
     /// session without tool support.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<serde_json::Value>,
+    /// Prompt-cache routing key — the session id. Omitted without a
+    /// session, so `--no-session` runs look exactly like before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<&'a str>,
 }
 
 /// One message on the wire. The optional fields make one struct cover
@@ -731,6 +811,12 @@ mod tests {
         assert!(request.starts_with("GET /v1/models"));
         // No key configured — no Authorization header may be sent.
         assert!(!request.to_ascii_lowercase().contains("authorization:"));
+        // Discovery identifies hi too — not the bare HTTP library.
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains(&format!("user-agent: hi/{}", env!("CARGO_PKG_VERSION")))
+        );
     }
 
     #[test]
@@ -999,5 +1085,179 @@ mod tests {
             provider.list_models().unwrap(),
             vec!["glm-4.6".to_string(), "glm-5.3".to_string()]
         );
+    }
+
+    // ---- wire identity: honest UA always, gated extras, cache key ----
+
+    fn expected_user_agent() -> String {
+        format!(
+            "hi/{} ({}; {})",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    }
+
+    #[test]
+    fn wire_headers_are_honest_and_extras_are_gated() {
+        let openrouter = OpenAiCompatProvider::new("https://openrouter.ai/api/v1", None, "m");
+        // Default: only the User-Agent. Honest, nothing else.
+        assert_eq!(
+            openrouter.wire_headers(),
+            vec![("User-Agent", expected_user_agent())]
+        );
+        // Telemetry opted in, OpenRouter endpoint: attribution rides.
+        let attributed = OpenAiCompatProvider::new("https://openrouter.ai/api/v1", None, "m")
+            .with_telemetry(true)
+            .with_cache_key(Some("sess".into()));
+        assert_eq!(
+            attributed.wire_headers(),
+            vec![
+                ("User-Agent", expected_user_agent()),
+                ("HTTP-Referer", "https://github.com/noosxe/hi".into()),
+                ("X-Title", "hi".into()),
+                ("x-session-id", "sess".into()),
+            ]
+        );
+        // Telemetry on, other endpoint: no attribution, but the cache
+        // affinity is OpenRouter-only too — other hosts get the bare UA.
+        let elsewhere = OpenAiCompatProvider::new("http://127.0.0.1:8080/v1", None, "m")
+            .with_telemetry(true)
+            .with_cache_key(Some("sess".into()));
+        assert_eq!(
+            elsewhere.wire_headers(),
+            vec![("User-Agent", expected_user_agent())]
+        );
+        // Telemetry off, OpenRouter endpoint: no attribution even so,
+        // and the session header is routing (not attribution) — still
+        // gated to the OpenRouter host only.
+        let unattributed = OpenAiCompatProvider::new("https://openrouter.ai/api/v1", None, "m")
+            .with_cache_key(Some("sess".into()));
+        assert_eq!(
+            unattributed.wire_headers(),
+            vec![
+                ("User-Agent", expected_user_agent()),
+                ("x-session-id", "sess".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn is_openrouter_matches_the_host_exactly() {
+        assert!(is_openrouter("https://openrouter.ai/api/v1"));
+        assert!(is_openrouter("http://OPENROUTER.AI"));
+        assert!(is_openrouter("openrouter.ai/v1")); // scheme-less still parses
+        // A host merely ending in the name is not the host.
+        assert!(!is_openrouter("https://openrouter.ai.evil.example/v1"));
+        assert!(!is_openrouter("https://example.com/v1"));
+    }
+
+    #[test]
+    fn user_agent_rides_on_chat_requests() {
+        let api = FakeApi::start(sse_response(&[
+            "{\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}",
+            "[DONE]",
+        ]));
+        let provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "m");
+        // Drain: the turn thread must finish before the request is read.
+        let _: Vec<Event> = spawn_turn(Arc::new(provider), &[Message::User("hi".into())])
+            .iter()
+            .collect();
+        assert!(
+            api.first_request()
+                .to_ascii_lowercase()
+                .contains(&format!("user-agent: {}", expected_user_agent()))
+        );
+    }
+
+    #[test]
+    fn cache_key_rides_the_body_only_when_a_session_is_open() {
+        let frames = sse_response(&[
+            "{\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}",
+            "[DONE]",
+        ]);
+        // With a session: the body names the cache key.
+        let api = FakeApi::start(frames.clone());
+        let provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "m")
+            .with_cache_key(Some("11111111-2222".into()));
+        let _: Vec<Event> = spawn_turn(Arc::new(provider), &[Message::User("q".into())])
+            .iter()
+            .collect();
+        assert!(
+            compact_body(api.first_request()).contains("\"prompt_cache_key\":\"11111111-2222\"")
+        );
+
+        // Without one: the field is absent entirely.
+        let api = FakeApi::start(frames);
+        let provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "m");
+        let _: Vec<Event> = spawn_turn(Arc::new(provider), &[Message::User("q".into())])
+            .iter()
+            .collect();
+        assert!(!compact_body(api.first_request()).contains("prompt_cache_key"));
+    }
+
+    /// Pull the JSON body out of a recorded request and collapse it for
+    /// substring checks.
+    fn compact_body(request: String) -> String {
+        let body = request.split("\r\n\r\n").nth(1).unwrap_or(&request);
+        body.split_whitespace().collect()
+    }
+
+    #[test]
+    fn consecutive_turns_keep_a_byte_stable_prefix() {
+        // The actual caching lever: OpenAI-compat caches match by
+        // prefix, so turn N+1's system message, tool definitions, and
+        // earlier history must serialize exactly as turn N sent them.
+        let frames = |tail: &str| {
+            sse_response(&[
+                "{\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}",
+                &format!("{{\"choices\":[{{\"delta\":{{\"content\":\"{tail}\"}}}}]}}"),
+                "[DONE]",
+            ])
+        };
+        let api = FakeApi::start_sequence(vec![frames("one"), frames("two")]);
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).unwrap();
+        let provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "m")
+            .with_system_prompt(Some("stable system".into()))
+            .with_tools(Arc::new(registry));
+
+        let turn1 = vec![Message::User("q1".into())];
+        let _: Vec<Event> = spawn_turn(Arc::new(provider.clone()), &turn1)
+            .iter()
+            .collect();
+        let turn2 = vec![
+            Message::User("q1".into()),
+            Message::Assistant("one".into()),
+            Message::User("q2".into()),
+        ];
+        let _: Vec<Event> = spawn_turn(Arc::new(provider), &turn2).iter().collect();
+
+        let parse = |request: String| -> serde_json::Value {
+            let body = request.split("\r\n\r\n").nth(1).unwrap_or(&request);
+            serde_json::from_str(body).expect("recorded body is JSON")
+        };
+        let first = parse(api.request(0).unwrap());
+        let second = parse(api.request(1).unwrap());
+        // The whole first payload is a prefix of the second's.
+        assert_eq!(second["messages"][0], first["messages"][0]); // system
+        assert_eq!(second["messages"][1], first["messages"][1]); // q1
+        assert_eq!(second["tools"], first["tools"]);
+        // Only the tail is new: turn 1's reply, then the follow-up.
+        let first_len = first["messages"].as_array().unwrap().len();
+        assert_eq!(first_len, 2);
+        assert_eq!(
+            second["messages"][first_len],
+            serde_json::json!({
+                "role": "assistant", "content": "one"
+            })
+        );
+        assert_eq!(
+            second["messages"][first_len + 1],
+            serde_json::json!({
+                "role": "user", "content": "q2"
+            })
+        );
+        assert_eq!(second["messages"].as_array().unwrap().len(), first_len + 2);
     }
 }

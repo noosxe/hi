@@ -29,6 +29,23 @@ pub struct Settings {
     /// overrides per run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_tools: Option<String>,
+    /// Attribution opt-in. When true, hi sends provider attribution
+    /// headers (OpenRouter's `HTTP-Referer`/`X-Title`) so usage shows
+    /// up as hi in provider dashboards. The honest `User-Agent` rides
+    /// regardless; hi sends no analytics ever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<bool>,
+}
+
+/// The effective telemetry choice: `HI_TELEMETRY` wins when set (pi's
+/// `PI_TELEMETRY` pattern), accepting `1`/`true`/`yes` as on and
+/// anything else — including garbage — as off; otherwise the setting
+/// decides, defaulting to off.
+pub fn resolve_telemetry(setting: Option<bool>, env: Option<&str>) -> bool {
+    match env {
+        Some(raw) => matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes"),
+        None => setting.unwrap_or(false),
+    }
 }
 
 /// The expected path of `settings.json` next to `models.json`.
@@ -54,6 +71,15 @@ impl Settings {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(err) => Err(format!("cannot read {}: {err}", path.display())),
         }
+    }
+
+    /// The effective telemetry choice for this configuration, with
+    /// `HI_TELEMETRY` overriding the file.
+    pub fn telemetry_enabled(&self) -> bool {
+        resolve_telemetry(
+            self.telemetry,
+            std::env::var("HI_TELEMETRY").ok().as_deref(),
+        )
     }
 
     /// Persist to `<config-dir>/settings.json` (pretty-printed, so
@@ -109,6 +135,7 @@ mod tests {
             default_model: Some("local/llama".into()),
             thinking: None,
             default_tools: Some("read-only".into()),
+            telemetry: None,
         };
         original.save_to(&path).unwrap();
         let loaded = Settings::load_from(&path).unwrap();
@@ -126,5 +153,30 @@ mod tests {
         let path = dir.join("settings.json");
         std::fs::write(&path, "{not json").unwrap();
         assert!(Settings::load_from(&path).is_err());
+    }
+
+    #[test]
+    fn telemetry_defaults_to_off_and_parses_camel_case() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.telemetry_enabled());
+        assert!(!resolve_telemetry(None, None));
+        assert!(resolve_telemetry(Some(true), None));
+        assert!(!resolve_telemetry(Some(false), None));
+
+        let settings: Settings = serde_json::from_str("{\"telemetry\": true}").unwrap();
+        assert_eq!(settings.telemetry, Some(true));
+    }
+
+    #[test]
+    fn hi_telemetry_env_wins_over_the_setting() {
+        // pi's PI_TELEMETRY pattern: env beats the file, truthiness is
+        // strict, garbage reads as off.
+        assert!(resolve_telemetry(Some(false), Some("1")));
+        assert!(resolve_telemetry(Some(false), Some("YES")));
+        assert!(!resolve_telemetry(Some(true), Some("0")));
+        assert!(!resolve_telemetry(Some(true), Some("false")));
+        // An unset-looking or malformed value is off, not an error.
+        assert!(!resolve_telemetry(Some(true), Some("")));
+        assert!(!resolve_telemetry(Some(true), Some("sure?")));
     }
 }
