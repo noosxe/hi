@@ -891,6 +891,50 @@ impl App {
     /// rows, completion menus 3-4; 0 when no menu is open. The menu
     /// takes its rows from the streaming area (elastic 8 → 2), so it
     /// lands directly above the input.
+    /// The status board (AD-0025): rows bottom-up — row 0 is the
+    /// classic bar (location left, model right); further rows stack
+    /// above it and exist only when something earns them. Tasks and
+    /// the auto-trigger arm share row 1; #4/#6 register here later.
+    pub fn status_rows(&self) -> Vec<(String, String)> {
+        let right = match self.thinking {
+            Some(level) => format!("{} · thinking:{}", self.status.label(), level.name()),
+            None => self.status.label(),
+        };
+        // Tasks and the arm share one row — the session's own work,
+        // not the provider's. Absent content collapses the row.
+        let mut extra_left = String::new();
+        let mut extra_right = String::new();
+        if let Some(tasks) = self.tasks.as_ref() {
+            let total = tasks.list().len();
+            if total > 0 {
+                let running = tasks.running_count();
+                let done = total - running;
+                let parts: Vec<String> = [
+                    (running > 0, format!("{running} running")),
+                    (done > 0, format!("{done} done")),
+                ]
+                .into_iter()
+                .filter_map(|(keep, part)| keep.then_some(part))
+                .collect();
+                extra_left = format!("tasks: {}", parts.join(" · "));
+            }
+        }
+        if self.auto_armed {
+            extra_right = "auto: armed".to_string();
+        }
+        let mut rows = vec![(self.location.clone(), right)];
+        if !extra_left.is_empty() || !extra_right.is_empty() {
+            rows.push((extra_left, extra_right));
+        }
+        rows
+    }
+
+    /// The board's row count — the height `layout` and the flush pass
+    /// both measure with, so they can never disagree (AD-0025).
+    pub fn status_height(&self) -> u16 {
+        self.status_rows().len() as u16
+    }
+
     pub fn menu_height(&self) -> u16 {
         if let Some(picker) = &self.picker {
             // SelectList geometry: five visible rows, the `(n/m)`
@@ -1688,6 +1732,39 @@ mod tests {
     }
 
     /// How many machine-initiated mandate turns exist so far.
+    #[test]
+    fn status_rows_stay_one_until_something_earns_a_row() {
+        let app = test_app();
+        let rows = app.status_rows();
+        assert_eq!(rows.len(), 1, "a quiet session earns no extra rows");
+        assert!(rows[0].1.contains("mock"));
+    }
+
+    #[test]
+    fn tasks_and_the_arm_share_one_earned_status_row() {
+        let (mut app, tasks) = app_with_tasks("status-board");
+        let id = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "sleep 2",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        app.tasks = Some(tasks);
+        let rows = app.status_rows();
+        assert_eq!(rows.len(), 2, "running tasks earn the extra row");
+        assert!(rows[1].0.starts_with("tasks: 1 running"), "{:?}", rows[1]);
+        assert!(rows[1].1.is_empty());
+        wait_task_finished(app.tasks.as_ref().unwrap(), id);
+        // The arm alone earns the row too, on the right — #72 finally
+        // has visible feedback.
+        app.tasks = None;
+        app.auto_armed = true;
+        let rows = app.status_rows();
+        assert_eq!(rows.len(), 2);
+        assert!(rows[1].0.is_empty());
+        assert_eq!(rows[1].1, "auto: armed");
+    }
+
     fn mandate_count(app: &App) -> usize {
         app.messages
             .iter()

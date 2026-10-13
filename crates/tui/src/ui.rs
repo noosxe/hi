@@ -19,16 +19,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
     // The `/resume` session picker takes over the live area — input,
     // menus, and stream all yield; the status row stays for context.
     if app.session_picker.is_some() {
+        let status_h = app.status_height();
         let picker_area = Rect {
-            height: area.height.saturating_sub(1),
+            height: area.height.saturating_sub(status_h),
             ..area
         };
         draw_session_picker(frame, picker_area, app);
         draw_status(
             frame,
             Rect {
-                y: area.y + area.height - 1,
-                height: 1,
+                y: area.y + area.height - status_h,
+                height: status_h,
                 ..area
             },
             app,
@@ -49,7 +50,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     //   50 rows, menu open: [stream 43] [input 4] [menu 3]
     let input_height = input_height(app, area.width);
     let menu_h = app.menu_height();
-    let (stream_area, menu_area, input_area, status_area) = layout(area, input_height, menu_h);
+    let (stream_area, menu_area, input_area, status_area) =
+        layout(area, input_height, menu_h, app.status_height());
     draw_stream(frame, stream_area, app);
     draw_input(frame, input_area, app);
     if menu_h > 0 {
@@ -158,8 +160,8 @@ pub fn input_height(app: &App, width: u16) -> u16 {
 
 /// How many rows the stream window gets at this frame's geometry —
 /// the flush pass targets exactly this many live rows.
-pub fn stream_window_height(height: u16, input_height: u16, menu_h: u16) -> u16 {
-    layout(Rect::new(0, 0, 1, height), input_height, menu_h)
+pub fn stream_window_height(height: u16, input_height: u16, menu_h: u16, status_h: u16) -> u16 {
+    layout(Rect::new(0, 0, 1, height), input_height, menu_h, status_h)
         .0
         .height
 }
@@ -173,11 +175,11 @@ pub fn stream_window_height(height: u16, input_height: u16, menu_h: u16) -> u16 
 /// terminals the stream shrinks first, to nothing, and nothing
 /// panics. The scrollback above the viewport is the flushed prefix
 /// of the transcript; the stream area is its window — never blank.
-fn layout(area: Rect, input_height: u16, menu_h: u16) -> (Rect, Rect, Rect, Rect) {
+fn layout(area: Rect, input_height: u16, menu_h: u16, status_h: u16) -> (Rect, Rect, Rect, Rect) {
     let bottom_row = area.bottom().saturating_sub(1);
     // The bottommost consumer is the open menu, or — when no menu is
-    // open — the status row. Exactly one of them owns the edge.
-    let edge_h = if menu_h > 0 { menu_h } else { 1 };
+    // open — the status board. Exactly one of them owns the edge.
+    let edge_h = if menu_h > 0 { menu_h } else { status_h };
     let edge_y = bottom_row.saturating_sub(edge_h.saturating_sub(1));
     let input_area = Rect {
         y: edge_y.saturating_sub(input_height),
@@ -190,8 +192,8 @@ fn layout(area: Rect, input_height: u16, menu_h: u16) -> (Rect, Rect, Rect, Rect
         ..area
     };
     let status_area = Rect {
-        y: bottom_row,
-        height: u16::from(menu_h == 0),
+        y: bottom_row.saturating_sub(status_h.saturating_sub(1)),
+        height: if menu_h == 0 { status_h } else { 0 },
         ..area
     };
     let stream_area = Rect {
@@ -275,23 +277,18 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
     ));
 }
 
-/// The status row: cwd (branch) on the left, (provider) model on the
-/// right. All dim — decoration is never the star of the frame.
+/// The status board (AD-0025): `status_rows` returns rows bottom-up
+/// (row 0 is the classic bar — cwd (branch) left, (provider) model
+/// right); earned rows stack above it. All dim — decoration is never
+/// the star of the frame.
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
-    // The thinking level rides on the right label when set.
-    let mut right = match app.thinking {
-        Some(level) => format!("{} · thinking:{}", app.status.label(), level.name()),
-        None => app.status.label(),
-    };
-    // Live background tasks, while there are any (#5).
-    if let Some(tasks) = app.tasks.as_ref() {
-        let running = tasks.running_count();
-        if running > 0 {
-            right.push_str(&format!(" · {running} bg"));
-        }
-    }
-    let text = crate::status::compose_status(&app.location, &right, area.width);
-    frame.render_widget(Paragraph::new(text).style(Style::new().dim()), area);
+    let rows: Vec<Line<'static>> = app
+        .status_rows()
+        .into_iter()
+        .rev()
+        .map(|(left, right)| Line::from(crate::status::compose_status(&left, &right, area.width)))
+        .collect();
+    frame.render_widget(Paragraph::new(rows).style(Style::new().dim()), area);
 }
 
 /// The `/model` picker, drawn in the menu zone directly above the
@@ -1240,13 +1237,13 @@ mod tests {
         // 40 rows resting: the stream keeps everything but the input
         // and the status row — the old fixed 12-row sketch gave this
         // terminal 8 stream rows.
-        let (stream, menu, input, status) = layout(Rect::new(0, 0, 80, 40), 3, 0);
+        let (stream, menu, input, status) = layout(Rect::new(0, 0, 80, 40), 3, 0, 1);
         assert_eq!((stream.height, menu.height), (36, 0));
         assert_eq!((input.y, input.height), (36, 3)); // rows 36-38
         assert_eq!((status.y, status.height), (39, 1));
         // A menu renders UNDER the input and owns the bottom edge;
-        // the status row yields for its lifetime.
-        let (stream, menu, input, status) = layout(Rect::new(0, 0, 80, 40), 3, 4);
+        // the status board yields for its lifetime.
+        let (stream, menu, input, status) = layout(Rect::new(0, 0, 80, 40), 3, 4, 1);
         assert_eq!(stream.height, 33);
         assert_eq!(input.y, 33); // rows 33-35
         assert_eq!((menu.y, menu.height), (36, 4)); // rows 36-39
@@ -1256,18 +1253,58 @@ mod tests {
     #[test]
     fn short_terminals_degrade_without_panicking() {
         // The stream shrinks first, to nothing.
-        let (stream, _, input, status) = layout(Rect::new(0, 0, 80, 6), 3, 0);
+        let (stream, _, input, status) = layout(Rect::new(0, 0, 80, 6), 3, 0, 1);
         assert_eq!(stream.height, 2);
         assert_eq!(input.y, 2);
         assert_eq!(status.y, 5);
-        let (stream, _, input, _) = layout(Rect::new(0, 0, 80, 4), 3, 0);
+        let (stream, _, input, _) = layout(Rect::new(0, 0, 80, 4), 3, 0, 1);
         assert_eq!(stream.height, 0);
         assert_eq!(input.y, 0); // rows 0-2, status at 3
         // Absurd — an input taller than the terminal: saturated, no
-        // panic, the status row still claims the bottom edge.
-        let (_, _, input, status) = layout(Rect::new(0, 0, 80, 2), 8, 0);
+        // panic, the status board still claims the bottom edge.
+        let (_, _, input, status) = layout(Rect::new(0, 0, 80, 2), 8, 0, 1);
         assert_eq!(status.y, 1);
         assert_eq!(input.y, 0);
+    }
+
+    #[test]
+    fn the_status_board_stacks_its_rows_above_the_bar() {
+        // Two earned rows: the board grows upward from the bottom
+        // edge, the stream pays for it.
+        let (stream, menu, input, status) = layout(Rect::new(0, 0, 80, 40), 3, 0, 2);
+        assert_eq!((stream.height, menu.height), (35, 0));
+        assert_eq!((input.y, input.height), (35, 3)); // rows 35-37
+        assert_eq!((status.y, status.height), (38, 2)); // rows 38-39
+        // A menu still outranks the whole board (AD-0025 keeps the
+        // ruled yield): when one is open the board yields entirely.
+        let (stream, menu, input, status) = layout(Rect::new(0, 0, 80, 40), 3, 4, 2);
+        assert_eq!(stream.height, 33);
+        assert_eq!((menu.y, menu.height), (36, 4));
+        assert_eq!((input.y, input.height), (33, 3));
+        assert_eq!(status.height, 0);
+    }
+
+    #[test]
+    fn the_status_board_renders_its_earned_rows() {
+        let app = crate::app::test_app();
+        assert_eq!(app.status_height(), 1);
+        // Wide enough that the location doesn't clip the right label.
+        let mut terminal = Terminal::new(TestBackend::new(72, 20)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend_mut().buffer().clone();
+        let row_text = |y: u16| {
+            (0..72)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        // Quiet session: the classic bar owns the bottom edge, alone —
+        // row 18 is still the input's bottom rule, so the board grew
+        // nothing upward.
+        assert!(row_text(19).contains("~"), "{:?}", row_text(19));
+        assert!(row_text(19).contains("(mock) mock"));
+        assert!(row_text(18).starts_with("─"));
     }
 
     #[test]

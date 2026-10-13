@@ -141,12 +141,23 @@ parse is reported, not overwritten — Esc closes.
   refresh is polish for later.
 - `compose_status(left, right, width)` — one row, filler between, clips on
   narrow terminals, never panics.
+- **The status board (AD-0025)**: `App::status_rows()` returns rows
+  bottom-up — row 0 is the classic bar; earned rows stack above it and
+  exist only when something earns them (no fixed count, no reserved
+  blank rows). Row 1 belongs to the session's own work: tasks
+  (`tasks: 2 running · 1 done`, replacing the old `· N bg` bolt-on)
+  and the auto-trigger arm (`auto: armed` — #72's visible feedback).
+  `App::status_height()` is the one height `layout` and the flush
+  pass both measure with, so draw and flush can never disagree; a
+  menu still outranks the whole board (the ruled yield, generalized
+  from row to board). #4/#6 register later rows here.
 - Thinking display: when a level is set, `draw_status` appends
   `· thinking:<level>` to the right label (e.g.
   `(zai) glm-4.6 · thinking:high`); `Status::label()` itself stays
   provider/model only.
-- Background tasks (#5, AD-0019): while tasks run, `draw_status` appends
-  `· N bg`; on completion the app's frame pump folds a dim
+- Background tasks (#5, AD-0019): while tasks exist, the status
+  board's earned row shows `tasks: N running · M done` (AD-0025); on
+  completion the app's frame pump folds a dim
   `Message::System` note into the transcript (`background task #3
   'cargo test' finished (exit 0) after 54s`) and the fact rides the
   next turn's payload to the model.
@@ -164,6 +175,8 @@ at ~8 lines on any screen), bottom-up via the pure `layout()` helper:
 ```
 50 rows, resting:  [stream 45] [input 4] [status 1]
 50 rows, menu:     [stream 41] [menu 4]  [input 4] [status 1]
+(status grows upward when rows are earned — AD-0025 — and yields
+entirely to an open menu)
 ```
 
 - Status row pinned at the bottom; input grows upward with its wrapped text
