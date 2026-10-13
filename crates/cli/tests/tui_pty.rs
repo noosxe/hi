@@ -561,3 +561,36 @@ fn option_arrows_word_motions_arrive_through_their_wire_encodings() {
         "/exit did not exit cleanly"
     );
 }
+
+/// The `/` completion menu renders over a real pty — typing the slash
+/// opens the command list under the input, navigating moves the
+/// selection, and the menu yields when the input leaves command space.
+#[test]
+fn slash_opens_the_completion_menu_over_a_real_pty() {
+    let mut tui = Tui::spawn(&["--mock"]);
+    tui.sees("\u{2500}");
+    tui.type_keys("/");
+    tui.until("the command list", TEXT_TIMEOUT, |frame| {
+        frame.contains("exit") && frame.contains("model")
+    });
+
+    // Down moves the selection marker; the marker row changes.
+    let before = tui.frame();
+    tui.write("\x1b[B"); // down arrow
+    tui.until("selection moves", TEXT_TIMEOUT, |f| {
+        f != before && f.contains("exit")
+    });
+
+    // A space leaves command space: the menu yields to the status row.
+    tui.type_keys(" x");
+    tui.until("menu yields", TEXT_TIMEOUT, |f| {
+        !f.contains("quit the session")
+    });
+
+    tui.type_keys("/exit");
+    tui.write("\r");
+    assert!(
+        tui.exits_cleanly(Duration::from_secs(20)),
+        "/exit did not exit cleanly"
+    );
+}
