@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use crate::agent::{DEFAULT_MAX_TOOL_ROUNDS, spawn_agent_turn};
-use crate::event::Event;
+use crate::event::{Event, Usage};
 use crate::message::Message;
 use crate::provider::Provider;
 use crate::session::Session;
@@ -62,6 +62,9 @@ pub fn run(
     let mut text = String::new();
     let mut transcript: Vec<Message> = Vec::new();
     let mut error: Option<String> = None;
+    // The round's bill rides the session file even though headless
+    // prints nothing (#85) — the front end that resumes shows totals.
+    let mut bill: Option<Usage> = None;
     for event in rx {
         match event {
             Event::TurnStart => {}
@@ -73,8 +76,9 @@ pub fn run(
                 transcript.push(Message::ToolCall(call));
             }
             Event::ToolResult(result) => transcript.push(Message::ToolResult(result)),
-            // Headless prints the transcript, not the bill (AD-0026).
-            Event::Usage(_) => {}
+            // Headless prints the transcript, not the bill — but it
+            // records the bill (AD-0026, #85).
+            Event::Usage(recorded) => bill = Some(recorded),
             Event::Error(message) => error = Some(message),
             Event::TurnEnd => break,
         }
@@ -92,6 +96,9 @@ pub fn run(
     history.extend(transcript);
     if let Some(session) = session.as_mut() {
         let _ = session.append(&history[added_from..]);
+        if let Some(bill) = bill {
+            let _ = session.append_usage(&bill);
+        }
     }
 
     match error {
@@ -258,6 +265,43 @@ mod tests {
 
         let loaded = crate::session::load(&path).unwrap();
         assert_eq!(loaded.messages, history);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn run_persists_the_bill_for_the_next_front_end() {
+        // Headless prints no bill, but the record rides the session
+        // file — the TUI that resumes this session shows the totals.
+        let root = std::env::temp_dir().join(format!("hi-headless-bill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let session = Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        let path = session.path().to_path_buf();
+
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            Event::Token("reply".into()),
+            Event::Usage(crate::event::Usage {
+                prompt_tokens: 1000,
+                completion_tokens: 250,
+                cached_tokens: Some(700),
+                reasoning_tokens: Some(100),
+            }),
+            Event::TurnEnd,
+        ]]));
+        let mut history = Vec::new();
+        run(
+            provider,
+            Arc::new(ToolRegistry::new()),
+            None,
+            &mut history,
+            "question",
+            Some(session),
+        )
+        .unwrap();
+
+        let loaded = crate::session::load(&path).unwrap();
+        assert_eq!(loaded.usage.completion_tokens, 250);
+        assert_eq!(loaded.usage.cached_tokens, Some(700));
+        assert_eq!(loaded.usage_last_prompt, 1000);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
