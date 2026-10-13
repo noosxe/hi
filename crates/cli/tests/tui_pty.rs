@@ -424,11 +424,13 @@ fn the_tui_boots_takes_keys_streams_and_exits_cleanly() {
 fn a_full_window_flush_pushes_rows_to_scrollback_and_keeps_the_composer() {
     let mut tui = Tui::spawn(&["--mock"]);
     tui.sees("\u{2500}");
-    // Turn past the window: each turn's block must eventually leave
-    // the live window through a flush, landing in scrollback — the
-    // path whose terminal semantics (scrolling regions, BCE) broke
-    // real terminals. The composer must survive every flush.
-    for n in 1..=4 {
+    // Turn well past the window: the stream area holds roughly
+    // height - input - status rows, so four turns ride the boundary
+    // and a slow or differently-wrapping runner may never overflow.
+    // Seven turns overflow it with margin — each block must leave the
+    // live window through a flush, and the composer must survive every
+    // flush.
+    for n in 1..=7 {
         tui.type_keys(&format!("message number {n}"));
         tui.write("\r");
         tui.settled_turn("no API key required");
