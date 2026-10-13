@@ -901,6 +901,8 @@ fn draw_session_picker(frame: &mut Frame, area: Rect, app: &App) {
         picker.selected,
         area.height as usize,
         std::time::SystemTime::now(),
+        area.width as usize,
+        picker.renaming.as_deref(),
     );
     frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }

@@ -242,6 +242,35 @@ impl Session {
             .map_err(|err| format!("cannot write {}: {err}", self.path.display()))
     }
 
+    /// The session's effective name — the header's `--name` with any
+    /// rename records applied (last wins).
+    pub fn name(&self) -> Option<&str> {
+        self.header.name.as_deref()
+    }
+
+    /// Append the session's name — the `name` record (#89). Names are
+    /// appended, never rewritten: the file keeps every choice, replay
+    /// takes the last, an empty name clears. Newlines collapse to
+    /// spaces and the edges trim (pi's normalization) — a name is one
+    /// line by construction. Flushed like every append.
+    pub fn rename(&mut self, name: &str) -> Result<(), String> {
+        let sanitized = name.replace(['\r', '\n'], " ").trim().to_string();
+        writeln!(
+            self.file,
+            "{}",
+            serde_json::json!({ "type": "name", "name": sanitized })
+        )
+        .map_err(|err| format!("cannot write {}: {err}", self.path.display()))?;
+        self.header.name = if sanitized.is_empty() {
+            None
+        } else {
+            Some(sanitized)
+        };
+        self.file
+            .flush()
+            .map_err(|err| format!("cannot write {}: {err}", self.path.display()))
+    }
+
     /// Append one round's bill — the `usage` record (#85). One line
     /// per round, flushed like the messages; replay merges the
     /// records, and the last one's prompt size is the context fact.
@@ -412,6 +441,7 @@ pub fn load(path: &Path) -> Result<LoadedSession, String> {
     let mut messages = Vec::new();
     let mut usage = Usage::default();
     let mut usage_last_prompt = 0u64;
+    let mut name = None;
     let lines: Vec<&str> = raw
         .lines()
         .map(str::trim)
@@ -426,6 +456,9 @@ pub fn load(path: &Path) -> Result<LoadedSession, String> {
                         path.display()
                     ));
                 }
+                // The header's --name seeds the effective name; name
+                // records then win, last one standing.
+                name = parsed.name.clone();
                 header = Some(parsed);
             }
             Ok(Entry::Message(message)) => {
@@ -441,6 +474,18 @@ pub fn load(path: &Path) -> Result<LoadedSession, String> {
                 usage_last_prompt = recorded.prompt_tokens;
                 usage.merge(recorded);
             }
+            Ok(Entry::Name(recorded)) => {
+                if header.is_none() {
+                    return Err(format!("{}: name before session header", path.display()));
+                }
+                // Last wins; an empty record clears (the header's
+                // --name included).
+                name = if recorded.is_empty() {
+                    None
+                } else {
+                    Some(recorded)
+                };
+            }
             Err(err) => {
                 let is_torn_tail = index == lines.len() - 1;
                 if is_torn_tail {
@@ -450,7 +495,8 @@ pub fn load(path: &Path) -> Result<LoadedSession, String> {
             }
         }
     }
-    let header = header.ok_or_else(|| format!("{}: no session header", path.display()))?;
+    let mut header = header.ok_or_else(|| format!("{}: no session header", path.display()))?;
+    header.name = name;
     Ok(LoadedSession {
         header,
         messages,
@@ -481,6 +527,7 @@ enum Entry {
     Header(SessionHeader),
     Message(Message),
     Usage(Usage),
+    Name(String),
 }
 
 fn parse_line(line: &str) -> Result<Entry, String> {
@@ -504,6 +551,13 @@ fn parse_line(line: &str) -> Result<Entry, String> {
                 serde_json::from_value(usage.clone())
                     .map_err(|err| format!("malformed usage: {err}"))?,
             ))
+        }
+        Some("name") => {
+            let name = value
+                .get("name")
+                .and_then(|name| name.as_str())
+                .ok_or("name line missing payload")?;
+            Ok(Entry::Name(name.to_string()))
         }
         other => Err(format!(
             "unknown line type: {:?}",
@@ -538,13 +592,39 @@ fn read_header(path: &Path) -> Result<SessionHeader, String> {
 
 /// Parse just the header line — the listing path, which never needs the
 /// transcript bodies. `None` for anything unreadable or headerless.
+/// The session's effective header — the first line with any `name`
+/// records applied (last wins). The summary pass scans the whole file
+/// once per listing, not per frame; only lines carrying the record
+/// key are parsed.
 fn read_summary_header(path: &Path) -> Option<SessionHeader> {
     let raw = std::fs::read_to_string(path).ok()?;
-    let first = raw.lines().map(str::trim).find(|line| !line.is_empty())?;
-    match parse_line(first) {
-        Ok(Entry::Header(header)) => Some(header),
-        _ => None,
+    let mut header: Option<SessionHeader> = None;
+    let mut name = None;
+    for line in raw.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if !line.contains("\"type\"") {
+            continue;
+        }
+        match parse_line(line) {
+            Ok(Entry::Header(parsed)) => {
+                name = parsed.name.clone();
+                header = Some(parsed);
+            }
+            Ok(Entry::Name(recorded)) => {
+                name = if recorded.is_empty() {
+                    None
+                } else {
+                    Some(recorded)
+                };
+            }
+            // Records other than names don't move the summary; a
+            // malformed name line is skipped here (the summary pass is
+            // best-effort) but still rejected by `load`.
+            _ => {}
+        }
     }
+    let mut header = header?;
+    header.name = name;
+    Some(header)
 }
 
 #[cfg(test)]
@@ -980,6 +1060,78 @@ mod tests {
         let loaded = load(fork.path()).unwrap();
         assert_eq!(loaded.messages, vec![Message::User("history".into())]);
         assert_eq!(loaded.usage, crate::event::Usage::default());
+    }
+
+    #[test]
+    fn name_records_replay_last_wins_and_empty_clears() {
+        // Names are appended, never rewritten in place (#89): the file
+        // keeps every choice, replay takes the last, an empty record
+        // clears back to the header's (or no) name.
+        let root = temp_root("names");
+        let mut session =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, Some("initial"))
+                .unwrap();
+        session.rename("the real fix").unwrap();
+        session.rename("renamed again").unwrap();
+        let raw = std::fs::read_to_string(session.path()).unwrap();
+        assert!(
+            raw.contains("{\"name\":\"the real fix\",\"type\":\"name\"}"),
+            "{raw}"
+        );
+        let loaded = load(session.path()).unwrap();
+        assert_eq!(loaded.header.name.as_deref(), Some("renamed again"));
+
+        session.rename("").unwrap();
+        let loaded = load(session.path()).unwrap();
+        assert_eq!(loaded.header.name, None);
+    }
+
+    #[test]
+    fn a_session_without_name_records_keeps_its_header_name() {
+        // The forward-compat seam again: files written before #89 load
+        // untouched, --name riding the header as always.
+        let root = temp_root("nonames");
+        let session =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, Some("kept")).unwrap();
+        let loaded = load(session.path()).unwrap();
+        assert_eq!(loaded.header.name.as_deref(), Some("kept"));
+
+        let session = Session::start_in(&root, Path::new("/q"), "prov", "mod", None, None).unwrap();
+        let loaded = load(session.path()).unwrap();
+        assert_eq!(loaded.header.name, None);
+    }
+
+    #[test]
+    fn summaries_carry_the_effective_name() {
+        // The picker lists summaries, not loads: the summary pass must
+        // see past the first line to the rename records.
+        let root = temp_root("sumnames");
+        let mut session = Session::start_in(
+            &root,
+            Path::new("/p"),
+            "prov",
+            "mod",
+            None,
+            Some("header name"),
+        )
+        .unwrap();
+        session.rename("picked").unwrap();
+        let summaries = sessions_in_root(&root, Path::new("/p")).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].header.name.as_deref(), Some("picked"));
+    }
+
+    #[test]
+    fn a_name_record_before_the_header_is_an_error() {
+        let root = temp_root("orphanname");
+        let session = Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        let header = std::fs::read_to_string(session.path()).unwrap();
+        std::fs::write(
+            session.path(),
+            format!("{{\"type\":\"name\",\"name\":\"early\"}}\n{header}"),
+        )
+        .unwrap();
+        assert!(load(session.path()).is_err());
     }
 
     #[test]
