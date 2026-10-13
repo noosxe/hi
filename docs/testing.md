@@ -14,15 +14,19 @@ cargo run            # hi --mock needs no config
 
 CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI).
 
-Current count: **311 `#[test]` functions** (the README's count gets refreshed in passing;
+Current count: **312 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 66
 core: openai 21, selection 14, session 12, read 13, settings 11, agent 10, grep 8,
 walk 7, truncate 7, image_util 7, config 6, edit 6, image_resize 6, system_prompt 6,
 mod 5, headless 5, bash 5, find 4, ls 3, write 3, mock 2, thinking 2, tool 1. tui: app 39,
 markdown 19, ui 22, kitty 11, wrap 8, status 8, scroll 7, editor 6, picker 5,
-commands 4, clipboard 3, theme 3, catalog 2. cli: 7 unit + 2 pty integration
-(`tests/tui_pty.rs` — the real binary in a pseudo-terminal: handshake, keys,
-streamed reply, resize, clean exit; dev-only `portable-pty`).
+commands 4, clipboard 3, theme 3, catalog 2. cli: 7 unit + 3 pty integration
+(`tests/tui_pty.rs` — the real binary in a pseudo-terminal, its byte stream
+rendered by the avt emulator (asciinema's), and every wait a predicate over
+rendered frames — typed keys must echo in the composer, a settled turn must
+stop spinner-cell churn, the composer must remain the last content on screen
+and untinted, a full window must give its rows up to the flush, and `/exit`
+must exit cleanly; dev-only `portable-pty` and `avt`).
 ## The central tool: `FakeApi` (`crates/core/src/test_support.rs`, cfg(test))
 
 A minimal HTTP server on an ephemeral port:
