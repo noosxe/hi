@@ -891,19 +891,23 @@ impl App {
     /// rows, completion menus 3-4; 0 when no menu is open. The menu
     /// takes its rows from the streaming area (elastic 8 → 2), so it
     /// lands directly above the input.
-    /// The status board (AD-0025): rows bottom-up — row 0 is the
-    /// classic bar (location left, model right); further rows stack
-    /// above it and exist only when something earns them. Tasks and
-    /// the auto-trigger arm share row 1; #4/#6 register here later.
+    /// The status board (AD-0025, amended): rows bottom-up, two
+    /// permanent residents. Row 0 is location on the left — its right
+    /// sits empty for future residents. Row 1 is the session's own
+    /// context: the model (+thinking) on the right — the indicator
+    /// you read all day — tasks on the left while they exist, and the
+    /// auto-trigger arm appended after the model (transient noise
+    /// rides right). #4/#6 register here later; three rows is the
+    /// ceiling anyone plans to spend.
     pub fn status_rows(&self) -> Vec<(String, String)> {
-        let right = match self.thinking {
+        let mut context_right = match self.thinking {
             Some(level) => format!("{} · thinking:{}", self.status.label(), level.name()),
             None => self.status.label(),
         };
-        // Tasks and the arm share one row — the session's own work,
-        // not the provider's. Absent content collapses the row.
-        let mut extra_left = String::new();
-        let mut extra_right = String::new();
+        if self.auto_armed {
+            context_right.push_str(" · auto: armed");
+        }
+        let mut context_left = String::new();
         if let Some(tasks) = self.tasks.as_ref() {
             let total = tasks.list().len();
             if total > 0 {
@@ -916,17 +920,13 @@ impl App {
                 .into_iter()
                 .filter_map(|(keep, part)| keep.then_some(part))
                 .collect();
-                extra_left = format!("tasks: {}", parts.join(" · "));
+                context_left = format!("tasks: {}", parts.join(" · "));
             }
         }
-        if self.auto_armed {
-            extra_right = "auto: armed".to_string();
-        }
-        let mut rows = vec![(self.location.clone(), right)];
-        if !extra_left.is_empty() || !extra_right.is_empty() {
-            rows.push((extra_left, extra_right));
-        }
-        rows
+        vec![
+            (self.location.clone(), String::new()),
+            (context_left, context_right),
+        ]
     }
 
     /// The board's row count — the height `layout` and the flush pass
@@ -1750,15 +1750,18 @@ mod tests {
 
     /// How many machine-initiated mandate turns exist so far.
     #[test]
-    fn status_rows_stay_one_until_something_earns_a_row() {
+    fn the_board_is_two_rows_and_the_model_lives_on_the_second() {
         let app = test_app();
         let rows = app.status_rows();
-        assert_eq!(rows.len(), 1, "a quiet session earns no extra rows");
-        assert!(rows[0].1.contains("mock"));
+        assert_eq!(rows.len(), 2, "the model made row 1 a resident");
+        assert!(!rows[0].0.is_empty(), "location owns row 0's left");
+        assert!(rows[0].1.is_empty(), "row 0's right waits for residents");
+        assert!(rows[1].0.is_empty());
+        assert_eq!(rows[1].1, "(mock) mock");
     }
 
     #[test]
-    fn tasks_and_the_arm_share_one_earned_status_row() {
+    fn tasks_join_the_model_row_and_the_arm_appends() {
         let (mut app, tasks) = app_with_tasks("status-board");
         let id = tasks
             .spawn(hi_core::tasks::TaskSpec::process(
@@ -1768,18 +1771,16 @@ mod tests {
             .unwrap();
         app.tasks = Some(tasks);
         let rows = app.status_rows();
-        assert_eq!(rows.len(), 2, "running tasks earn the extra row");
         assert!(rows[1].0.starts_with("tasks: 1 running"), "{:?}", rows[1]);
-        assert!(rows[1].1.is_empty());
+        assert_eq!(rows[1].1, "(mock) mock", "the model stays leftmost-stable");
         wait_task_finished(app.tasks.as_ref().unwrap(), id);
-        // The arm alone earns the row too, on the right — #72 finally
-        // has visible feedback.
+        // The arm appends after the model — transient noise rides
+        // right (#72's visible feedback).
         app.tasks = None;
         app.auto_armed = true;
         let rows = app.status_rows();
-        assert_eq!(rows.len(), 2);
         assert!(rows[1].0.is_empty());
-        assert_eq!(rows[1].1, "auto: armed");
+        assert_eq!(rows[1].1, "(mock) mock · auto: armed");
     }
 
     fn mandate_count(app: &App) -> usize {

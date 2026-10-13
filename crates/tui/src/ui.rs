@@ -929,14 +929,14 @@ mod tests {
                 .trim_end()
                 .to_string()
         };
-        // Input box rows 15-18 (margin 15, rules 16/18), status row 19;
-        // the stream window is rows 0..15 — and the user block (3 rows:
-        // pad, text, pad) sits at its BOTTOM, rows 12-14, above the
-        // composer's breathing row (AD-0020).
-        assert!(row_text(13).contains("where did my transcript go"));
-        assert!(row_text(14).trim().is_empty()); // the block's lower pad
-        assert!(row_text(15).trim().is_empty()); // the margin row
-        assert!(row_text(16).contains("─")); // input top rule
+        // Input box rows 14-17 (margin 14, rules 15/17), status rows
+        // 18-19; the stream window is rows 0..14 — and the user block
+        // (3 rows: pad, text, pad) sits at its BOTTOM, rows 11-13,
+        // above the composer's breathing row (AD-0020).
+        assert!(row_text(12).contains("where did my transcript go"));
+        assert!(row_text(13).trim().is_empty()); // the block's lower pad
+        assert!(row_text(14).trim().is_empty()); // the margin row
+        assert!(row_text(15).contains("─")); // input top rule
     }
 
     #[test]
@@ -1002,14 +1002,14 @@ mod tests {
                 .trim_end()
                 .to_string()
         };
-        assert!(row_text(16).contains("─")); // input top rule
-        // The newest text row sits at 13, with the block's own pad on
-        // 14: the stream's bottom edge is the margin row — one row
+        assert!(row_text(15).contains("─")); // input top rule
+        // The newest text row sits at 12, with the block's own pad on
+        // 13: the stream's bottom edge is the margin row — one row
         // higher than the old flush-against-the-rule geometry.
-        assert!(row_text(13).contains("filler message 29"));
-        assert!(row_text(14).trim().is_empty()); // block pad, stream's last row
+        assert!(row_text(12).contains("filler message 29"));
+        assert!(row_text(13).trim().is_empty()); // block pad, stream's last row
         // The breathing row itself stays empty.
-        assert!(row_text(15).trim().is_empty(), "{:?}", row_text(15));
+        assert!(row_text(14).trim().is_empty(), "{:?}", row_text(14));
     }
 
     #[test]
@@ -1285,9 +1285,9 @@ mod tests {
     }
 
     #[test]
-    fn the_status_board_renders_its_earned_rows() {
+    fn the_status_board_renders_its_resident_rows() {
         let app = crate::app::test_app();
-        assert_eq!(app.status_height(), 1);
+        assert_eq!(app.status_height(), 2, "both rows are permanent now");
         // Wide enough that the location doesn't clip the right label.
         let mut terminal = Terminal::new(TestBackend::new(72, 20)).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();
@@ -1299,12 +1299,11 @@ mod tests {
                 .trim_end()
                 .to_string()
         };
-        // Quiet session: the classic bar owns the bottom edge, alone —
-        // row 18 is still the input's bottom rule, so the board grew
-        // nothing upward.
+        // Two permanent rows: the model on row 18, the location bar
+        // on the bottom edge — row 0's right stays empty.
         assert!(row_text(19).contains("~"), "{:?}", row_text(19));
-        assert!(row_text(19).contains("(mock) mock"));
-        assert!(row_text(18).starts_with("─"));
+        assert!(!row_text(19).contains("(mock)"), "{:?}", row_text(19));
+        assert!(row_text(18).ends_with("(mock) mock"), "{:?}", row_text(18));
     }
 
     #[test]
@@ -1316,23 +1315,23 @@ mod tests {
         let backend = TestBackend::new(10, 11);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();
-        // "hello world" wraps to two input rows here: four rows of
-        // input box on an 11-row frame, inner text starting at
-        // y = 11 - 1(status) - 4(input) + 1 = 7.
+        // "hello world" wraps to two input rows here: the box on an
+        // 11-row frame starts at y = 11 - 2(status) - 5(input), inner
+        // text at y = 6.
         assert_eq!(
             terminal.backend_mut().get_cursor_position().unwrap(),
-            Position { x: 5, y: 7 }
+            Position { x: 5, y: 6 }
         );
         // Mid-word wrap: cursor inside the second wrapped row.
         app.input = "hello brave world".into();
         app.cursor = 8; // after "brave"'s first two chars
         terminal.draw(|f| draw(f, &app)).unwrap();
-        // Three wrapped rows: the box starts at y = 11 - 1 - 5 = 5,
-        // inner text at 6 — and the cursor sits on wrapped row 1,
-        // two columns into "brave", so 7.
+        // Three wrapped rows: the box starts at y = 11 - 2 - 6 = 3,
+        // inner text at 5 — and the cursor sits on wrapped row 1,
+        // two columns into "brave", so 6.
         assert_eq!(
             terminal.backend_mut().get_cursor_position().unwrap(),
-            Position { x: 2, y: 7 }
+            Position { x: 2, y: 6 }
         );
     }
 

@@ -270,11 +270,12 @@ impl Tui {
         self.until(needle, TEXT_TIMEOUT, |frame| frame.contains(needle));
     }
 
-    /// The composer is the last content on screen: the status line at
-    /// the bottom of the live area, an input border within a few rows
-    /// above it. Bottom of the VIEWPORT, not of the screen — after a
-    /// resize-grow hi keeps its startup height, so the live area may
-    /// sit above blank rows.
+    /// The composer is the last content on screen: the status board's
+    /// two resident rows at the bottom of the live area (location bar
+    /// on the edge, model directly above it — AD-0025a), an input
+    /// border within a few rows above that. Bottom of the VIEWPORT,
+    /// not of the screen — after a resize-grow hi keeps its startup
+    /// height, so the live area may sit above blank rows.
     fn assert_composer_visible(&self) {
         self.until(
             "composer at the bottom of the live area",
@@ -284,8 +285,13 @@ impl Tui {
                 let Some(last) = rows.iter().rposition(|row| !row.trim().is_empty()) else {
                     return false;
                 };
-                rows[last].contains("(mock)")
-                    && rows[..=last]
+                let model_row = last.saturating_sub(1);
+                // The location row is whatever cwd prints (a pty test
+                // runs outside HOME, so no `~`) — being the bottom
+                // edge is its whole assertion. The model anchors the
+                // board.
+                rows[model_row].contains("(mock)")
+                    && rows[..=model_row]
                         .iter()
                         .rev()
                         .skip(1)

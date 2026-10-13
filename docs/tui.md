@@ -141,16 +141,19 @@ parse is reported, not overwritten — Esc closes.
   refresh is polish for later.
 - `compose_status(left, right, width)` — one row, filler between, clips on
   narrow terminals, never panics.
-- **The status board (AD-0025)**: `App::status_rows()` returns rows
-  bottom-up — row 0 is the classic bar; earned rows stack above it and
-  exist only when something earns them (no fixed count, no reserved
-  blank rows). Row 1 belongs to the session's own work: tasks
-  (`tasks: 2 running · 1 done`, replacing the old `· N bg` bolt-on)
-  and the auto-trigger arm (`auto: armed` — #72's visible feedback).
+- **The status board (AD-0025, amended)**: `App::status_rows()`
+  returns rows bottom-up, two permanent residents. Row 0 is location
+  on the left — its right sits empty for future residents. Row 1 is
+  the session's own context: the model (+thinking) on the right —
+  the indicator you read all day — tasks on the left
+  (`tasks: 2 running · 1 done`, replacing the old `· N bg` bolt-on),
+  and the auto-trigger arm appended after the model (`auto: armed` —
+  #72's visible feedback; transient noise rides right).
   `App::status_height()` is the one height `layout` and the flush
   pass both measure with, so draw and flush can never disagree; a
   menu still outranks the whole board (the ruled yield, generalized
-  from row to board). #4/#6 register later rows here.
+  from row to board). Three rows is the planned ceiling; #4/#6
+  register here later.
 - Thinking display: when a level is set, `draw_status` appends
   `· thinking:<level>` to the right label (e.g.
   `(zai) glm-4.6 · thinking:high`); `Status::label()` itself stays
