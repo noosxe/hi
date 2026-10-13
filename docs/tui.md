@@ -45,7 +45,8 @@ model switch), `picker: Option<Picker>` (open `/model` chooser; `Some` = owns
 the keyboard), `tick: u8` (spinner frames), `completion: Option<Completion>`
 (`/` menu; `Some` = consumes navigation keys), `queued: Option<String>`,
 `system_prompt` + `thinking` (re-attached on provider rebuild),
-`turn: Option<Turn>`, `tasks: Option<hi_core::tasks::TaskManager>` (drained
+`turn: Option<Turn>`, `settings_board: Option<SettingsBoard>` (the
+`/settings` board — AD-0023), `tasks: Option<hi_core::tasks::TaskManager>` (drained
 per frame in `pump` — completions become transcript notes; the running
 count feeds the status row), `tasks_view: Option<TasksView>` (the `/tasks`
 pane: list, or one task's output watched live — AD-0021),
@@ -85,7 +86,7 @@ Behaviors (each pinned by a test in `app.rs`):
 
 ```rust
 pub struct Command { pub name: &'static str, pub description: &'static str }
-pub const COMMANDS: &[Command]  // sorted: exit, model, quit, resume, tasks, tools
+pub const COMMANDS: &[Command]  // sorted: exit, model, quit, resume, settings, tasks, tools
 pub fn matching(typed: &str) -> Vec<&'static Command>   // case-insensitive prefix
 pub fn find_exact(name: &str) -> Option<&'static Command>
 ```
@@ -94,6 +95,17 @@ Adding a command = one entry in `COMMANDS` **plus** one arm in
 `App::run_command`. The completion menu inherits both order and descriptions.
 `/exit` and `/quit` (alias) stop the session; `/model` opens the picker;
 `/resume` opens the session picker (see [picker.rs](#pickerrs--session-selection));
+`/settings` opens the policy board (AD-0023) — a curated list of what
+the running session can flip (`task turns`, `images`), each row shown
+with its live `on|off` state. Enter toggles and **keeps the board
+open** (a board, not a chooser — the flip is visible and more rows can
+follow); Ctrl-S persists the highlighted row through the #45
+load-modify-save shape (`Settings::persist_task_turns` /
+`persist_images`); Esc closes. Startup-stamped settings
+(`defaultTools`, `telemetry`) stay off the board until they declare a
+setter path. `App.settings_board: Option<SettingsBoard>` owns the
+keyboard while open; the row table is `SETTINGS_TOGGLES`, and draw
+reads `App::settings_rows()` live each frame.
 `/tools` pushes a dim local-only notice listing the registry — name,
 annotation badges (`read-only` / `destructive`, only when the tool claims
 them), and the first sentence of each description (`ToolRegistry::info()`

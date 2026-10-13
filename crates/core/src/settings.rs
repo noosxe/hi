@@ -120,8 +120,42 @@ impl Settings {
 
     /// The path-independent half of `persist_default_model`.
     fn persist_default_model_to(path: &Path, model: &str) -> Result<(), String> {
+        Self::persist_with(path, |settings| {
+            settings.default_model = Some(model.to_string());
+        })
+    }
+
+    /// Persist the `/settings` board's task-turns flip (#79, AD-0023)
+    /// — Ctrl-S, not Enter. Load-modify-save: only that field is
+    /// written; every other user setting survives, and an unparseable
+    /// file is refused untouched.
+    pub fn persist_task_turns(enabled: bool) -> Result<(), String> {
+        let path = settings_path().ok_or("could not determine config directory")?;
+        Self::persist_task_turns_to(&path, enabled)
+    }
+
+    /// The path-independent half of `persist_task_turns`.
+    fn persist_task_turns_to(path: &Path, enabled: bool) -> Result<(), String> {
+        Self::persist_with(path, |settings| settings.task_turns = Some(enabled))
+    }
+
+    /// Persist the `/settings` board's image flip (#79, AD-0023).
+    pub fn persist_images(enabled: bool) -> Result<(), String> {
+        let path = settings_path().ok_or("could not determine config directory")?;
+        Self::persist_images_to(&path, enabled)
+    }
+
+    /// The path-independent half of `persist_images`.
+    fn persist_images_to(path: &Path, enabled: bool) -> Result<(), String> {
+        Self::persist_with(path, |settings| settings.images = Some(enabled))
+    }
+
+    /// The shared Ctrl-S shape (#45): load, mutate one field, save.
+    /// One construction path so a new board row can never grow a
+    /// bespoke persistence dialect.
+    fn persist_with(path: &Path, mutate: impl FnOnce(&mut Settings)) -> Result<(), String> {
         let mut settings = Self::load_from(path)?;
-        settings.default_model = Some(model.to_string());
+        mutate(&mut settings);
         settings.save_to(path)
     }
 
@@ -192,6 +226,64 @@ mod tests {
         assert_eq!(loaded.default_tools.as_deref(), Some("all"));
         assert_eq!(loaded.telemetry, Some(true));
         assert_eq!(loaded.images, Some(false));
+    }
+
+    #[test]
+    fn persist_flags_keep_every_other_setting() {
+        // The #45 contract, now for the /settings board (#79): Ctrl-S
+        // writes one field, not a fresh file. Both flags share the
+        // same persist_with path, so one test covers the shape and
+        // one pass proves neither clobbers the other.
+        let dir = std::env::temp_dir().join(format!("hi-settings-{}-flags", std::process::id()));
+        let path = dir.join("settings.json");
+        let existing = Settings {
+            default_model: Some("zai/glm-5.3".into()),
+            thinking: Some(ThinkingLevel::High),
+            default_tools: Some("all".into()),
+            telemetry: Some(true),
+            images: Some(false),
+            task_turns: None,
+        };
+        existing.save_to(&path).unwrap();
+
+        Settings::persist_task_turns_to(&path, true).unwrap();
+        Settings::persist_images_to(&path, true).unwrap();
+
+        let loaded = Settings::load_from(&path).unwrap();
+        assert_eq!(loaded.default_model.as_deref(), Some("zai/glm-5.3"));
+        assert_eq!(loaded.thinking, Some(ThinkingLevel::High));
+        assert_eq!(loaded.default_tools.as_deref(), Some("all"));
+        assert_eq!(loaded.telemetry, Some(true));
+        assert_eq!(loaded.images, Some(true));
+        assert_eq!(loaded.task_turns, Some(true));
+    }
+
+    #[test]
+    fn persist_flag_on_missing_file_writes_just_the_choice() {
+        let dir =
+            std::env::temp_dir().join(format!("hi-settings-{}-flagfirst", std::process::id()));
+        let path = dir.join("settings.json");
+
+        Settings::persist_task_turns_to(&path, true).unwrap();
+
+        let loaded = Settings::load_from(&path).unwrap();
+        assert_eq!(loaded.task_turns, Some(true));
+        assert_eq!(loaded.default_model, None);
+        assert_eq!(loaded.images, None);
+    }
+
+    #[test]
+    fn persist_flag_refuses_to_clobber_an_unparseable_file() {
+        let dir =
+            std::env::temp_dir().join(format!("hi-settings-{}-flagbroken", std::process::id()));
+        let path = dir.join("settings.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&path, "{ not json").unwrap();
+
+        let err = Settings::persist_images_to(&path, true).unwrap_err();
+
+        assert!(err.contains("cannot parse"), "got: {err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
     }
 
     #[test]
