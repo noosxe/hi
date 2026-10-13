@@ -899,9 +899,10 @@ impl App {
     /// rows, completion menus 3-4; 0 when no menu is open. The menu
     /// takes its rows from the streaming area (elastic 8 → 2), so it
     /// lands directly above the input.
-    /// The status board (AD-0025, amended): rows bottom-up, two
-    /// permanent residents. Row 0 is location on the left — its right
-    /// sits empty for future residents. Row 1 is the session's own
+    /// The status board (AD-0025, amended; usage AD-0026): rows
+    /// bottom-up, two permanent residents. Row 0 is location on the
+    /// left, the session's usage line on the right. Row 1 is the
+    /// session's own
     /// context: the model (+thinking) on the right — the indicator
     /// you read all day — tasks on the left while they exist, and the
     /// auto-trigger arm appended after the model (transient noise
