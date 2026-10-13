@@ -71,6 +71,23 @@ fn paste_key(key: &KeyEvent) -> bool {
 
 #[cfg(test)]
 pub(crate) fn test_app() -> App {
+    app_with(crate::SessionInit {
+        system_prompt: None,
+        thinking: None,
+        tools: Arc::new(ToolRegistry::new()),
+        messages: Vec::new(),
+        session: None,
+        usage: Usage::default(),
+        usage_last_prompt: 0,
+        images: hi_core::ImageGate::new(false),
+        images_setting: true,
+        tasks: None,
+        task_turns: false,
+    })
+}
+
+#[cfg(test)]
+fn app_with(init: crate::SessionInit) -> App {
     App::new(
         Arc::new(hi_core::MockProvider::default()),
         Status {
@@ -80,17 +97,7 @@ pub(crate) fn test_app() -> App {
         },
         Catalog::default(),
         ModelsConfig::default(),
-        crate::SessionInit {
-            system_prompt: None,
-            thinking: None,
-            tools: Arc::new(ToolRegistry::new()),
-            messages: Vec::new(),
-            session: None,
-            images: hi_core::ImageGate::new(false),
-            images_setting: true,
-            tasks: None,
-            task_turns: false,
-        },
+        init,
         false,
     )
 }
@@ -332,6 +339,8 @@ impl App {
             tools,
             messages,
             session,
+            usage,
+            usage_last_prompt,
             images,
             images_setting,
             tasks,
@@ -372,8 +381,8 @@ impl App {
             task_turns,
             auto_trigger_budget: AUTO_TRIGGER_BUDGET,
             auto_armed: false,
-            usage: Usage::default(),
-            usage_last_prompt: 0,
+            usage,
+            usage_last_prompt,
             scroll: crate::scroll::Scroll::new(),
             session_root: None,
         }
@@ -1444,6 +1453,10 @@ impl App {
             Message::System(format!("resumed {count} messages from {}", path.display())),
         );
         self.messages = messages;
+        // The bill replays with the transcript (#85): merged recorded
+        // rounds, the last recorded prompt the context fact.
+        self.usage = loaded.usage;
+        self.usage_last_prompt = loaded.usage_last_prompt;
         // Cache routing follows the session: the new id becomes the
         // prompt-cache key before any further turn is spawned.
         let cache_key = session.id().to_string();
@@ -1608,6 +1621,9 @@ impl App {
             // The latest round's prompt IS the context size: every
             // turn re-sends the whole conversation.
             self.usage_last_prompt = bill.prompt_tokens;
+            // And the bill rides the session file (#85) — the front
+            // end that resumes shows the totals.
+            self.persist_usage(bill);
         }
         if finished {
             // `Option::take` removes the turn and leaves `None` behind.
@@ -1650,6 +1666,21 @@ impl App {
             .session
             .as_mut()
             .and_then(|session| session.append(&self.messages[added_from..]).err());
+        if let Some(err) = append_error {
+            self.session = None;
+            self.messages
+                .push(Message::System(format!("session not saved: {err}")));
+        }
+    }
+
+    /// Append the round's bill to the session file — the `usage`
+    /// record (#85). Same degrade-once contract as `persist_new`: one
+    /// loud note, then chat continues without disk.
+    fn persist_usage(&mut self, bill: Usage) {
+        let append_error = self
+            .session
+            .as_mut()
+            .and_then(|session| session.append_usage(&bill).err());
         if let Some(err) = append_error {
             self.session = None;
             self.messages
@@ -1847,6 +1878,83 @@ mod tests {
         );
         app.config = ModelsConfig { providers };
         assert_eq!(app.status_rows()[1].0, "↑250 ↓300 R100 CH70.0% 0.1%/1M");
+    }
+
+    #[test]
+    fn startup_seeds_the_bill_from_the_session_init() {
+        // The startup-resume arm of `App::new`: the replayed bill is
+        // on the board before anything live happens.
+        let init = crate::SessionInit {
+            system_prompt: None,
+            thinking: None,
+            tools: Arc::new(ToolRegistry::new()),
+            messages: Vec::new(),
+            session: None,
+            usage: Usage {
+                prompt_tokens: 800,
+                completion_tokens: 60,
+                cached_tokens: Some(300),
+                reasoning_tokens: None,
+            },
+            usage_last_prompt: 800,
+            images: hi_core::ImageGate::new(false),
+            images_setting: true,
+            tasks: None,
+            task_turns: false,
+        };
+        let app = app_with(init);
+        assert_eq!(app.usage.completion_tokens, 60);
+        assert_eq!(app.usage_last_prompt, 800);
+        let bill = app.status_rows()[1].0.clone();
+        assert!(bill.contains("↑60 ↓500"), "{bill}");
+    }
+
+    #[test]
+    fn a_resumed_session_restores_the_bill_and_the_next_turn_merges() {
+        // A session file with a recorded bill, written the way
+        // turn-end writes it.
+        let root = std::env::temp_dir().join(format!("hi-resume-bill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut session = hi_core::Session::start_in(
+            &root,
+            std::path::Path::new("/p"),
+            "mock",
+            "mock",
+            None,
+            None,
+        )
+        .unwrap();
+        session.append(&[Message::User("recorded".into())]).unwrap();
+        session
+            .append_usage(&Usage {
+                prompt_tokens: 500,
+                completion_tokens: 40,
+                cached_tokens: Some(200),
+                reasoning_tokens: None,
+            })
+            .unwrap();
+        let path = session.path().to_path_buf();
+
+        let mut app = test_app();
+        app.switch_session(&path);
+        // The recorded bill replays: merged, the last recorded prompt
+        // the context fact.
+        assert_eq!(app.usage.completion_tokens, 40);
+        assert_eq!(app.usage_last_prompt, 500);
+        let bill = app.status_rows()[1].0.clone();
+        assert!(bill.contains("↑40"), "{bill}");
+
+        // The next live turn merges on top — the mock's fixed bill
+        // joins the recorded one.
+        app.start_turn();
+        drain_turns(&mut app);
+        assert_eq!(app.usage.completion_tokens, 40 + 250);
+        assert_eq!(app.usage.cached_tokens, Some(200 + 700));
+        assert_eq!(
+            app.usage_last_prompt, 1000,
+            "the live turn is the latest context"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

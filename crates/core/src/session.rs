@@ -9,11 +9,12 @@
 //! ```
 //!
 //! One session is one file, written **append-only**: the first line is a
-//! session header, every following line is one finalized `Message`. Only
-//! turn-end state is persisted — streamed tokens never touch disk — so a
-//! crash costs at most the in-flight turn, and a torn final line is
-//! tolerated on read. Everything is camelCase with unknown fields
-//! ignored, matching the config files' forward-compatibility rule.
+//! session header, every following line is one finalized `Message` or one
+//! round's `usage` record (the bill, #85). Only turn-end state is
+//! persisted — streamed tokens never touch disk — so a crash costs at
+//! most the in-flight turn, and a torn final line is tolerated on read.
+//! Everything is camelCase with unknown fields ignored, matching the
+//! config files' forward-compatibility rule.
 //!
 //! Files are keyed by project directory because resume is a *project*
 //! gesture: "continue what I was doing here". Cross-project resume is a
@@ -26,6 +27,7 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 
 use crate::config::data_dir;
+use crate::event::Usage;
 use crate::message::Message;
 
 /// The first line of a session file — flat, self-describing metadata.
@@ -67,11 +69,16 @@ fn default_version() -> u32 {
     1
 }
 
-/// A session file reopened for reading: header plus the transcript.
+/// A session file reopened for reading: header plus the transcript
+/// and the replayed bill (#85) — `usage` merged across every recorded
+/// round, `usage_last_prompt` the last recorded round's prompt size
+/// (the context-share fact; the latest round's prompt IS the context).
 #[derive(Debug, Clone)]
 pub struct LoadedSession {
     pub header: SessionHeader,
     pub messages: Vec<Message>,
+    pub usage: Usage,
+    pub usage_last_prompt: u64,
     pub path: PathBuf,
 }
 
@@ -234,6 +241,23 @@ impl Session {
             .flush()
             .map_err(|err| format!("cannot write {}: {err}", self.path.display()))
     }
+
+    /// Append one round's bill — the `usage` record (#85). One line
+    /// per round, flushed like the messages; replay merges the
+    /// records, and the last one's prompt size is the context fact.
+    pub fn append_usage(&mut self, usage: &Usage) -> Result<(), String> {
+        let payload =
+            serde_json::to_value(usage).map_err(|err| format!("cannot serialize usage: {err}"))?;
+        writeln!(
+            self.file,
+            "{}",
+            serde_json::json!({ "type": "usage", "usage": payload })
+        )
+        .map_err(|err| format!("cannot write {}: {err}", self.path.display()))?;
+        self.file
+            .flush()
+            .map_err(|err| format!("cannot write {}: {err}", self.path.display()))
+    }
 }
 
 /// Load the most recent session for `cwd` — the `--continue` half.
@@ -386,6 +410,8 @@ pub fn load(path: &Path) -> Result<LoadedSession, String> {
         .map_err(|err| format!("cannot read {}: {err}", path.display()))?;
     let mut header: Option<SessionHeader> = None;
     let mut messages = Vec::new();
+    let mut usage = Usage::default();
+    let mut usage_last_prompt = 0u64;
     let lines: Vec<&str> = raw
         .lines()
         .map(str::trim)
@@ -408,6 +434,13 @@ pub fn load(path: &Path) -> Result<LoadedSession, String> {
                 }
                 messages.push(message);
             }
+            Ok(Entry::Usage(recorded)) => {
+                if header.is_none() {
+                    return Err(format!("{}: usage before session header", path.display()));
+                }
+                usage_last_prompt = recorded.prompt_tokens;
+                usage.merge(recorded);
+            }
             Err(err) => {
                 let is_torn_tail = index == lines.len() - 1;
                 if is_torn_tail {
@@ -421,6 +454,8 @@ pub fn load(path: &Path) -> Result<LoadedSession, String> {
     Ok(LoadedSession {
         header,
         messages,
+        usage,
+        usage_last_prompt,
         path: path.to_path_buf(),
     })
 }
@@ -445,6 +480,7 @@ pub fn project_key(cwd: &Path) -> String {
 enum Entry {
     Header(SessionHeader),
     Message(Message),
+    Usage(Usage),
 }
 
 fn parse_line(line: &str) -> Result<Entry, String> {
@@ -460,6 +496,13 @@ fn parse_line(line: &str) -> Result<Entry, String> {
             Ok(Entry::Message(
                 serde_json::from_value(message.clone())
                     .map_err(|err| format!("malformed message: {err}"))?,
+            ))
+        }
+        Some("usage") => {
+            let usage = value.get("usage").ok_or("usage line missing payload")?;
+            Ok(Entry::Usage(
+                serde_json::from_value(usage.clone())
+                    .map_err(|err| format!("malformed usage: {err}"))?,
             ))
         }
         other => Err(format!(
@@ -818,6 +861,127 @@ mod tests {
         assert_eq!(legacy.name, None);
         assert_eq!(legacy.forked_from, None);
     }
+    #[test]
+    fn usage_records_round_trip_and_replay_the_bill() {
+        let root = temp_root("usagereplay");
+        let cwd = Path::new("/p");
+        let mut session = Session::start_in(&root, cwd, "prov", "mod", None, None).unwrap();
+        session.append(&[Message::User("turn one".into())]).unwrap();
+        session
+            .append_usage(&crate::event::Usage {
+                prompt_tokens: 1000,
+                completion_tokens: 250,
+                cached_tokens: Some(700),
+                reasoning_tokens: Some(100),
+            })
+            .unwrap();
+        session.append(&[Message::User("turn two".into())]).unwrap();
+        session
+            .append_usage(&crate::event::Usage {
+                prompt_tokens: 2000,
+                completion_tokens: 300,
+                cached_tokens: None,
+                reasoning_tokens: Some(50),
+            })
+            .unwrap();
+        let path = session.path().to_path_buf();
+
+        // On disk: the record envelope, camelCase, absent details omitted.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let line = raw
+            .lines()
+            .find(|l| l.contains(r#""type":"usage""#))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(value["usage"]["promptTokens"], 1000);
+        assert_eq!(value["usage"]["cachedTokens"], 700);
+        assert!(value["usage"].get("reasoning_tokens").is_none());
+        assert!(value["usage"].get("prompt_tokens").is_none());
+        assert!(
+            !raw.lines().any(|l| l.contains(r#""cachedTokens":null"#)),
+            "absent details are omitted, not null: {raw}"
+        );
+
+        // Replay: the records merge, the last prompt is the context fact.
+        let loaded = load(&path).unwrap();
+        assert_eq!(
+            loaded.usage,
+            crate::event::Usage {
+                prompt_tokens: 3000,
+                completion_tokens: 550,
+                cached_tokens: Some(700),
+                reasoning_tokens: Some(150),
+            }
+        );
+        assert_eq!(loaded.usage_last_prompt, 2000);
+    }
+
+    #[test]
+    fn sessions_without_usage_records_load_with_an_empty_bill() {
+        // The forward-compat seam: a session written before #85 loads
+        // with a zero bill, and a usage record before the header is as
+        // loud as a message before one.
+        let root = temp_root("nousage");
+        let session = Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        let header = std::fs::read_to_string(session.path()).unwrap();
+        std::fs::write(
+            session.path(),
+            format!("{header}{{\"type\":\"message\",\"message\":{{\"user\":\"old turn\"}}}}\n"),
+        )
+        .unwrap();
+        let loaded = load(session.path()).unwrap();
+        assert_eq!(loaded.messages, vec![Message::User("old turn".into())]);
+        assert_eq!(loaded.usage, crate::event::Usage::default());
+        assert_eq!(loaded.usage_last_prompt, 0);
+
+        let raw = std::fs::read_to_string(session.path()).unwrap();
+        std::fs::write(
+            session.path(),
+            format!(
+            "{raw}{{\"type\":\"usage\",\"usage\":{{\"promptTokens\":1,\"completionTokens\":2}}}}\n"
+        ),
+        )
+        .unwrap();
+        // ...but this file has no header problem — the usage line comes
+        // after the header, so it replays fine.
+        let loaded = load(session.path()).unwrap();
+        assert_eq!(loaded.usage.prompt_tokens, 1);
+        assert_eq!(loaded.usage.completion_tokens, 2);
+
+        // A usage record before any header IS an error, like messages.
+        let orphan = root.join("orphan.jsonl");
+        std::fs::write(
+            &orphan,
+            "{\"type\":\"usage\",\"usage\":{\"promptTokens\":1,\"completionTokens\":2}}\n",
+        )
+        .unwrap();
+        assert!(load(&orphan).is_err());
+    }
+
+    #[test]
+    fn fork_starts_with_an_empty_bill() {
+        // A fork is a new session: it inherits the transcript, never
+        // the economics.
+        let root = temp_root("forkbill");
+        let mut source =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        source.append(&[Message::User("history".into())]).unwrap();
+        source
+            .append_usage(&crate::event::Usage {
+                prompt_tokens: 5000,
+                completion_tokens: 900,
+                cached_tokens: None,
+                reasoning_tokens: None,
+            })
+            .unwrap();
+        let source_path = source.path().to_path_buf();
+
+        let fork = Session::fork_from_in(&root, &source_path, Path::new("/q"), None).unwrap();
+        let loaded = load(fork.path()).unwrap();
+        assert_eq!(loaded.messages, vec![Message::User("history".into())]);
+        assert_eq!(loaded.usage, crate::event::Usage::default());
+    }
+
     #[test]
     fn images_round_trip_through_the_session_file() {
         let root = temp_root("images");

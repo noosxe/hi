@@ -144,12 +144,17 @@ inherits. No default timeout: long-lived work is the point; a cap of
 
 One JSONL file per session under the data dir (`config::data_dir()` +
 `sessions/`), in a cwd-keyed project directory (pi-style encoding). Only
-finalized messages are persisted, appended and flushed at turn end; the
-reader tolerates a torn final line and rejects malformation anywhere else.
+finalized messages — and one `usage` record per round (the bill, #85) —
+are persisted, appended and flushed at turn end; the reader tolerates a
+torn final line and rejects malformation anywhere else.
 
 - `Session::start` / `Session::resume(path)` — create or reopen; the file
   handle stays open in append mode for the session's life.
 - `Session::append(&[Message])` — one JSONL line per message, flushed.
+  `Session::append_usage(&Usage)` — the round's bill, same contract.
+  Replay merges the records (`LoadedSession.usage`) and takes the last
+  record's prompt size as `usage_last_prompt` — the context-share fact.
+  A fork inherits the transcript, never the economics.
 - `session::latest(cwd)` — newest readable session for a project
   (`--continue`); `session::load(path)` — full parse.
 - `SessionHeader` is the flat first line (`camelCase`, `version` field for

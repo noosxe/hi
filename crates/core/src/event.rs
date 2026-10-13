@@ -1,5 +1,7 @@
 //! The event stream — how a turn in progress talks to the UI.
 
+use serde::{Deserialize, Serialize};
+
 use crate::tool::{ToolCall, ToolResult};
 
 /// One heartbeat of an agent turn.
@@ -42,15 +44,18 @@ pub enum Event {
 /// formatting is a front-end policy. The detail halves are `Option`
 /// because providers differ: an absent detail means "not reported",
 /// not zero, and every display hides what its input lacks.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Usage {
     /// Everything re-sent to the model this round — the context.
     pub prompt_tokens: u64,
     /// What the model generated this round.
     pub completion_tokens: u64,
     /// The share of `prompt_tokens` served from the provider's cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
     /// Reasoning tokens the model spent, inside `completion_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
 }
 

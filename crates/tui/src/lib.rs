@@ -37,6 +37,7 @@ use ratatui::crossterm::execute;
 use ratatui::{TerminalOptions, Viewport};
 
 use crate::app::App;
+use hi_core::event::Usage;
 use hi_core::{Message, ModelsConfig, Provider, Session, ThinkingLevel, ToolRegistry};
 
 /// Everything a session carries beyond provider/config: the pieces that
@@ -52,6 +53,12 @@ pub struct SessionInit {
     pub tools: Arc<ToolRegistry>,
     /// Transcript to start from — empty, or the resumed session's.
     pub messages: Vec<Message>,
+    /// The replayed bill (#85): usage merged across the session file's
+    /// recorded rounds, and the last recorded round's prompt size —
+    /// the context-share fact. Both are zero until the first turn,
+    /// live or recorded.
+    pub usage: Usage,
+    pub usage_last_prompt: u64,
     /// Open session file for turn-end appends (`None` = not persisting).
     pub session: Option<Session>,
     /// The shared image-attachment gate (the same Arc inside `read`).

@@ -12,7 +12,7 @@ use clap::Parser;
 
 use hi_core::{
     ImageGate, Message, MockProvider, ModelsConfig, OpenAiCompatProvider, Provider, Session,
-    Settings, ThinkingLevel, ToolBundle, ToolRegistry, headless,
+    Settings, ThinkingLevel, ToolBundle, ToolRegistry, event::Usage, headless,
 };
 use hi_tui::{Catalog, SessionInit, Status, run};
 
@@ -157,6 +157,8 @@ fn dispatch(cli: Cli) -> ExitCode {
                 tools: Arc::new(ToolRegistry::new()),
                 messages: Vec::new(),
                 session: None,
+                usage: Usage::default(),
+                usage_last_prompt: 0,
                 images: ImageGate::new(false),
                 images_setting: true,
                 tasks: None,
@@ -217,9 +219,11 @@ fn dispatch(cli: Cli) -> ExitCode {
         Ok(opened) => opened,
         Err(err) => return fail(&err),
     };
-    let Some((messages, session)) = opened else {
+    let Some(opened) = opened else {
         return ExitCode::SUCCESS;
     };
+    let (messages, session) = (opened.messages, opened.session);
+    let (usage, usage_last_prompt) = (opened.usage, opened.usage_last_prompt);
     if let Some(session) = session.as_ref() {
         stamp_session_cache_key(&mut target, session);
     }
@@ -229,6 +233,8 @@ fn dispatch(cli: Cli) -> ExitCode {
         tools: target.tools,
         messages,
         session,
+        usage,
+        usage_last_prompt,
         images: target.images,
         images_setting: target.images_setting,
         tasks: target.tasks,
@@ -428,9 +434,13 @@ fn print_mode(cli: &Cli) -> ExitCode {
         Ok(opened) => opened,
         Err(err) => return fail(&err),
     };
-    let Some((mut history, session)) = opened else {
+    let Some(mut opened) = opened else {
         return ExitCode::SUCCESS;
     };
+    // Headless seeds no bill — it prints none either; the record still
+    // rides the session file (headless::run).
+    let (mut history, session) = (opened.messages, opened.session.take());
+    let _ = (opened.usage, opened.usage_last_prompt);
 
     if let (Some(target), Some(session)) = (target.as_mut(), session.as_ref()) {
         stamp_session_cache_key(target, session);
@@ -468,9 +478,27 @@ fn read_piped_stdin() -> Option<String> {
     Some(piped)
 }
 
-/// What a run opens with: the transcript to seed from and the file to
-/// append to. `None` session = not persisting.
-type OpenedSession = (Vec<Message>, Option<Session>);
+/// What a run opens with: the transcript to seed from, the file to
+/// append to, and the replayed bill (#85). A fork inherits the
+/// transcript, never the economics.
+struct OpenedSession {
+    messages: Vec<Message>,
+    session: Option<Session>,
+    usage: Usage,
+    usage_last_prompt: u64,
+}
+
+impl OpenedSession {
+    /// A run that starts from nothing — no transcript, no bill.
+    fn fresh() -> Self {
+        Self {
+            messages: Vec::new(),
+            session: None,
+            usage: Usage::default(),
+            usage_last_prompt: 0,
+        }
+    }
+}
 
 /// Resolve the session-selection flags into an open session — shared by
 /// the TUI and headless paths. Selection failures (`--session` with no
@@ -488,7 +516,7 @@ fn open_session(
 ) -> Result<Option<OpenedSession>, String> {
     let name = cli.name.as_deref();
     if cli.no_session {
-        return Ok(Some((Vec::new(), None)));
+        return Ok(Some(OpenedSession::fresh()));
     }
     // --fork: copy, then run in the copy. The original is never opened
     // for write, and the copy carries this directory in its header.
@@ -502,7 +530,13 @@ fn open_session(
         };
         let session = Session::fork_from(&source, cwd, name)?;
         let messages = hi_core::session::load(session.path())?.messages;
-        return Ok(Some((messages, Some(session))));
+        return Ok(Some(OpenedSession {
+            messages,
+            session: Some(session),
+            // A fork restarts the economics: transcript inherited,
+            // bill not.
+            ..OpenedSession::fresh()
+        }));
     }
     // --session: open by path or id. Another project's file is offered
     // as a fork interactively (pi's prompt) and refused with the fork
@@ -520,7 +554,11 @@ fn open_session(
                 ))? {
                     let session = Session::fork_from(&path, cwd, name)?;
                     let messages = hi_core::session::load(session.path())?.messages;
-                    Ok(Some((messages, Some(session))))
+                    Ok(Some(OpenedSession {
+                        messages,
+                        session: Some(session),
+                        ..OpenedSession::fresh()
+                    }))
                 } else {
                     Ok(None) // declined — the original is untouched
                 }
@@ -551,16 +589,19 @@ fn open_session(
     if cli.continue_last {
         return Ok(Some(open_resumed(cwd).unwrap_or_else(|warning| {
             eprintln!("hi: {warning}");
-            (Vec::new(), None)
+            OpenedSession::fresh()
         })));
     }
     // Fresh start, optionally named.
     Ok(Some(
         Session::start(provider, model, thinking, name)
-            .map(|session| (Vec::new(), Some(session)))
+            .map(|session| OpenedSession {
+                session: Some(session),
+                ..OpenedSession::fresh()
+            })
             .unwrap_or_else(|warning| {
                 eprintln!("hi: {warning}");
-                (Vec::new(), None)
+                OpenedSession::fresh()
             }),
     ))
 }
@@ -582,7 +623,7 @@ fn confirm(question: &str) -> Result<bool, String> {
 
 /// Reopen the newest session file for `cwd` and prepare it for
 /// continued appending. A system note marks the seam in the transcript.
-fn open_resumed(cwd: &std::path::Path) -> Result<(Vec<Message>, Option<Session>), String> {
+fn open_resumed(cwd: &std::path::Path) -> Result<OpenedSession, String> {
     let loaded = hi_core::session::latest(cwd)?.ok_or("no previous session in this directory")?;
     let session = Session::resume(&loaded.path)?;
     let count = loaded.messages.len();
@@ -594,7 +635,12 @@ fn open_resumed(cwd: &std::path::Path) -> Result<(Vec<Message>, Option<Session>)
             loaded.path.display()
         )),
     );
-    Ok((messages, Some(session)))
+    Ok(OpenedSession {
+        messages,
+        session: Some(session),
+        usage: loaded.usage,
+        usage_last_prompt: loaded.usage_last_prompt,
+    })
 }
 
 /// Hand the session to the interactive interface.

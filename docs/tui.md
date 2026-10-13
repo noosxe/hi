@@ -149,7 +149,8 @@ parse is reported, not overwritten — Esc closes.
   cumulative output / input-net-of-cache / reasoning / cache-hit
   share, plus the *latest* round's prompt against the model's
   configured `contextWindow` (absent ⇒ no share; every segment hides
-  when its input is absent; empty until the first `Event::Usage`).
+  when its input is absent; empty until the first bill — recorded in
+  the session file, so a resume restores the totals (#85)).
   The model (+thinking) owns row 1's right — the indicator you read
   all day — with the auto-trigger arm appended (`auto: armed` —
   #72's visible feedback; transient noise rides right). Row 0 is

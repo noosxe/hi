@@ -1038,3 +1038,23 @@ name (row 0's right) — the work sits beneath what it runs against.* Cost stays
 carried ruling — a pricing table, not a wire fact). The mock emits a
 fixed bill (↑250 ↓300 R100 CH70.0%), so tests and the pty assert the
 rendered line exactly.
+
+---
+
+## AD-0027 — the bill survives the restart (2026-10-16)
+
+#85 closed the gap #84 left: the usage line lived in `App` memory, so a
+restart reset ↑↓R/CH to zero and `/resume` restored the transcript but
+not the bill. The ruling is the session file's own shape applied once
+more — **persist the per-round facts, re-derive the totals on read**.
+Every round appends one `{"type":"usage"}` record beside the messages it
+bills; replay merges them with the exact `Usage::merge` semantics and
+takes the last record's prompt size as the context fact. No running
+total is ever stored. The refinements the wire made cheap: the context
+share survives resume too (the last recorded prompt IS a persisted
+fact — nothing to guess), and a **fork inherits the transcript, never
+the economics** — a forked session's board reads zero until it spends.
+Headless prints no bill but records one; the exhaustive rule holds —
+every front end that consumes `Event::Usage` also persists it. Old
+session files load untouched (zero bill); new records are a new line
+kind, the same forward-compat seam messages already use.
