@@ -143,17 +143,18 @@ parse is reported, not overwritten — Esc closes.
   narrow terminals, never panics.
 - **The status board (AD-0025, amended; usage AD-0026)**:
   `App::status_rows()` returns rows bottom-up, two permanent
-  residents. Row 0 is location on the left and the session's
-  **usage line** on the right — `↑8.6M ↓1.9M R250M CH99.2% 10.7%/1M`
-  from `status::usage_line`: cumulative output / input-net-of-cache /
-  reasoning / cache-hit share, plus the *latest* round's prompt
-  against the model's configured `contextWindow` (absent ⇒ no share;
-  every segment hides when its input is absent; empty until the
-  first `Event::Usage`). Row 1 is the session's own context: the
-  model (+thinking) on the right — the indicator you read all day —
-  tasks on the left (`tasks: 2 running · 1 done`), and the
-  auto-trigger arm appended after the model (`auto: armed` — #72's
-  visible feedback; transient noise rides right).
+  residents. Row 1 — the board's top — holds the session's
+  **usage line** in the top-left corner:
+  `↑8.6M ↓1.9M R250M CH99.2% 10.7%/1M` from `status::usage_line`:
+  cumulative output / input-net-of-cache / reasoning / cache-hit
+  share, plus the *latest* round's prompt against the model's
+  configured `contextWindow` (absent ⇒ no share; every segment hides
+  when its input is absent; empty until the first `Event::Usage`).
+  The model (+thinking) owns row 1's right — the indicator you read
+  all day — with the auto-trigger arm appended (`auto: armed` —
+  #72's visible feedback; transient noise rides right). Row 0 is
+  location on the left and the background tasks' counts on the right
+  (`tasks: 2 running · 1 done`) — under the model they run against.
   `App::status_height()` is the one height `layout` and the flush
   pass both measure with, so draw and flush can never disagree; a
   menu still outranks the whole board (the ruled yield, generalized
