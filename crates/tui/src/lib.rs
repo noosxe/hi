@@ -65,6 +65,10 @@ pub struct SessionInit {
     /// tools. The app drains its completion channel per frame and shows
     /// the running count in the status row (`None` = no task tools).
     pub tasks: Option<hi_core::tasks::TaskManager>,
+    /// The `settings.taskTurns` opt-in, resolved at startup (#72,
+    /// AD-0022): a finished task may start a turn. The app owns the
+    /// trigger; core only resolves the human's choice.
+    pub task_turns: bool,
 }
 
 /// Run the interactive interface until the user quits.

@@ -48,7 +48,9 @@ the keyboard), `tick: u8` (spinner frames), `completion: Option<Completion>`
 `turn: Option<Turn>`, `tasks: Option<hi_core::tasks::TaskManager>` (drained
 per frame in `pump` — completions become transcript notes; the running
 count feeds the status row), `tasks_view: Option<TasksView>` (the `/tasks`
-pane: list, or one task's output watched live — AD-0021).
+pane: list, or one task's output watched live — AD-0021),
+`task_turns: bool` plus the auto-trigger budget and arm (AD-0022: an
+opted-in idle session may start a turn on a completion).
 
 `Turn { text, error: Option<String>, started_at: Instant, rx: Receiver<Event>
 }` — `rx` is private on purpose: raw events are consumed only by `pump` and

@@ -82,6 +82,7 @@ A credential *source*, not necessarily a literal:
   "defaultTools": "coding"         // none | read-only | coding | all; --tools overrides per run
   "telemetry": false               // opt-in provider attribution; see below
   "images": true                   // image upload master switch; default on
+  "taskTurns": false               // opt-in: finished background tasks may start a turn
 }
 ```
 
@@ -93,6 +94,14 @@ A credential *source*, not necessarily a literal:
   fails startup loudly in both places.
 - `defaultModel` applies **only when no `--provider`/`--model` flags are
   given** (precedence in [core.md](core.md) → selection.rs).
+- `taskTurns` is the orchestrator opt-in (#72, AD-0022): when a
+  background task finishes and no turn is in flight, hi starts a turn
+  whose payload carries the completion notes, marked
+  `(auto-trigger)`. Default off — a turn spends the user's tokens, so
+  only the human flips this. A per-session budget (10 turns) bounds
+  completion→turn→spawn→completion chains; when it runs out hi says so
+  once in the transcript and further completions ride the human's next
+  turn, exactly as before.
 - `thinking` reaches the wire only through the selected model's
   `thinkingLevelMap`; the active level is shown in the status row
   (`(provider) model · thinking:high`).

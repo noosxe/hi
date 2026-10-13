@@ -160,6 +160,7 @@ fn dispatch(cli: Cli) -> ExitCode {
                 images: ImageGate::new(false),
                 images_setting: true,
                 tasks: None,
+                task_turns: false,
             },
             // The mock never touches the wire — nothing to attribute.
             false,
@@ -231,6 +232,7 @@ fn dispatch(cli: Cli) -> ExitCode {
         images: target.images,
         images_setting: target.images_setting,
         tasks: target.tasks,
+        task_turns: target.task_turns,
     };
     launch(
         target.provider,
@@ -263,6 +265,9 @@ struct Target {
     /// /model switch re-resolves the policy (AD-0012).
     images: hi_core::ImageGate,
     images_setting: bool,
+    /// The `settings.taskTurns` opt-in, resolved once (#72) so the
+    /// TUI's trigger honors the human's choice for the whole session.
+    task_turns: bool,
     /// The background-task manager the registry's `task_*` tools share;
     /// the TUI drains its completion channel per frame (#5, AD-0019).
     /// Headless runs hold it only here, so drop = exit = groups killed.
@@ -299,6 +304,7 @@ fn resolve_target(
     // vision-capable. The gate is shared: /model switches re-resolve
     // it without rebuilding the registry.
     let images_setting = settings.images_enabled();
+    let task_turns = settings.task_turns_enabled();
     let images = ImageGate::new(entry.images_allowed(&selected.model, images_setting));
     let tasks = hi_core::tasks::tasks_dir().map(hi_core::tasks::TaskManager::new);
     let tools = Arc::new(bundle.registry(&cwd, images.clone(), tasks.clone()));
@@ -338,6 +344,7 @@ fn resolve_target(
         images,
         images_setting,
         tasks,
+        task_turns,
     })
 }
 
