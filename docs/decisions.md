@@ -984,3 +984,23 @@ honest to surface state. The board:
   tasks (`tasks: 2 running · 1 done`, which replaces the `· N bg`
   bolt-on) and the auto-trigger arm (`auto: armed` — #72's trigger
   finally has visible feedback). #4/#6 register here when they land.
+
+---
+
+## AD-0025a — amendment: the model is a resident, not an earned row (2026-10-16)
+
+AD-0025 shipped with the model on row 0 and "a quiet session renders
+exactly today's one row." One session with the board made that wrong:
+the model indicator is permanent session context, not an earned
+event — it belongs on the context row, next to the tasks and the arm
+it governs.
+
+The amendment (append-only, per house rule): the board has **two
+permanent residents**. Row 0 is location on the left, its right held
+open for future residents; row 1 carries the model (+thinking) on
+the right — tasks on the left, the auto-trigger arm appended after
+the model, transient noise riding right. "Height follows content"
+still holds; the content now always includes row 1. The cost is one
+terminal row in every session — the thing AD-0025's ruling 1
+originally refused — spent knowingly, with three total rows the
+declared ceiling.
