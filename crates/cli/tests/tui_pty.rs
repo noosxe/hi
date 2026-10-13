@@ -13,10 +13,10 @@
 //! with a cursor move between neighbors, so rendered words are never
 //! contiguous in the bytes), rows pushed off the top of the screen are
 //! per-cell backgrounds expose tint leaks that plain text cannot see.
-//! (One limit is recorded honestly: avt models a flush by extending
-//! its buffer — an LF at the bottom appends rather than pushing
-//! scrollback — so the pushed rows' *content* is not assertable here;
-//! what the rig asserts is that the live area gave the rows up.)
+//! (One limit is recorded honestly: whether avt keeps the rows a
+//! flush scrolls off the top depends on how they were scrolled, and
+//! real scrollback is a real terminal's business — the rig asserts
+//! that the live area gave the rows up, not where they went.)
 //! Fixed sleeps are banned: every wait is a predicate over rendered
 //! frames, sampled until it holds — and holds stable.
 //!
@@ -180,13 +180,14 @@ impl Tui {
         self.sees(keys);
     }
 
-    /// The rendered frame: the emulator's grid, one trimmed row per
-    /// terminal row. Needles match this, never the byte stream.
+    /// The rendered frame: the emulator's *view* — the live screen's
+    /// rows, one trimmed row per terminal row — never the byte stream
+    /// and never the scrollback above the view (a flush grows the
+    /// buffer; only the view is what a user sees).
     fn frame(&self) -> String {
         let emu = self.emu.lock().unwrap();
-        emu.text()
-            .iter()
-            .map(|row| row.trim_end())
+        emu.view()
+            .map(|line| line.text().trim_end().to_string())
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -304,17 +305,6 @@ impl Tui {
         });
     }
 
-    /// Wait until the emulator's buffer grew past the screen height —
-    /// avt models a flush by extending the buffer (its LF at the bottom
-    /// appends rather than pushes scrollback, so the pushed rows'
-    /// *content* is a real-terminal question, not an assertable one
-    /// here), and growth past `rows` is exactly the flush's footprint.
-    fn wait_for_flush(&self) {
-        self.until("the flush to extend the buffer", TEXT_TIMEOUT, move |_| {
-            self.emu.lock().unwrap().lines().count() > ROWS as usize
-        });
-    }
-
     /// Type `/exit` + Enter and poll for a clean exit — the teardown
     /// ordering is exactly what this wait covers: any hang (kitty pop,
     /// viewport restore, a poll loop that never quits) fails the test.
@@ -368,17 +358,25 @@ fn char_is_spinner(c: char) -> bool {
     ('\u{2800}'..='\u{28ff}').contains(&c)
 }
 
-/// Answer every handshake query occurrence, then hand back the bytes
-/// after the last answered query (they belong to the emulator).
+/// Answer every query occurrence, removing only the query bytes —
+/// never the bytes around them. The DSR hi sends once per flush
+/// (`clear()`'s position snapshot) rides in the middle of real
+/// content, so discarding a query's prefix used to eat transcript
+/// rows out of the emulator's feed while hi had emitted them fine.
 fn pending_replies(carry: &mut Vec<u8>, chunk: &[u8], writer: &Mutex<Box<dyn Write + Send>>) {
     carry.extend_from_slice(chunk);
     for (query, reply) in QUERIES {
-        while let Some(at) = carry.windows(query.len()).position(|w| w == *query) {
-            carry.drain(..at + query.len());
-            {
-                let mut w = writer.lock().unwrap();
-                let _ = w.write_all(reply);
-                let _ = w.flush();
+        let mut i = 0;
+        while i + query.len() <= carry.len() {
+            if &carry[i..i + query.len()] == *query {
+                carry.drain(i..i + query.len());
+                {
+                    let mut w = writer.lock().unwrap();
+                    let _ = w.write_all(reply);
+                    let _ = w.flush();
+                }
+            } else {
+                i += 1;
             }
         }
     }
@@ -421,23 +419,34 @@ fn the_tui_boots_takes_keys_streams_and_exits_cleanly() {
 }
 
 #[test]
-fn a_full_window_flush_pushes_rows_to_scrollback_and_keeps_the_composer() {
+fn a_full_window_gives_its_rows_up_when_it_overflows_and_keeps_the_composer() {
     let mut tui = Tui::spawn(&["--mock"]);
     tui.sees("\u{2500}");
     // Turn well past the window: the stream area holds roughly
-    // height - input - status rows, so four turns ride the boundary
-    // and a slow or differently-wrapping runner may never overflow.
-    // Seven turns overflow it with margin — each block must leave the
-    // live window through a flush, and the composer must survive every
-    // flush.
-    for n in 1..=7 {
+    // height - input - status rows and turn height varies with the
+    // runner (reply wrapping, separator compaction), so drive enough
+    // turns to overflow with margin on the most compact layout. Each
+    // turn the composer must survive, and at the end turn 1's block
+    // must have left the live area through a flush.
+    // Turn 1 gets a needle no later turn can match as a substring.
+    tui.type_keys("alpha message");
+    tui.write("\r");
+    tui.settled_turn("no API key required");
+    tui.assert_composer_visible();
+    tui.assert_composer_untinted();
+    for n in 2..=12 {
         tui.type_keys(&format!("message number {n}"));
         tui.write("\r");
         tui.settled_turn("no API key required");
         tui.assert_composer_visible();
         tui.assert_composer_untinted();
     }
-    tui.wait_for_flush();
+    // The flush's footprint, user-visible: turn 1's block no longer
+    // holds any row of the live area. (What the flushed rows become in
+    // a real terminal's scrollback is outside the emulator's model.)
+    tui.until("turn 1 to leave the live area", TEXT_TIMEOUT, |f| {
+        !f.contains("alpha message")
+    });
     assert!(
         tui.exits_cleanly(Duration::from_secs(20)),
         "/exit did not exit cleanly"
