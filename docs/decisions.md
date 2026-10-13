@@ -957,3 +957,30 @@ mid-stream, not merely correct history after.
 Found in review (#80 follow-up); fixed in ui.rs only — no app, core,
 or flush-mechanics change. The pty suite ran 5× per the
 flush-adjacent-change rule.
+
+---
+
+## AD-0025 — the status board: rows are earned, never reserved (2026-10-16)
+
+The status bar was one hardcoded row with left/right strings and
+bolt-ons (`· thinking:high`, `· N bg` crammed onto the model label).
+Extensions on the roadmap (#4 subagents, #6 Luau host) need somewhere
+honest to surface state. The board:
+
+- **Height follows content.** `status_rows()` returns only non-empty
+  rows — a quiet session renders exactly the classic one-row bar
+  (byte-identical; the pty suite is untouched). No fixed count, no
+  reserved blank rows: absence, the same principle as AD-0023's
+  board.
+- **One shared formula.** `status_height()` feeds `layout()` and
+  `stream_window_height()` — the flush pass and draw measure the same
+  board, so they can never disagree (the `input_height` pattern,
+  extended).
+- **Menus still outrank status.** The whole board yields when a menu
+  is open — the previously ruled yield, generalized from row to
+  board.
+- **Rows come from facts on `App`, not strings on the side.** Row 0
+  is location | model(+thinking). Row 1 is the session's own work:
+  tasks (`tasks: 2 running · 1 done`, which replaces the `· N bg`
+  bolt-on) and the auto-trigger arm (`auto: armed` — #72's trigger
+  finally has visible feedback). #4/#6 register here when they land.
