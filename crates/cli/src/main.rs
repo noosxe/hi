@@ -100,8 +100,13 @@ struct Cli {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    dispatch(Cli::parse())
+}
 
+/// Everything `main` does after parsing: validation, dispatch by flag,
+/// and launch. An own function so the dispatch arms are testable —
+/// `main` itself would run the TUI. Launching stays `hi_tui::run`.
+fn dispatch(cli: Cli) -> ExitCode {
     // Validate before any dispatch: the mock paths never resolve a target,
     // so a bad --tools value must still fail loudly there.
     if let Some(raw) = cli.tools.as_deref()
@@ -602,6 +607,90 @@ fn fail(message: &str) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// XDG variables are process-global; Rust runs tests on threads
+    /// by default, so every env-mutating dispatch test takes this lock.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A throwaway config/data root the dispatch tests can pollute.
+    /// Both XDG variables point at it, so neither the user's real
+    /// models.json nor their session store is ever touched.
+    fn hermetic_root(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("hi-dispatch-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("hi")).unwrap();
+        root
+    }
+
+    fn point_xdg_at(root: &std::path::Path) {
+        // Edition 2024 marks set_var unsafe (same precedent as core's
+        // config tests); ENV_LOCK makes the mutation race-free.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", root) };
+        unsafe { std::env::set_var("XDG_DATA_HOME", root) };
+    }
+
+    fn config_with_models(raw: &str) -> String {
+        String::from(
+            r#"{"providers": {"test-provider": {"baseUrl": "http://localhost:9/v1", "models": "#,
+        ) + raw
+            + r#"}}}"#
+    }
+
+    #[test]
+    fn mock_headless_succeeds_without_any_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        point_xdg_at(&hermetic_root("mock-headless"));
+        let cli = Cli::try_parse_from(["hi", "--mock", "-p", "say something"]).unwrap();
+        assert_eq!(dispatch(cli), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn headless_without_config_fails_with_guidance() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        point_xdg_at(&hermetic_root("headless-no-config"));
+        let cli = Cli::try_parse_from(["hi", "-p", "review this"]).unwrap();
+        assert_eq!(dispatch(cli), ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn list_models_without_config_fails() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        point_xdg_at(&hermetic_root("list-no-config"));
+        let cli = Cli::try_parse_from(["hi", "--list-models"]).unwrap();
+        assert_eq!(dispatch(cli), ExitCode::FAILURE);
+    }
+
+    #[test]
+    fn list_models_prints_the_static_catalog_and_succeeds() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = hermetic_root("list-static");
+        std::fs::write(
+            root.join("hi/models.json"),
+            config_with_models(r#"[{"id": "glm-4.6"}, {"id": "glm-5.3"}]"#),
+        )
+        .unwrap();
+        point_xdg_at(&root);
+        let cli = Cli::try_parse_from(["hi", "--list-models"]).unwrap();
+        assert_eq!(dispatch(cli), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn resolve_target_rejects_an_unknown_tool() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = hermetic_root("unknown-tool");
+        std::fs::write(
+            root.join("hi/models.json"),
+            config_with_models(r#"[{"id": "glm-4.6"}]"#),
+        )
+        .unwrap();
+        point_xdg_at(&root);
+        assert!(resolve_target(None, None, Some("nonexistent")).is_err());
+    }
+
+    #[test]
+    fn fail_reports_and_fails() {
+        assert_eq!(fail("boom"), ExitCode::FAILURE);
+    }
 
     #[test]
     fn session_selection_flags_follow_pi_conflict_rules() {
