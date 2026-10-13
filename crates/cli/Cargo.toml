@@ -8,3 +8,10 @@ license = "MIT OR Apache-2.0"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 hi-core = { path = "../core" }
 hi-tui = { path = "../tui" }
+
+[dev-dependencies]
+# Dev-only: drives the real binary through a pseudo-terminal so the
+# event loop's 50ms poll clock and teardown ordering are tested where
+# a mock event source cannot reach (issue #10). The shipped `hi`
+# never links it (AD-0004 stays about runtime deps).
+portable-pty = "0.8"

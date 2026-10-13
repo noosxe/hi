@@ -691,3 +691,33 @@ finalization of a reply adds its two padding rows with a one-row
 settle, as pi's spacing does; a resize mid-block may re-print a
 couple of seam rows once.
 
+
+---
+
+## AD-0017 — ratatui's `scrolling-regions` feature is on; the pty harness guards the real loop (2026-10-16)
+
+`insert_before` ships in two modes: with the `scrolling-regions`
+feature it scrolls with a `CSI r` region; without it, a fallback
+redraws whole screens per flush. hi never enabled the feature, so
+**every flush, in every terminal, ran the fallback** — worked, but
+churned full-screen redraws per row. Worse, the fallback drops bytes
+written into the terminal while it drains (the pty harness's `/exit`
+keystrokes vanished mid-finalize; real terminals tolerate it, the
+harness cannot). The feature is now on in `crates/tui/Cargo.toml`;
+the flush path is the scrolling-region path everywhere.
+
+The pty harness (`crates/cli/tests/tui_pty.rs`, dev-only
+`portable-pty`) drives the real binary through a pseudo-terminal:
+handshake queries answered (crossterm re-queries the cursor position
+on every resize — one missed reply is a 2s stall then a boot error),
+typed keys asserted in the escape-stripped frame stream, and a clean
+`/exit` asserted within a timeout — the 50ms poll clock and teardown
+ordering are exactly what a mock event source cannot reach. The
+harness kills its child on drop: a panicking assert must not leave an
+orphaned `hi` burning a core. Three pty facts are load-bearing for
+anyone extending it: the pty needs an explicit size (crossterm
+renders nothing into a 0×0 terminal), keys typed before raw mode is
+on are lost to the cooked-mode line discipline (wait for a rendered
+frame first), and needles must be space-free (a space cell is
+byte-identical to the empty background cell, so the frame diff never
+emits it).

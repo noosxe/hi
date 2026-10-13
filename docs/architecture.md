@@ -144,7 +144,7 @@ Works today (see also README "What works today"):
   selected by bundle (`--tools`, default `coding`), results clamped by one
   truncation contract, prompt notes woven into the system prompt (see
   [decisions.md](decisions.md), AD-0004)
-- 303 `#[test]` functions, no network needed (see [testing.md](testing.md))
+- 311 `#[test]` functions, no network needed (see [testing.md](testing.md))
 
 Deliberately not yet built:
 
