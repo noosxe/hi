@@ -328,6 +328,16 @@ impl App {
                 self.cursor = editor::delete_range(&mut self.input, range);
                 self.sync_completion();
             }
+            // Readline word motions: ESC b / ESC f arrive decoded as
+            // Alt+B / Alt+F — what Ghostty's macOS defaults send for
+            // option+arrows (#63). Alt+arrows themselves stay bound
+            // below for terminals that report the chord.
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.cursor = editor::word_left(&self.input, self.cursor);
+            }
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.cursor = editor::word_right(&self.input, self.cursor);
+            }
             KeyCode::Left => {
                 self.cursor = if key.modifiers.contains(KeyModifiers::SUPER) {
                     // Cmd+Left: start of input — the macOS text
@@ -1670,6 +1680,37 @@ mod tests {
         assert_eq!(app.cursor, 0);
         app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SUPER));
         assert_eq!(app.cursor, 15);
+    }
+
+    #[test]
+    fn alt_b_and_alt_f_are_the_readline_word_motions() {
+        let mut app = app();
+        for c in "one two three".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        // What Ghostty's option+arrows decode to (ESC b / ESC f).
+        app.handle_key(alt(KeyCode::Char('b')));
+        assert_eq!(app.cursor, 8);
+        app.handle_key(alt(KeyCode::Char('b')));
+        assert_eq!(app.cursor, 4);
+        app.handle_key(alt(KeyCode::Char('b')));
+        assert_eq!(app.cursor, 0);
+        app.handle_key(alt(KeyCode::Char('f')));
+        assert_eq!(app.cursor, 3);
+        app.handle_key(alt(KeyCode::Char('f')));
+        assert_eq!(app.cursor, 7);
+        app.handle_key(alt(KeyCode::Char('f')));
+        assert_eq!(app.cursor, 13);
+        // Unmodified b still types.
+        app.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(app.input, "one two threeb");
+        // alt+b lands at the start of the word the b is glued to —
+        // "threeb" is one word.
+        app.handle_key(alt(KeyCode::Char('b')));
+        assert_eq!(app.cursor, 8);
+        // From there alt+d kills the whole glued word.
+        app.handle_key(alt(KeyCode::Char('d')));
+        assert_eq!(app.input, "one two ");
     }
 
     #[test]

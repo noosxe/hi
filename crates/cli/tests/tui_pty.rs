@@ -199,6 +199,39 @@ impl Tui {
         all[..all.len().saturating_sub(rows)].to_vec()
     }
 
+    /// The caret column the TUI painted: ratatui positions the
+    /// terminal cursor under the composer caret, and avt tracks
+    /// where it went.
+    fn cursor_col(&self) -> usize {
+        self.emu.lock().unwrap().cursor().col
+    }
+
+    /// Sample the caret column until it holds one value for STABLE
+    /// and return it — the caret lands with its frame, so a settled
+    /// column is a settled screen.
+    fn stable_col(&self, what: &str) -> usize {
+        let deadline = Instant::now() + TEXT_TIMEOUT;
+        let mut col = self.cursor_col();
+        let mut stable_since: Option<Instant> = None;
+        loop {
+            let now = self.cursor_col();
+            if now == col {
+                match stable_since {
+                    None => stable_since = Some(Instant::now()),
+                    Some(then) if then.elapsed() >= STABLE => return col,
+                    Some(_) => {}
+                }
+            } else {
+                col = now;
+                stable_since = None;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "caret never settled: {what} (last col {col})"
+            );
+            std::thread::sleep(POLL);
+        }
+    }
     /// Poll rendered frames until `pred` holds and keeps holding — a
     /// settled screen, not one moment inside a streaming redraw. On
     /// timeout the panic carries the last frame and the scrollback:
@@ -480,6 +513,49 @@ fn a_resize_mid_session_does_not_break_the_loop() {
     tui.type_keys("shrunk");
     tui.write("\r");
     tui.settled_turn("no API key required");
+    assert!(
+        tui.exits_cleanly(Duration::from_secs(20)),
+        "/exit did not exit cleanly"
+    );
+}
+
+/// #63: Ghostty's macOS defaults send option+left/right as the
+/// readline word motions — ESC b / ESC f — which crossterm decodes
+/// as Alt+B / Alt+F. Terminals that report the chord itself send
+/// the legacy CSI encodings instead. Every wire form must move the
+/// composer caret by a word; the assertion is the painted caret
+/// column relative to the typed tail, so the prompt width cancels.
+#[test]
+fn option_arrows_word_motions_arrive_through_their_wire_encodings() {
+    let mut tui = Tui::spawn(&["--mock"]);
+    tui.sees("\u{2500}");
+    tui.type_keys("alpha bravo charlie");
+    let base = tui.stable_col("typed input at the tail");
+
+    // Ghostty's actual bytes for option+left.
+    tui.write("\x1bb");
+    assert_eq!(tui.stable_col("ESC b once"), base - 7); // over "charlie"
+    tui.write("\x1bb");
+    assert_eq!(tui.stable_col("ESC b twice"), base - 13); // over "bravo "
+
+    // Terminals that report the chord itself.
+    tui.write("\x1b[1;3D");
+    assert_eq!(tui.stable_col("alt+left CSI"), base - 19); // to the start
+    tui.write("\x1b[1;5D");
+    assert_eq!(tui.stable_col("ctrl+left CSI at the start"), base - 19); // clamped
+
+    // The forward twins walk back out to the tail.
+    tui.write("\x1bf");
+    assert_eq!(tui.stable_col("ESC f once"), base - 14); // end of "alpha"
+    tui.write("\x1bf");
+    assert_eq!(tui.stable_col("ESC f twice"), base - 8); // end of "bravo"
+    tui.write("\x1bf");
+    assert_eq!(tui.stable_col("ESC f thrice"), base);
+    tui.write("\x1b[1;3C");
+    assert_eq!(tui.stable_col("alt+right CSI at the tail"), base);
+
+    tui.type_keys("/exit");
+    tui.write("\r");
     assert!(
         tui.exits_cleanly(Duration::from_secs(20)),
         "/exit did not exit cleanly"
