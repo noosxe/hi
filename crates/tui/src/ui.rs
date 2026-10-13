@@ -36,16 +36,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
         return;
     }
     // The live viewport is the whole terminal (AD-0015/AD-0016),
-    // bottom-up: the input grows upward with its wrapped text (3 rows
-    // resting, up to 8); an open menu renders UNDER the input —
+    // bottom-up: the input grows upward with its wrapped text (4 rows
+    // resting, up to 9 — one breathing row rides on top, AD-0020); an
+    // open menu renders UNDER the input —
     // pi-style, taking the bottom edge while the status row yields
     // for its brief lifetime (ruled: menus outrank status); and the
     // stream area keeps every row above it: the transcript window
     // (AD-0016), then live content, flowing down to the input. Never
     // a blank band.
     //
-    //   50 rows, resting:   [stream 46] [input 3] [status 1]
-    //   50 rows, menu open: [stream 44] [input 3] [menu 3]
+    //   50 rows, resting:   [stream 45] [input 4] [status 1]
+    //   50 rows, menu open: [stream 43] [input 4] [menu 3]
     let input_height = input_height(app, area.width);
     let menu_h = app.menu_height();
     let (stream_area, menu_area, input_area, status_area) = layout(area, input_height, menu_h);
@@ -62,12 +63,13 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
 }
 
-/// The input box's row count at this width — wrapped rows (1–6) plus
-/// its two rules. Shared with the event loop's flush pass so the
-/// window is measured with one formula.
+/// The input box's row count at this width — wrapped rows (1–6), its
+/// two rules, and one breathing row above the box (AD-0020): the gap
+/// between transcript and composer is part of the input's footprint,
+/// so draw and the flush pass measure it with one formula.
 pub fn input_height(app: &App, width: u16) -> u16 {
     let rows = crate::wrap::wrapped_row_count(&app.input, width.max(1) as usize).clamp(1, 6);
-    rows as u16 + 2
+    rows as u16 + 3
 }
 
 /// How many rows the stream window gets at this frame's geometry —
@@ -119,6 +121,15 @@ fn layout(area: Rect, input_height: u16, menu_h: u16) -> (Rect, Rect, Rect, Rect
 /// Shows whatever is currently being typed, with the real terminal
 /// cursor parked right after the text.
 fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
+    // The footprint's first row is the margin (AD-0020) — owned and
+    // cleared, so transcript content that scrolled through it never
+    // lingers above the box.
+    frame.render_widget(ratatui::widgets::Clear, Rect { height: 1, ..area });
+    let area = Rect {
+        y: area.y + 1,
+        height: area.height.saturating_sub(1),
+        ..area
+    };
     let mut block = ratatui::widgets::Block::default().borders(Borders::TOP | Borders::BOTTOM);
     // While work is in flight, the top rule carries a right-aligned
     // activity title; quiet sessions render a plain rule.
@@ -809,12 +820,46 @@ mod tests {
                 .trim_end()
                 .to_string()
         };
-        // Input box rows 16-18, status row 19; the stream window is
-        // rows 0..16 — and the user block (3 rows: pad, text, pad)
-        // sits at its BOTTOM, rows 13-15, directly above the input.
-        assert!(row_text(14).contains("where did my transcript go"));
-        assert!(row_text(15).trim().is_empty()); // the block's lower pad
+        // Input box rows 15-18 (margin 15, rules 16/18), status row 19;
+        // the stream window is rows 0..15 — and the user block (3 rows:
+        // pad, text, pad) sits at its BOTTOM, rows 12-14, above the
+        // composer's breathing row (AD-0020).
+        assert!(row_text(13).contains("where did my transcript go"));
+        assert!(row_text(14).trim().is_empty()); // the block's lower pad
+        assert!(row_text(15).trim().is_empty()); // the margin row
         assert!(row_text(16).contains("─")); // input top rule
+    }
+
+    #[test]
+    fn the_margin_row_survives_a_full_stream() {
+        use crate::app::test_app;
+        let mut app = test_app();
+        // Long enough to fill the stream window completely: under the
+        // old geometry the newest transcript row would sit flush
+        // against the input's top rule.
+        for i in 0..30 {
+            app.messages
+                .push(hi_core::Message::User(format!("filler message {i}")));
+        }
+        app.scroll.sync(&app.messages, 40, None);
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend_mut().buffer().clone();
+        let row_text = |y: u16| {
+            (0..40)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        assert!(row_text(16).contains("─")); // input top rule
+        // The newest text row sits at 13, with the block's own pad on
+        // 14: the stream's bottom edge is the margin row — one row
+        // higher than the old flush-against-the-rule geometry.
+        assert!(row_text(13).contains("filler message 29"));
+        assert!(row_text(14).trim().is_empty()); // block pad, stream's last row
+        // The breathing row itself stays empty.
+        assert!(row_text(15).trim().is_empty(), "{:?}", row_text(15));
     }
 
     #[test]
