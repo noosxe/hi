@@ -315,6 +315,7 @@ jump at `-`, `/`, `.`.
 | Cmd+← / → (SUPER) | start / end — kitty-protocol reporting (AD-0013) |
 | Backspace | remove the character before the cursor |
 | Delete, Ctrl+D | remove the character at the cursor |
+| Ctrl+C | clear the draft (cursor home); quit when it's already empty |
 | Ctrl+W, Alt+Backspace | remove the word before the cursor |
 | Alt+D, Alt+Delete | remove the word after the cursor |
 | Ctrl+U / Ctrl+K | remove to line start / line end (AD-0018) |

@@ -1098,3 +1098,14 @@ naming it something else. The summary pass scans past the header once
 per listing (pi rescans every frame; hi doesn't need to). No model
 involvement anywhere — titles are human words, and unnamed sessions
 speak through their own first prompt.
+
+---
+
+## AD-0030 — ctrl-c is the line-killer, not the app-killer (2026-10-16)
+
+#91: ctrl-c quit unconditionally, from anywhere — one reflex with a
+draft in the box killed the whole session to kill one line. The
+ruling is the shell's: a non-empty draft dies first (cleared, cursor
+home); an empty composer is the user asking to leave, and quits.
+Menus own no text, so from a picker or pane the anywhere-exit
+survives everywhere ctrl-c can't mean "clear".
