@@ -136,7 +136,7 @@ newer configs never break older builds.
 | `id` | model | **yes** | identifier sent to the API |
 | `name` | model | no | display name; falls back to `id` |
 | `reasoning` | model | no | default `false` |
-| `contextWindow` | model | no | u32 tokens; informational for now |
+| `contextWindow` | model | no | u32 tokens; the usage line's context-share denominator (AD-0026) |
 | `maxTokens` | model | no | u32; max completion tokens |
 
 ### Credentials
