@@ -22,6 +22,23 @@ use crate::status::{Status, location_label};
 /// Prompt-history ceiling (AD-0014).
 const HISTORY_CAP: usize = 100;
 
+/// The auto-trigger budget (AD-0022): how many turns a session may
+/// spend on its own before it stops and says so. A safety bound, not
+/// a preference — like the task cap in AD-0019, it is constant so the
+/// failure mode is bounded by construction.
+const AUTO_TRIGGER_BUDGET: u32 = 10;
+
+/// The standing instruction the auto-trigger speaks with. Marked so
+/// the session file is honest that the human did not type it, and so
+/// the model knows the turn is machine-initiated.
+const AUTO_TRIGGER_MANDATE: &str =
+    "(auto-trigger) a background task finished — act on the notes above as warranted";
+
+/// Pushed once, with the budget's last spend, so a disabled-by-
+/// exhaustion trigger is a visible fact rather than a silent one.
+const AUTO_TRIGGER_EXHAUSTED: &str =
+    "auto-trigger budget spent — further completions ride your next turn";
+
 /// The paste chord: Ctrl+V always; Cmd+V too where the kitty
 /// keyboard protocol reports it (`KeyModifiers::SUPER` — the terminal
 /// only forwards the chord in that mode, so this can never collide
@@ -71,6 +88,7 @@ pub(crate) fn test_app() -> App {
             images: hi_core::ImageGate::new(false),
             images_setting: true,
             tasks: None,
+            task_turns: false,
         },
         false,
     )
@@ -176,6 +194,18 @@ pub struct App {
     /// The open `/tasks` pane (AD-0021) — list or one task's output.
     /// `Some` = owns the keyboard, like the pickers.
     pub tasks_view: Option<TasksView>,
+    /// The `settings.taskTurns` opt-in (#72, AD-0022): a finished
+    /// task may start a turn. Resolved once at startup; the app owns
+    /// the trigger itself.
+    pub task_turns: bool,
+    /// Auto-trigger budget (AD-0022): how many turn-spends this
+    /// session may still make on its own. Bounded, never refilled —
+    /// completion → turn → spawn → completion chains must end.
+    pub auto_trigger_budget: u32,
+    /// A completion folded while a turn was in flight: the fact is
+    /// armed. If the human's queued message fires first it consumes
+    /// the arm; otherwise the mandate turn fires (budget permitting).
+    auto_armed: bool,
     /// Session-storage root override — tests point this at a temp
     /// directory; production uses the real data dir (`None`).
     pub session_root: Option<std::path::PathBuf>,
@@ -255,6 +285,7 @@ impl App {
             images,
             images_setting,
             tasks,
+            task_turns,
         } = init;
         Self {
             quit: false,
@@ -287,6 +318,9 @@ impl App {
             images_setting,
             tasks,
             tasks_view: None,
+            task_turns,
+            auto_trigger_budget: AUTO_TRIGGER_BUDGET,
+            auto_armed: false,
             scroll: crate::scroll::Scroll::new(),
             session_root: None,
         }
@@ -1299,11 +1333,20 @@ impl App {
         // notes; an idle session has no finalize coming, so the notes
         // persist right here instead.
         let added_from = self.messages.len();
-        self.drain_task_completions();
+        let completions = self.drain_task_completions();
         let Some(turn) = self.turn.as_mut() else {
+            // Idle: a fresh completion may earn an auto turn (AD-0022)
+            // — opt-in, budget-bounded, and keyed on completions so a
+            // command notice never spends a turn.
+            self.maybe_auto_trigger(completions);
             self.persist_new(added_from);
             return;
         };
+        // Mid-turn the same fact only arms: the one-turn invariant
+        // holds, and the decision waits for the turn to finish.
+        if completions > 0 {
+            self.auto_armed = true;
+        }
         let mut finished = false;
         // Messages produced by tool events queue here and land in the
         // transcript after the loop — `self.messages` can't be touched
@@ -1349,10 +1392,17 @@ impl App {
                 }
             }
             // The reply finished — fire the queued message, if any,
-            // as the very next turn.
+            // as the very next turn. A queued human message carries
+            // the armed completion notes to the model already, so it
+            // consumes the arm: the human's instruction dominates and
+            // no budget is spent (AD-0022).
             if let Some(queued) = self.queued.take() {
+                self.auto_armed = false;
                 self.messages.push(Message::User(queued));
                 self.start_turn();
+            } else if self.auto_armed {
+                self.auto_armed = false;
+                self.fire_auto_trigger();
             }
         }
         // Persist everything finalized this frame.
@@ -1378,10 +1428,13 @@ impl App {
     /// Fold finished background tasks into the transcript as System
     /// notes (#5). The fact rides the next turn's message payload; the
     /// status row's running count clears itself on the next draw.
-    fn drain_task_completions(&mut self) {
+    /// Returns how many completions folded — the auto-trigger keys on
+    /// this, not on generic transcript growth.
+    fn drain_task_completions(&mut self) -> usize {
         let Some(tasks) = self.tasks.as_ref() else {
-            return;
+            return 0;
         };
+        let mut completions = 0;
         while let Some(completion) = tasks.try_recv_completion() {
             let wall = format_task_wall(completion.wall);
             self.messages.push(Message::System(format!(
@@ -1391,7 +1444,35 @@ impl App {
                 completion.state.label(),
                 wall
             )));
+            completions += 1;
         }
+        completions
+    }
+
+    /// Idle-path auto trigger (AD-0022): spend one budget unit, push
+    /// the marked mandate, and start the turn. The completion notes
+    /// are already in the transcript — `start_turn` snapshots it — so
+    /// the model sees the facts and the mandate together.
+    fn maybe_auto_trigger(&mut self, completions: usize) {
+        if completions == 0 || !self.task_turns || self.auto_trigger_budget == 0 {
+            return;
+        }
+        self.fire_auto_trigger();
+    }
+
+    /// Spend one budget unit and start the mandate turn. The caller
+    /// has already checked the opt-in and the budget.
+    fn fire_auto_trigger(&mut self) {
+        self.auto_trigger_budget -= 1;
+        if self.auto_trigger_budget == 0 {
+            // The silence after this must be explained: one dim note,
+            // riding the same final auto turn.
+            self.messages
+                .push(Message::System(AUTO_TRIGGER_EXHAUSTED.into()));
+        }
+        self.messages
+            .push(Message::User(AUTO_TRIGGER_MANDATE.into()));
+        self.start_turn();
     }
 }
 
@@ -1422,6 +1503,191 @@ mod tests {
         );
         app.tasks = Some(tasks.clone());
         (app, tasks)
+    }
+
+    /// Block until a spawned task has finished (no fixed sleeps).
+    fn wait_task_finished(tasks: &hi_core::tasks::TaskManager, id: u64) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !tasks
+            .status(id)
+            .is_some_and(|status| status.state.finished())
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "task #{id} never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
+    /// Pump until the turn loop reports idle (mock replies are short;
+    /// auto-fired follow-ups ride the same loop).
+    fn drain_turns(app: &mut App) {
+        for _ in 0..400 {
+            app.pump();
+            if app.turn.is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("turn never finished");
+    }
+
+    /// How many machine-initiated mandate turns exist so far.
+    fn mandate_count(app: &App) -> usize {
+        app.messages
+            .iter()
+            .filter(|m| matches!(m, Message::User(text) if text.contains("(auto-trigger)")))
+            .count()
+    }
+
+    #[test]
+    fn auto_trigger_fires_an_idle_turn_on_completion() {
+        let (mut app, tasks) = app_with_tasks("auto-idle");
+        app.task_turns = true;
+        let id = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "echo done",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        wait_task_finished(&tasks, id);
+        // One idle pump folds the note and fires the mandate turn.
+        app.pump();
+        assert!(app.turn.is_some(), "no auto turn started");
+        assert_eq!(
+            mandate_count(&app),
+            1,
+            "the mandate speaks once, as a User message"
+        );
+        assert_eq!(app.auto_trigger_budget, AUTO_TRIGGER_BUDGET - 1);
+        drain_turns(&mut app);
+        // The note rode the auto turn; the model's answer landed.
+        assert!(app.messages.iter().any(|m| matches!(m,
+            Message::System(text) if text.contains("finished (exit 0)"))));
+    }
+
+    #[test]
+    fn default_off_leaves_the_note_for_the_human() {
+        let (mut app, tasks) = app_with_tasks("auto-off");
+        let id = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "echo done",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        wait_task_finished(&tasks, id);
+        for _ in 0..5 {
+            app.pump();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            app.turn.is_none(),
+            "the default session must not spend turns"
+        );
+        assert_eq!(mandate_count(&app), 0);
+        // The fact still reached the transcript for the human's next turn.
+        assert!(app.messages.iter().any(|m| matches!(m,
+            Message::System(text) if text.contains("finished (exit 0)"))));
+    }
+
+    #[test]
+    fn mid_turn_completion_waits_for_the_turn_then_fires() {
+        let (mut app, tasks) = app_with_tasks("auto-mid");
+        app.task_turns = true;
+        app.start_turn();
+        let id = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "echo done",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        wait_task_finished(&tasks, id);
+        // The completion folds while the turn runs: armed, not fired.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !app.auto_armed {
+            assert!(std::time::Instant::now() < deadline, "never armed");
+            app.pump();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(app.turn.is_some(), "a second turn must never run");
+        assert_eq!(mandate_count(&app), 0);
+        // The original turn ends; the arm turns into the mandate turn.
+        drain_turns(&mut app);
+        assert_eq!(mandate_count(&app), 1);
+        assert_eq!(app.auto_trigger_budget, AUTO_TRIGGER_BUDGET - 1);
+    }
+
+    #[test]
+    fn queued_human_message_consumes_the_armed_completion() {
+        let (mut app, tasks) = app_with_tasks("auto-queued");
+        app.task_turns = true;
+        app.start_turn();
+        type_string(&mut app, "follow up");
+        app.handle_key(key(KeyCode::Enter));
+        let id = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "echo done",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        wait_task_finished(&tasks, id);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !app.auto_armed {
+            assert!(std::time::Instant::now() < deadline, "never armed");
+            app.pump();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        drain_turns(&mut app);
+        // The human's queued turn fired; it already carries the notes,
+        // so no mandate, no spend.
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| matches!(m, Message::User(text) if text == "follow up"))
+        );
+        assert_eq!(mandate_count(&app), 0);
+        assert_eq!(app.auto_trigger_budget, AUTO_TRIGGER_BUDGET);
+        assert!(!app.auto_armed);
+    }
+
+    #[test]
+    fn auto_trigger_budget_bounds_the_chain() {
+        let (mut app, tasks) = app_with_tasks("auto-budget");
+        app.task_turns = true;
+        app.auto_trigger_budget = 1;
+        // First completion: fires and spends the last unit.
+        let first = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "echo one",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        wait_task_finished(&tasks, first);
+        app.pump();
+        assert!(app.turn.is_some());
+        drain_turns(&mut app);
+        assert_eq!(app.auto_trigger_budget, 0);
+        // Second completion: the silence is explained, exactly once.
+        let second = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "echo two",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        wait_task_finished(&tasks, second);
+        app.pump();
+        app.pump();
+        assert!(app.turn.is_none(), "budget spent — no more auto turns");
+        assert_eq!(mandate_count(&app), 1);
+        assert_eq!(
+            app.messages
+                .iter()
+                .filter(|m| matches!(m,
+            Message::System(text) if text.contains("auto-trigger budget spent")))
+                .count(),
+            1
+        );
     }
 
     #[test]

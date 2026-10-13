@@ -101,7 +101,16 @@ flight the note lands inside the frame's persist range (the same
 finalize append persists it), and an idle session persists it
 immediately. Either way the fact rides the next `start_turn` payload —
 the running turn's history snapshot is untouched. Nothing here starts a
-turn.
+turn — unless the human opted in with `settings.taskTurns` (#72,
+AD-0022). Then the idle path may spend one unit of the per-session
+budget and start a turn itself, carrying a marked `(auto-trigger)`
+User mandate so the model knows the turn is machine-initiated and the
+session file stays honest. Completions folding while a turn runs only
+arm the trigger: when the turn ends, a queued human message fires and
+consumes the arm (it already carries the notes; the human's
+instruction dominates), otherwise the mandate turn fires. The budget
+is a constant (10), not a preference — the spend that exhausts it
+pushes one dim note explaining the new silence.
 
 ## Model switching mid-turn
 

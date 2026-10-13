@@ -868,3 +868,41 @@ spelling) opens one task's output directly.
 - **The arg seam is general.** Dispatch splits a command line on the
   first space; `/tasks` is merely its first consumer. Future commands
   take arguments without touching the submit path again.
+
+---
+
+## AD-0022 — task completions may start a turn: opt-in, armed, budgeted (2026-10-16)
+
+AD-0019 R6 ruled completion a fact, not a trigger: the note rides the
+next turn, and only the human spends one. #72 keeps that default and
+sells the exception: `settings.taskTurns` (default off) lets an
+unattended flow — run the suite, then summarize — finish without a
+keystroke.
+
+- **The human owns the decision, once.** One flat settings key,
+  resolved at startup like `images`. No per-task `notify` in v1: the
+  model must never opt a session into turn-spending. No `--auto` flag:
+  two surfaces for one boolean is double the docs and tests.
+- **Core resolves, the front end triggers.** Core carries the setting;
+  the TUI's `pump` implements the trigger, keyed on the completion
+  drain's count — never on generic transcript growth, so a command
+  notice cannot spend a turn. Headless ignores it (one prompt, one
+  exit).
+- **Idle fires; in-flight arms.** Notes folding while idle (and
+  opted-in, and budgeted) start a mandate turn immediately. Notes
+  folding mid-turn only set an arm; when the turn ends, a queued
+  human message fires and consumes the arm — it already carries the
+  notes, the human's instruction dominates, no budget spent —
+  otherwise the mandate fires. The one-turn invariant never breaks,
+  and the `queued` slot stays human-only.
+- **The mandate is marked and the budget is honest.** The trigger
+  speaks as `(auto-trigger) a background task finished — act on the
+  notes above as warranted`: honest in the session file, and the
+  transcript ends user-role for strict providers. The budget is a
+  constant 10 per session, bounding completion→turn→spawn→completion
+  chains by construction; the last spend pushes a dim note explaining
+  the silence that follows.
+- **#4 is the consumer, not the prerequisite.** A future `Agent` task
+  kind wants completion-triggered continuation as its core loop; this
+  hook is the seam it will register against, landed small and proven
+  first.

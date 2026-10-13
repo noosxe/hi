@@ -40,6 +40,13 @@ pub struct Settings {
     /// to on; the starting model's `vision` flag gates it further.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<bool>,
+    /// Opt-in orchestrator hook (#72, AD-0022): a finished background
+    /// task may start a turn whose payload carries the completion
+    /// facts, so unattended flows ("run the suite, then summarize")
+    /// complete without a keystroke. Defaults to off — in v1 only the
+    /// human spends turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_turns: Option<bool>,
 }
 
 /// The effective telemetry choice: `HI_TELEMETRY` wins when set (pi's
@@ -92,6 +99,13 @@ impl Settings {
     /// convenience, not an identification fact.
     pub fn images_enabled(&self) -> bool {
         self.images.unwrap_or(true)
+    }
+
+    /// Auto-triggering is off unless switched on — like telemetry,
+    /// because a turn costs the user's tokens and the default session
+    /// must behave exactly as before (#72).
+    pub fn task_turns_enabled(&self) -> bool {
+        self.task_turns.unwrap_or(false)
     }
 
     /// Persist `default_model` while keeping every other setting — the
@@ -166,6 +180,7 @@ mod tests {
             default_tools: Some("all".into()),
             telemetry: Some(true),
             images: Some(false),
+            task_turns: None,
         };
         existing.save_to(&path).unwrap();
 
@@ -221,6 +236,7 @@ mod tests {
             default_tools: Some("read-only".into()),
             telemetry: None,
             images: None,
+            task_turns: None,
         };
         original.save_to(&path).unwrap();
         let loaded = Settings::load_from(&path).unwrap();
@@ -259,6 +275,15 @@ mod tests {
         assert_eq!(settings.images, None);
         let settings: Settings = serde_json::from_str("{\"images\": false}").unwrap();
         assert!(!settings.images_enabled());
+    }
+
+    #[test]
+    fn task_turns_defaults_off_and_parses_camel_case() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.task_turns_enabled());
+        assert_eq!(settings.task_turns, None);
+        let settings: Settings = serde_json::from_str(r#"{"taskTurns": true}"#).unwrap();
+        assert!(settings.task_turns_enabled());
     }
 
     #[test]
