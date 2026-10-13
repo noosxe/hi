@@ -419,9 +419,17 @@ impl App {
         // The composer note is transient by definition: any keypress
         // supersedes it.
         self.note = None;
-        // Ctrl-C quits from anywhere — keys are typed text otherwise.
+        // Ctrl-C is the line-killer, not the app-killer (#91): a
+        // non-empty draft dies first (cursor home), an empty composer
+        // is the user asking to leave. Menus own no text, so from a
+        // picker or pane this still quits.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.quit = true;
+            if !self.input.is_empty() {
+                self.input.clear();
+                self.cursor = 0;
+            } else {
+                self.quit = true;
+            }
             return;
         }
 
@@ -2975,6 +2983,22 @@ mod tests {
         )
         .unwrap();
         root
+    }
+
+    #[test]
+    fn ctrl_c_clears_a_draft_and_quits_an_empty_composer() {
+        // The line-killer rule: a draft dies first, the app dies only
+        // when there is nothing left to kill.
+        let mut app = test_app();
+        app.input = "precious draft".into();
+        app.cursor = 8;
+        app.handle_key(ctrl(KeyCode::Char('c')));
+        assert_eq!(app.input, "");
+        assert_eq!(app.cursor, 0);
+        assert!(!app.quit);
+
+        app.handle_key(ctrl(KeyCode::Char('c')));
+        assert!(app.quit);
     }
 
     #[test]
