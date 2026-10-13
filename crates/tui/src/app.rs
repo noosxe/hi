@@ -23,6 +23,26 @@ use hi_core::event::Usage;
 /// Prompt-history ceiling (AD-0014).
 const HISTORY_CAP: usize = 100;
 
+/// Derive the ring from a transcript's user prompts (#87) — the same
+/// view whether the transcript came from `SessionInit` or a session
+/// switch. Oldest-first, whitespace-only prompts invisible (the live
+/// ring never took them), and the ceiling holds on seed: the disk may
+/// hold more than the ring ever shows. Commands never replayed — they
+/// ride the live ring only, never the transcript.
+fn seed_history(messages: &[Message]) -> Vec<String> {
+    let mut ring: Vec<String> = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::User(text) if !text.trim().is_empty() => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    if ring.len() > HISTORY_CAP {
+        ring.drain(..ring.len() - HISTORY_CAP);
+    }
+    ring
+}
+
 /// The auto-trigger budget (AD-0022): how many turns a session may
 /// spend on its own before it stops and says so. A safety bound, not
 /// a preference — like the task cap in AD-0019, it is constant so the
@@ -346,12 +366,15 @@ impl App {
             tasks,
             task_turns,
         } = init;
+        // The ring replays from the transcript it rode in on (#87) —
+        // a resume or fork hands its prompts back to ↑.
+        let history = seed_history(&messages);
         Self {
             quit: false,
             input: String::new(),
             cursor: 0,
             width: 80,
-            history: Vec::new(),
+            history,
             history_pos: None,
             history_draft: None,
             messages,
@@ -1457,6 +1480,11 @@ impl App {
         // rounds, the last recorded prompt the context fact.
         self.usage = loaded.usage;
         self.usage_last_prompt = loaded.usage_last_prompt;
+        // And so does the ring (#87): the switched-to session's
+        // prompts are what ↑ walks now.
+        self.history = seed_history(&self.messages);
+        self.history_pos = None;
+        self.history_draft = None;
         // Cache routing follows the session: the new id becomes the
         // prompt-cache key before any further turn is spawned.
         let cache_key = session.id().to_string();
@@ -1907,6 +1935,70 @@ mod tests {
         assert_eq!(app.usage_last_prompt, 800);
         let bill = app.status_rows()[1].0.clone();
         assert!(bill.contains("↑60 ↓500"), "{bill}");
+    }
+
+    #[test]
+    fn startup_replays_the_ring_from_the_init_transcript() {
+        // The ring is a view of the transcript (#87): user prompts
+        // seed it oldest-first, everything else is invisible to it.
+        let init = crate::SessionInit {
+            system_prompt: None,
+            thinking: None,
+            tools: Arc::new(ToolRegistry::new()),
+            messages: vec![
+                Message::System("resumed 3 messages".into()),
+                Message::User("first".into()),
+                Message::Assistant("hi".into()),
+                Message::User("second".into()),
+            ],
+            session: None,
+            usage: Usage::default(),
+            usage_last_prompt: 0,
+            images: hi_core::ImageGate::new(false),
+            images_setting: true,
+            tasks: None,
+            task_turns: false,
+        };
+        let app = app_with(init);
+        assert_eq!(app.history, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    #[test]
+    fn a_resumed_session_replays_the_ring_and_keeps_the_ceiling() {
+        // A session file whose transcript outgrew the ring: only the
+        // newest HISTORY_CAP prompts replay, drop-oldest, same rule
+        // the live ring follows (AD-0014).
+        let root = std::env::temp_dir().join(format!("hi-replay-ring-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut session = hi_core::Session::start_in(
+            &root,
+            std::path::Path::new("/p"),
+            "mock",
+            "mock",
+            None,
+            None,
+        )
+        .unwrap();
+        let recorded: Vec<Message> = (0..105)
+            .map(|i| Message::User(format!("prompt {i}")))
+            .collect();
+        session.append(&recorded).unwrap();
+        let path = session.path().to_path_buf();
+
+        let mut app = test_app();
+        app.switch_session(&path);
+        assert_eq!(app.history.len(), 100);
+        assert_eq!(app.history.first().unwrap(), "prompt 5");
+        assert_eq!(app.history.last().unwrap(), "prompt 104");
+
+        // And the ring stays live: a submission after the replay
+        // pushes on top of it.
+        app.input = "after the resume".into();
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.history.last().unwrap(), "after the resume");
+        assert_eq!(app.history.len(), 100, "the ceiling holds across the seam");
+        assert_eq!(app.history.first().unwrap(), "prompt 6", "oldest dropped");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

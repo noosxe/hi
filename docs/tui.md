@@ -339,6 +339,14 @@ loaded entry works as-is — that is the fix-up-a-cancelled-message
 workflow. Typing mid-browse edits the loaded entry; there is no
 kill-ring, undo, or Shift+Enter newline (named candidates for later).
 
+The ring is a **derivation of the transcript** (#87): on resume, on
+fork, and on in-app session switch it is re-derived from the file's
+`Message::User` lines, oldest-first, the ceiling holding on seed
+(drop-oldest). Nothing new is stored — #85's rule again: persist the
+per-round facts, re-derive the totals on read. Commands never replay
+(they ride the live ring only, never the transcript); drafts, browse
+position, and the parked input stay session-local.
+
 ## markdown.rs — markdown → themed terminal rows
 
 `markdown_rows(text, width, base_style) -> Vec<Line>` — parses with

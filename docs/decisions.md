@@ -1058,3 +1058,20 @@ Headless prints no bill but records one; the exhaustive rule holds —
 every front end that consumes `Event::Usage` also persists it. Old
 session files load untouched (zero bill); new records are a new line
 kind, the same forward-compat seam messages already use.
+
+---
+
+## AD-0028 — the ring is a derivation of the transcript (2026-10-16)
+
+#87 closed the last in-memory-only pocket: the prompt ring died with
+the process while the words it held sat in the session file. The
+ruling repeats #85's shape one more time — **re-derive at the seam,
+store nothing new**. `App` seeds `history` from the transcript's
+`Message::User` lines (startup, fork, in-app switch alike), oldest
+first, the ceiling holding on seed: the disk may hold more than the
+ring ever shows. Commands stay live-ring-only (they never become
+transcript lines — a reconstructed ring holds prompts, matching pi).
+Drafts and browse position stay session-local; the ring seeds,
+nothing else. A fork inherits the transcript — and the ring is
+transcript-shaped — so its ↑ walks the forked words; the economics
+alone stay fork-reset (#85).
