@@ -906,3 +906,33 @@ keystroke.
   kind wants completion-triggered continuation as its core loop; this
   hook is the seam it will register against, landed small and proven
   first.
+
+---
+
+## AD-0023 — `/settings`: a curated board, not an editor (2026-10-16)
+
+#72's review surfaced the real friction: not default-off, but the cost
+of consent — a JSON trip plus a restart. `/settings` makes consent two
+keystrokes, which is what lets conservative defaults stay honest.
+
+- **A row exists only when the session can flip it.** The board is
+  curated by hand (`SETTINGS_TOGGLES`): `task turns` (live on the next
+  pump) and `images` (re-resolved through AD-0012's one construction
+  path, so the gate follows immediately; mock providers early-return —
+  honest no-op). Startup-stamped settings stay off the board until
+  they declare a setter path — absence, not a grayed-out row: the
+  board shows only what Enter can do.
+- **The `/model` grammar, one divergence.** Arrows walk (wrapping),
+  Esc closes, Ctrl-S persists the highlighted row, Enter toggles —
+  and keeps the board open. A chooser closes on Enter; a board is a
+  place you watch the row flip and act again.
+- **Core persists, the board toggles.** `persist_task_turns` /
+  `persist_images` share one `persist_with` — load, mutate one field,
+  save (#45's shape, generalized). An unparseable file is refused
+  untouched and surfaced as a transcript error. The app-level tests
+  own the toggle behavior; core's path-independent `_to` halves own
+  the file contract — an app test would write the developer's real
+  config, the same seam split `/model` has had since #45.
+- **Defaults stay conservative.** The board changes the cost of
+  consent, never the default. #4's subagents will register their own
+  policy here when they land.

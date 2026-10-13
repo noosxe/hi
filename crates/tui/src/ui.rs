@@ -57,6 +57,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
             draw_tasks(frame, menu_area, app);
         } else if app.picker.is_some() {
             draw_picker(frame, menu_area, app);
+        } else if app.settings_board.is_some() {
+            draw_settings(frame, menu_area, app);
         } else {
             draw_completion(frame, menu_area, app);
         }
@@ -320,6 +322,29 @@ fn draw_picker(frame: &mut Frame, area: Rect, app: &App) {
         THEME.fg(Fg::Dim),
     )));
     frame.render_widget(Paragraph::new(Text::from(rows)), area);
+}
+
+/// The `/settings` board (AD-0023), drawn in the menu zone: the
+/// curated policy rows with their live `on|off` state, plus the
+/// key-hint footer. Reads `settings_rows()` fresh each frame, so an
+/// Enter flip is visible immediately — the board stays open.
+fn draw_settings(frame: &mut Frame, area: Rect, app: &App) {
+    if app.settings_board.is_none() {
+        return;
+    }
+    let rows = app.settings_rows();
+    let items: Vec<(&str, &str)> = rows.iter().map(|row| (row.as_str(), "")).collect();
+    let selected = app
+        .settings_board
+        .as_ref()
+        .map(|board| board.selected)
+        .unwrap_or(0);
+    let mut lines = select_list_rows(items, selected, area.width as usize);
+    lines.push(Line::from(Span::styled(
+        "enter toggle · ctrl-s save · esc close",
+        THEME.fg(Fg::Dim),
+    )));
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 /// The `/` completion menu, drawn in the menu zone between the
@@ -942,6 +967,32 @@ mod tests {
         assert!(row_text(14).trim().is_empty()); // block pad, stream's last row
         // The breathing row itself stays empty.
         assert!(row_text(15).trim().is_empty(), "{:?}", row_text(15));
+    }
+
+    #[test]
+    fn settings_board_lists_rows_and_shows_the_flip_live() {
+        use crate::app::test_app;
+        let mut app = test_app();
+        app.run_command("settings", "");
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text = frame_text(terminal.backend_mut().buffer(), 60, 20);
+        assert!(text.contains("task turns: off"), "{text}");
+        assert!(text.contains("images: on"), "{text}");
+        assert!(
+            text.contains("enter toggle · ctrl-s save · esc close"),
+            "{text}"
+        );
+        // The board stays open on Enter and the row re-renders — the
+        // flip is visible without reopening (AD-0023).
+        app.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Enter,
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text = frame_text(terminal.backend_mut().buffer(), 60, 20);
+        assert!(text.contains("task turns: on"), "{text}");
+        assert!(app.settings_board.is_some());
     }
 
     #[test]

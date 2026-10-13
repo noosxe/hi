@@ -28,6 +28,10 @@ pub const COMMANDS: &[Command] = &[
         description: "switch to another session from this directory",
     },
     Command {
+        name: "settings",
+        description: "toggle session policy for this session (ctrl-s saves)",
+    },
+    Command {
         name: "tasks",
         description: "list background tasks; /tasks <id> shows one live",
     },

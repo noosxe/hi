@@ -146,6 +146,9 @@ pub struct App {
     /// The open `/model` picker, if any. `Some` means it owns the
     /// keyboard.
     pub picker: Option<Picker>,
+    /// The open `/settings` board (AD-0023), if any. `Some` means it
+    /// owns the keyboard.
+    pub settings_board: Option<SettingsBoard>,
     /// Render tick — advances once per frame to animate the
     /// activity spinner.
     pub tick: u8,
@@ -247,6 +250,32 @@ pub struct Picker {
     pub selected: usize,
 }
 
+/// One togglable session policy (#79, AD-0023). A row exists on the
+/// board only when the running app can flip it safely mid-session;
+/// startup-stamped settings stay off the board entirely.
+#[derive(Clone, Copy, PartialEq)]
+pub enum SettingKind {
+    /// The #72 orchestrator opt-in: completions may start a turn.
+    TaskTurns,
+    /// The image-upload master switch (AD-0012 re-resolves the gate).
+    Images,
+}
+
+/// The board's rows, in display order. Curated by hand — this table
+/// is the whole contract between "a setting exists" and "the
+/// `/settings` board offers it".
+pub(crate) const SETTINGS_TOGGLES: &[(&str, SettingKind)] = &[
+    ("task turns", SettingKind::TaskTurns),
+    ("images", SettingKind::Images),
+];
+
+/// The open `/settings` board (AD-0023): which row is highlighted.
+/// Enter flips and keeps the board open — a board, not a chooser;
+/// Esc closes; Ctrl-S persists the highlighted row.
+pub struct SettingsBoard {
+    pub selected: usize,
+}
+
 /// The `/tasks` pane's view (AD-0021): the list, or one task's
 /// output watched live. The pane lives in the menu slot under the
 /// input; draw reads the manager fresh every frame — the frame clock
@@ -307,6 +336,7 @@ impl App {
             tools,
             session,
             picker: None,
+            settings_board: None,
             completion: None,
             tick: 0,
             queued: None,
@@ -340,6 +370,12 @@ impl App {
         // When the picker is open, it owns the keyboard.
         if self.picker.is_some() {
             self.handle_picker_key(key);
+            return;
+        }
+        // The `/settings` board owns the keyboard like every menu
+        // (AD-0023).
+        if self.settings_board.is_some() {
+            self.handle_settings_key(key);
             return;
         }
         // The session picker likewise: it takes over everything above
@@ -694,6 +730,103 @@ impl App {
         }
     }
 
+    /// `/settings`: open the policy board (AD-0023). Takes no
+    /// arguments — free-form editing is out of scope; the board offers
+    /// exactly what the running session can flip.
+    fn open_settings_board(&mut self) {
+        self.settings_board = Some(SettingsBoard { selected: 0 });
+    }
+
+    /// The board's rows as rendered: `label: on|off`. Draw reads this
+    /// live every frame, so a flip is visible without reopening.
+    pub(crate) fn settings_rows(&self) -> Vec<String> {
+        SETTINGS_TOGGLES
+            .iter()
+            .map(|(label, kind)| {
+                let on = match kind {
+                    SettingKind::TaskTurns => self.task_turns,
+                    SettingKind::Images => self.images_setting,
+                };
+                format!("{label}: {}", if on { "on" } else { "off" })
+            })
+            .collect()
+    }
+
+    /// Keyboard owner while the board is open. The `/model` grammar
+    /// with one divergence: Enter keeps the board open, so a flip is
+    /// visible and more rows can follow (AD-0023).
+    fn handle_settings_key(&mut self, key: KeyEvent) {
+        let Some(board) = self.settings_board.as_mut() else {
+            return;
+        };
+        let count = SETTINGS_TOGGLES.len();
+        match key.code {
+            KeyCode::Esc => self.settings_board = None,
+            KeyCode::Up => {
+                board.selected = if board.selected == 0 {
+                    count.saturating_sub(1)
+                } else {
+                    board.selected - 1
+                };
+            }
+            KeyCode::Down => {
+                board.selected = (board.selected + 1) % count.max(1);
+            }
+            KeyCode::Enter => {
+                let kind = SETTINGS_TOGGLES[board.selected].1;
+                self.toggle_setting(kind);
+            }
+            // pi's contract, `/model`'s: Ctrl-S persists the choice;
+            // Enter only changes this session.
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let (label, kind) = SETTINGS_TOGGLES[board.selected];
+                let state = match kind {
+                    SettingKind::TaskTurns => self.task_turns,
+                    SettingKind::Images => self.images_setting,
+                };
+                let result = match kind {
+                    SettingKind::TaskTurns => Settings::persist_task_turns(state),
+                    SettingKind::Images => Settings::persist_images(state),
+                };
+                match result {
+                    Ok(()) => self
+                        .messages
+                        .push(Message::System(format!("saved: {label} = {}", state as u8))),
+                    Err(err) => self.messages.push(Message::Error(err)),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Flip one session policy. `task turns` is live on the next
+    /// pump; `images` re-resolves the gate through the same one
+    /// construction path as a model switch (AD-0012) so the flip
+    /// applies now, not on the next switch. Mock providers have no
+    /// config entry and are left alone — honest no-op.
+    fn toggle_setting(&mut self, kind: SettingKind) {
+        match kind {
+            SettingKind::TaskTurns => {
+                self.task_turns = !self.task_turns;
+                let state = if self.task_turns { "on" } else { "off" };
+                self.messages.push(Message::System(format!(
+                    "task turns {state} for this session — ctrl-s saves it"
+                )));
+            }
+            SettingKind::Images => {
+                self.images_setting = !self.images_setting;
+                let provider = self.status.provider.clone();
+                let model = self.status.model.clone();
+                let cache_key = self.session.as_ref().map(|s| s.id().to_string());
+                self.rebuild_provider(&provider, &model, cache_key);
+                let state = if self.images_setting { "on" } else { "off" };
+                self.messages.push(Message::System(format!(
+                    "images {state} for this session — ctrl-s saves it"
+                )));
+            }
+        }
+    }
+
     /// Rebuild the OpenAI-compat provider from the live session facts
     /// — system prompt, thinking, tools — plus the wire-identity
     /// stamps: the telemetry opt-in and the prompt-cache routing key.
@@ -753,6 +886,11 @@ impl App {
                 let visible = (picker.items.len() as u16).min(5);
                 visible + u16::from(picker.items.len() > 5) + 1
             }
+        } else if self.settings_board.is_some() {
+            // The board is small and fixed: every row visible, plus
+            // the key-hint footer.
+            let count = SETTINGS_TOGGLES.len() as u16;
+            count.min(5) + u16::from(count > 5) + 1
         } else if let Some(completion) = &self.completion {
             // SelectList geometry: five visible rows, plus the
             // `(n/m)` scroll row only when the matches overflow them.
@@ -980,6 +1118,7 @@ impl App {
             "exit" | "quit" => self.quit = true,
             "model" => self.open_picker(),
             "resume" => self.open_session_picker(),
+            "settings" => self.open_settings_board(),
             "tasks" => self.open_tasks_view(args),
             "tools" => self
                 .messages
@@ -1688,6 +1827,68 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn settings_command_opens_the_board_and_esc_closes_it() {
+        let mut app = test_app();
+        app.run_command("settings", "");
+        assert!(app.settings_board.is_some());
+        // Two rows plus the key-hint footer.
+        assert_eq!(app.menu_height(), 3);
+        let rows = app.settings_rows();
+        assert_eq!(rows, vec!["task turns: off", "images: on"]);
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.settings_board.is_none());
+        assert_eq!(app.menu_height(), 0);
+    }
+
+    #[test]
+    fn settings_toggle_enables_task_turns_mid_session() {
+        // The acceptance test (#79): consent costs two keystrokes and
+        // needs no restart — flip the board row, then a completion
+        // fires the auto trigger in the same session.
+        let (mut app, tasks) = app_with_tasks("settings-accept");
+        assert!(!app.task_turns, "default is off");
+        app.run_command("settings", "");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.task_turns);
+        assert!(app.settings_board.is_some(), "Enter keeps the board open");
+        let id = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "echo done",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !tasks.status(id).is_some_and(|s| s.state.finished()) {
+            assert!(std::time::Instant::now() < deadline, "task never finished");
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        app.pump();
+        assert!(app.turn.is_some(), "the flipped flag fired with no restart");
+        drain_turns(&mut app);
+        assert_eq!(mandate_count(&app), 1);
+    }
+
+    #[test]
+    fn settings_toggle_images_flips_the_master_switch() {
+        let mut app = test_app();
+        app.run_command("settings", "");
+        // Arrow wrap: Up from the first row lands on the last.
+        app.handle_key(key(KeyCode::Up));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(!app.images_setting);
+        // The mock provider has no config entry: the AD-0012 rebuild
+        // is an honest no-op, and the flip still lands.
+        assert!(app.messages.iter().any(|m| matches!(m,
+            Message::System(text) if text.contains("images off for this session"))));
+        // And back down through the wrap: the other row flips, this
+        // one stays where Enter left it.
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.task_turns);
+        assert!(!app.images_setting);
     }
 
     #[test]

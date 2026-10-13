@@ -94,6 +94,10 @@ A credential *source*, not necessarily a literal:
   fails startup loudly in both places.
 - `defaultModel` applies **only when no `--provider`/`--model` flags are
   given** (precedence in [core.md](core.md) → selection.rs).
+- `/settings` flips what the running session can flip — `taskTurns`,
+  `images` — without touching this file; Ctrl-S on the board writes
+  one field back here (AD-0023). The file stays the startup source of
+  truth.
 - `taskTurns` is the orchestrator opt-in (#72, AD-0022): when a
   background task finishes and no turn is in flight, hi starts a turn
   whose payload carries the completion notes, marked
