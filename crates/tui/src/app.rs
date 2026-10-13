@@ -1731,6 +1731,23 @@ mod tests {
         panic!("turn never finished");
     }
 
+    /// Pump until the predicate holds. Completion notes travel
+    /// through the reaper's channel: the state flag can flip a hair
+    /// before the note is sent, so a single pump after
+    /// `wait_task_finished` can race it (the #82 CI flake). Predicate
+    /// waits only — no fixed sleeps.
+    fn pump_until(app: &mut App, what: &str, done: impl Fn(&App) -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            app.pump();
+            if done(app) {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "never: {what}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     /// How many machine-initiated mandate turns exist so far.
     #[test]
     fn status_rows_stay_one_until_something_earns_a_row() {
@@ -1783,8 +1800,9 @@ mod tests {
             ))
             .unwrap();
         wait_task_finished(&tasks, id);
-        // One idle pump folds the note and fires the mandate turn.
-        app.pump();
+        // An idle pump folds the note and fires the mandate turn —
+        // pump until it does (the note races the state flag).
+        pump_until(&mut app, "the idle trigger", |a| a.turn.is_some());
         assert!(app.turn.is_some(), "no auto turn started");
         assert_eq!(
             mandate_count(&app),
@@ -1895,7 +1913,7 @@ mod tests {
             ))
             .unwrap();
         wait_task_finished(&tasks, first);
-        app.pump();
+        pump_until(&mut app, "the first trigger", |a| a.turn.is_some());
         assert!(app.turn.is_some());
         drain_turns(&mut app);
         assert_eq!(app.auto_trigger_budget, 0);
@@ -1907,8 +1925,11 @@ mod tests {
             ))
             .unwrap();
         wait_task_finished(&tasks, second);
-        app.pump();
-        app.pump();
+        pump_until(&mut app, "the exhaustion note", |a| {
+            a.messages.iter().any(|m| {
+                matches!(m, Message::System(text) if text.contains("auto-trigger budget spent"))
+            })
+        });
         assert!(app.turn.is_none(), "budget spent — no more auto turns");
         assert_eq!(mandate_count(&app), 1);
         assert_eq!(
@@ -1957,7 +1978,7 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "task never finished");
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
-        app.pump();
+        pump_until(&mut app, "the flipped flag's trigger", |a| a.turn.is_some());
         assert!(app.turn.is_some(), "the flipped flag fired with no restart");
         drain_turns(&mut app);
         assert_eq!(mandate_count(&app), 1);
@@ -2154,8 +2175,9 @@ mod tests {
     }
 
     #[test]
-    fn running_tasks_show_in_the_status_right_side() {
-        // The ui::draw right-side rule: `· N bg` while tasks run.
+    fn dropping_the_last_task_handle_kills_the_process_group() {
+        // The real subject of this test since #71: the drop is the
+        // kill (the old `· N bg` comment rode along until AD-0025).
         let tasks = hi_core::tasks::TaskManager::new(std::env::temp_dir().join("hi-app-tasks-2"));
         let _id = tasks
             .spawn(hi_core::tasks::TaskSpec::process(
