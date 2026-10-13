@@ -13,3 +13,6 @@ serde_json = "1"
 ratatui = { version = "0.30" }
 unicode-width = "0.2"
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
+# Process-group liveness assertions in the task-note tests (#5).
+[dev-dependencies]
+libc = "0.2"

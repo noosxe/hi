@@ -91,6 +91,18 @@ into the scrollback above the viewport exactly once
   message and the next turn starts immediately
   (`queued_message_fires_when_the_turn_finishes`).
 
+## Background-task completions (#5)
+
+Tasks run outside the turn entirely (`crates/core/src/tasks.rs`), so they
+enter the flow at the frame pump: `App::pump` drains the manager's
+completion channel each frame, before the turn borrow. Each completion
+becomes a `Message::System` note in the transcript; if a turn is in
+flight the note lands inside the frame's persist range (the same
+finalize append persists it), and an idle session persists it
+immediately. Either way the fact rides the next `start_turn` payload —
+the running turn's history snapshot is untouched. Nothing here starts a
+turn.
+
 ## Model switching mid-turn
 
 The `/model` picker rebuilds `App.provider` (+ system prompt, thinking

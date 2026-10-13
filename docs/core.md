@@ -96,13 +96,20 @@ structural chunk-walk for the kitty renderer — AD-0010 — and
   `write` (creates parents, full overwrite), `grep` (`regex` crate, rg-style
   rendering, `glob` filter, context), `find` (`globset`, .gitignore-aware),
   `ls` (sorted, `/` suffix for dirs, dotfiles).
+- **The four task tools (#5, AD-0019)**: `task_run` (spawn long-lived
+  work in its own process group, return the id at once), `task_status`
+  (point-in-time state), `task_output` (the tail so far), `task_cancel`
+  (kill the whole group). They share the [`TaskManager`](#tasksrs--work-that-outlives-a-turn-5)
+  handle; `coding` and `all` bundles get them when the CLI passes the
+  manager in. Completion is a fact the front end injects — never a
+  turn-trigger.
 - **Truncation contract**: every result clamps at 2000 lines or 50 KiB,
   whichever hits first — head-kept for inspection tools, tail-kept for bash.
   The contract lives in `truncate.rs` and has its own tests.
 - **Bundles** (`ToolBundle`): `none`, `read-only` (read/grep/find/ls),
   `coding` (read/bash/edit/write — the default: hi is a coding harness
   first), `all`. Selected by `--tools` or `settings.defaultTools`;
-  `ToolBundle::registry(cwd)` builds the registry.
+  `ToolBundle::registry(cwd, images, tasks)` builds the registry.
 - **Prompt contributions**: every tool may carry a `prompt_note`
   ("use read to examine files instead of cat"); the registry joins them and
   the CLI weaves them into the system prompt under `# Tool notes`.
@@ -116,6 +123,22 @@ structural chunk-walk for the kitty renderer — AD-0010 — and
   picker re-attaches both.
 - Deferred with issues: full gitignore semantics (#28), images in read
   (#29), process-group kill for bash (#30), `/tools` command (#27).
+
+## tasks.rs — work that outlives a turn (#5)
+
+`TaskManager` is a cloneable handle over worker-thread-per-task: spawn
+returns the id immediately, a reader thread streams merged stdout+stderr
+(one pipe, total order — the child runs under `bash -c "exec 2>&1; …"`)
+into a 256 KiB ring (instant tails) plus a full log file under
+`<data-dir>/tasks`, and the worker owns every state transition
+(`Running → Succeeded/Failed/Killed/TimedOut`). Unix tasks get their own
+process group, so cancel/timeout/shutdown kill grandchildren too —
+deliberately stronger than the `bash` tool (#30 is bash's limitation,
+not the manager's). Completion is one `TaskCompletion` into a channel
+the front end drains per frame; dropping the last handle kills every
+running group. Threads, not tokio — the choice #6's Luau bridge
+inherits. No default timeout: long-lived work is the point; a cap of
+16 running tasks refuses beyond that with a readable error.
 
 ## session.rs — transcripts that survive restarts
 

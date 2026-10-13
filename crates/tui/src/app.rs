@@ -26,6 +26,16 @@ const HISTORY_CAP: usize = 100;
 /// keyboard protocol reports it (`KeyModifiers::SUPER` — the terminal
 /// only forwards the chord in that mode, so this can never collide
 /// with a terminal that still owns Cmd+V for its own text paste).
+/// Compact wall-time phrasing for task notes: `54s`, `3m12s`.
+fn format_task_wall(wall: std::time::Duration) -> String {
+    let secs = wall.as_secs();
+    if secs >= 60 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 /// The newline chords: Shift+Enter (the kitty encoding — crossterm
 /// hands us Enter+SHIFT), a literal LF (a terminal binding
 /// shift+enter to `text:\n`), and Ctrl+J (legacy, works everywhere).
@@ -60,6 +70,7 @@ pub(crate) fn test_app() -> App {
             session: None,
             images: hi_core::ImageGate::new(false),
             images_setting: true,
+            tasks: None,
         },
         false,
     )
@@ -159,6 +170,9 @@ pub struct App {
     /// The `settings.images` master switch, resolved at startup; the
     /// switch-time re-resolution must honor it.
     images_setting: bool,
+    /// The background-task manager shared with the registry (#5). The
+    /// app drains completions per frame; `None` when no task tools run.
+    pub tasks: Option<hi_core::tasks::TaskManager>,
     /// Session-storage root override — tests point this at a temp
     /// directory; production uses the real data dir (`None`).
     pub session_root: Option<std::path::PathBuf>,
@@ -225,6 +239,7 @@ impl App {
             session,
             images,
             images_setting,
+            tasks,
         } = init;
         Self {
             quit: false,
@@ -255,6 +270,7 @@ impl App {
             note: None,
             images,
             images_setting,
+            tasks,
             scroll: crate::scroll::Scroll::new(),
             session_root: None,
         }
@@ -1147,11 +1163,18 @@ impl App {
                 self.clipboard_rx = Some(rx);
             }
         }
+        // Task completions next (#5): each becomes a dim System note in
+        // the transcript and rides the next turn to the model. The
+        // append range starts BEFORE the drain so finalize persists the
+        // notes; an idle session has no finalize coming, so the notes
+        // persist right here instead.
+        let added_from = self.messages.len();
+        self.drain_task_completions();
         let Some(turn) = self.turn.as_mut() else {
+            self.persist_new(added_from);
             return;
         };
         let mut finished = false;
-        let added_from = self.messages.len();
         // Messages produced by tool events queue here and land in the
         // transcript after the loop — `self.messages` can't be touched
         // while `turn` holds a borrow of `self`.
@@ -1202,9 +1225,15 @@ impl App {
                 self.start_turn();
             }
         }
-        // Persist everything finalized this frame. An append failure
-        // degrades once, loudly — the session is dropped so the note is
-        // not spammed every frame, and chat continues without disk.
+        // Persist everything finalized this frame.
+        self.persist_new(added_from);
+    }
+
+    /// Append everything since `added_from` to the session file. An
+    /// append failure degrades once, loudly — the session is dropped so
+    /// the note is not spammed every frame, and chat continues without
+    /// disk.
+    fn persist_new(&mut self, added_from: usize) {
         let append_error = self
             .session
             .as_mut()
@@ -1213,6 +1242,25 @@ impl App {
             self.session = None;
             self.messages
                 .push(Message::System(format!("session not saved: {err}")));
+        }
+    }
+
+    /// Fold finished background tasks into the transcript as System
+    /// notes (#5). The fact rides the next turn's message payload; the
+    /// status row's running count clears itself on the next draw.
+    fn drain_task_completions(&mut self) {
+        let Some(tasks) = self.tasks.as_ref() else {
+            return;
+        };
+        while let Some(completion) = tasks.try_recv_completion() {
+            let wall = format_task_wall(completion.wall);
+            self.messages.push(Message::System(format!(
+                "background task #{} '{}' {} after {}",
+                completion.id,
+                completion.name,
+                completion.state.label(),
+                wall
+            )));
         }
     }
 }
@@ -1233,6 +1281,74 @@ mod tests {
 
     fn ctrl(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn finished_background_tasks_become_system_notes_exactly_once() {
+        let mut app = test_app();
+        let tasks = hi_core::tasks::TaskManager::new(std::env::temp_dir().join("hi-app-tasks"));
+        app.tasks = Some(tasks.clone());
+        let id = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "echo note-me",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        // Idle pump: no turn runs, so the note must land and persist
+        // semantics belong to this path — keep pumping until the fact
+        // shows up (no fixed sleeps).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            app.pump();
+            let notes: Vec<&str> = app
+                .messages
+                .iter()
+                .filter_map(|m| match m {
+                    Message::System(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            if let Some(note) = notes.iter().find(|n| n.contains("note-me")) {
+                assert!(note.contains(&format!("#{id}")), "{note}");
+                assert!(note.contains("finished (exit 0)"), "{note}");
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "completion note never landed"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        // One completion, one note: further idle pumps add nothing.
+        let count = app.messages.len();
+        app.pump();
+        app.pump();
+        assert_eq!(app.messages.len(), count);
+        assert_eq!(tasks.running_count(), 0);
+    }
+
+    #[test]
+    fn running_tasks_show_in_the_status_right_side() {
+        // The ui::draw right-side rule: `· N bg` while tasks run.
+        let tasks = hi_core::tasks::TaskManager::new(std::env::temp_dir().join("hi-app-tasks-2"));
+        let _id = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "sleep 30",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        assert_eq!(tasks.running_count(), 1);
+        // Dropping the last handle kills the group — no leaked sleep.
+        let pid = tasks.status(1).unwrap().pid;
+        drop(tasks);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while unsafe { libc::kill(-(pid as i32), 0) == 0 } {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "task group survived the drop"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
     }
 
     #[test]

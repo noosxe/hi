@@ -777,3 +777,42 @@ history from anywhere — is untouched); Home/End/Ctrl+A/E and Ctrl+U/K
 scope to the logical line; word motions treat the newline as a separator.
 The composer's six-text-row height cap stands; a longer draft still
 clamps (recorded limit, not new behavior).
+
+---
+
+## AD-0019 — background tasks: threads, process groups, completion-as-fact (2026-10-16)
+
+The harness can hold work that outlives a turn: a `TaskManager` in core
+(#5), four `task_*` tools on top. The rulings the implementation encodes:
+
+- **Threads, not tokio.** One worker thread per task polls its child at
+  50ms — the bash tool's pattern generalized over a registry. The
+  project's no-async-runtime stance holds; the Luau bridge (#6) inherits
+  threads as its bridge model.
+- **The process group is the kill unit.** Tasks spawn in their own group
+  (Unix `process_group(0)`), and cancel, timeout, and shutdown kill the
+  *group* — grandchildren (a dev server's watchers) die with the task.
+  This is deliberately stronger than the `bash` tool, whose #30
+  grandchild limitation stands for `bash` itself.
+- **One merged pipe.** The child runs under `bash -c "exec 2>&1; …"`,
+  so stdout and stderr interleave in one totally ordered stream — the
+  terminal model, not the diagnostic model (that's `bash`'s labeled
+  capture, unchanged).
+- **Two-tier buffering.** A 256 KiB ring backs instant tail reads for
+  the model; the full stream lands in a log file for post-mortems.
+  Reads are bounded by the one truncation contract.
+- **Completion is a fact, not a trigger.** A finish sends one
+  `TaskCompletion` into a channel the front end drains per frame; it
+  becomes a dim `System` note in the transcript and rides the next
+  turn's payload. Nothing auto-starts a turn — that is an orchestrator
+  behavior and belongs to #4 (subagents). This is the deliberate
+  divergence from pi's `triggerOnCompletion`.
+- **Tasks are runtime objects.** Spawn echoes persist as ordinary
+  transcript messages; running state is never resurrected on resume;
+  dropping the last manager handle kills every running group, so a
+  clean `/exit` orphans nothing. A crash can orphan — the OS is the
+  boundary, the same trust stance as every tool.
+- **Idle defaults, explicit bounds.** No default timeout (daemons are
+  the point; `timeout` is opt-in per task), a cap of 16 running tasks
+  with a readable refusal, small monotonic ids (`#1`) the model can
+  echo reliably, and a derived two-word name when none is given.

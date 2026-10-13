@@ -23,6 +23,7 @@ mod grep;
 pub(crate) mod image_resize;
 mod ls;
 mod read;
+mod tasks;
 mod truncate;
 mod walk;
 mod write;
@@ -33,6 +34,7 @@ pub use find::FindTool;
 pub use grep::GrepTool;
 pub use ls::LsTool;
 pub use read::ReadTool;
+pub use tasks::{TaskCancelTool, TaskOutputTool, TaskRunTool, TaskStatusTool};
 pub use truncate::{MAX_BYTES, MAX_LINES};
 pub use write::WriteTool;
 
@@ -108,8 +110,24 @@ impl ToolBundle {
     /// built-in that produces attachments. The gate is shared so the
     /// front end can re-resolve it when the model changes (AD-0012):
     /// the registry outlives model switches, the policy follows.
-    pub fn registry(self, cwd: &Path, images: ImageGate) -> ToolRegistry {
-        let tools: Vec<Arc<dyn Tool>> = match self {
+    /// `tasks` is the background-task handle (#5): `Some` adds the
+    /// `task_*` tools to the process-spawning bundles (`coding`, `all`);
+    /// `None` leaves them out entirely.
+    pub fn registry(
+        self,
+        cwd: &Path,
+        images: ImageGate,
+        tasks: Option<crate::tasks::TaskManager>,
+    ) -> ToolRegistry {
+        let task_tools = |tasks: &crate::tasks::TaskManager| -> Vec<Arc<dyn Tool>> {
+            vec![
+                Arc::new(TaskRunTool::new(tasks.clone(), cwd)),
+                Arc::new(TaskStatusTool::new(tasks.clone())),
+                Arc::new(TaskOutputTool::new(tasks.clone())),
+                Arc::new(TaskCancelTool::new(tasks.clone())),
+            ]
+        };
+        let mut tools: Vec<Arc<dyn Tool>> = match self {
             Self::None => Vec::new(),
             Self::ReadOnly => vec![
                 Arc::new(ReadTool::new(cwd).images_gate(images.clone())),
@@ -133,6 +151,12 @@ impl ToolBundle {
                 Arc::new(LsTool::new(cwd)),
             ],
         };
+        if let Some(tasks) = tasks {
+            match self {
+                Self::Coding | Self::All => tools.extend(task_tools(&tasks)),
+                _ => {}
+            }
+        }
         let mut registry = ToolRegistry::new();
         for tool in tools {
             // Duplicate built-in names are a programming error, not a
@@ -216,7 +240,7 @@ mod tests {
     fn bundles_build_the_expected_registries() {
         let cwd = std::env::temp_dir();
         let names = |bundle: ToolBundle| -> Vec<String> {
-            let reg = bundle.registry(&cwd, ImageGate::new(false));
+            let reg = bundle.registry(&cwd, ImageGate::new(false), None);
             reg.definitions()
                 .iter()
                 .filter_map(|d| d["function"]["name"].as_str().map(str::to_string))
@@ -224,7 +248,7 @@ mod tests {
         };
         assert!(
             ToolBundle::None
-                .registry(&cwd, ImageGate::new(false))
+                .registry(&cwd, ImageGate::new(false), None)
                 .is_empty()
         );
         assert_eq!(
@@ -236,7 +260,9 @@ mod tests {
             vec!["bash", "edit", "read", "write"]
         );
         assert_eq!(
-            ToolBundle::All.registry(&cwd, ImageGate::new(false)).len(),
+            ToolBundle::All
+                .registry(&cwd, ImageGate::new(false), None)
+                .len(),
             7
         );
     }
@@ -245,7 +271,7 @@ mod tests {
     fn registry_prompt_notes_collect_bullets_in_wire_order() {
         let cwd = std::env::temp_dir();
         let notes = ToolBundle::Coding
-            .registry(&cwd, ImageGate::new(false))
+            .registry(&cwd, ImageGate::new(false), None)
             .prompt_notes();
         assert!(notes.starts_with("- "), "got: {notes}");
         assert!(notes.contains("Use read to examine files"));
