@@ -900,14 +900,13 @@ impl App {
     /// takes its rows from the streaming area (elastic 8 → 2), so it
     /// lands directly above the input.
     /// The status board (AD-0025, amended; usage AD-0026): rows
-    /// bottom-up, two permanent residents. Row 0 is location on the
-    /// left, the session's usage line on the right. Row 1 is the
-    /// session's own
-    /// context: the model (+thinking) on the right — the indicator
-    /// you read all day — tasks on the left while they exist, and the
-    /// auto-trigger arm appended after the model (transient noise
-    /// rides right). #4/#6 register here later; three rows is the
-    /// ceiling anyone plans to spend.
+    /// bottom-up, two permanent residents. Row 1 — the board's top —
+    /// holds the session's usage line in the top-left corner and the
+    /// model (+thinking) on the right, the auto-trigger arm appended
+    /// after it (transient noise rides right). Row 0 is location on
+    /// the left and the background tasks' counts on the right — under
+    /// the model they run against. #4/#6 register here later; three
+    /// rows is the ceiling anyone plans to spend.
     pub fn status_rows(&self) -> Vec<(String, String)> {
         let mut context_right = match self.thinking {
             Some(level) => format!("{} · thinking:{}", self.status.label(), level.name()),
@@ -916,7 +915,7 @@ impl App {
         if self.auto_armed {
             context_right.push_str(" · auto: armed");
         }
-        let mut context_left = String::new();
+        let mut task_counts = String::new();
         if let Some(tasks) = self.tasks.as_ref() {
             let total = tasks.list().len();
             if total > 0 {
@@ -929,11 +928,11 @@ impl App {
                 .into_iter()
                 .filter_map(|(keep, part)| keep.then_some(part))
                 .collect();
-                context_left = format!("tasks: {}", parts.join(" · "));
+                task_counts = format!("tasks: {}", parts.join(" · "));
             }
         }
         let bill = usage_line(&self.usage, self.usage_last_prompt, self.context_window());
-        vec![(self.location.clone(), bill), (context_left, context_right)]
+        vec![(self.location.clone(), task_counts), (bill, context_right)]
     }
 
     /// The configured context window for the live model, if its config
@@ -1806,15 +1805,16 @@ mod tests {
             .unwrap();
         app.tasks = Some(tasks);
         let rows = app.status_rows();
-        assert!(rows[1].0.starts_with("tasks: 1 running"), "{:?}", rows[1]);
-        assert_eq!(rows[1].1, "(mock) mock", "the model stays leftmost-stable");
+        // Tasks count on the bottom row's right — under the model.
+        assert!(rows[0].1.starts_with("tasks: 1 running"), "{:?}", rows[0]);
+        assert_eq!(rows[1].1, "(mock) mock", "the model stays right");
         wait_task_finished(app.tasks.as_ref().unwrap(), id);
         // The arm appends after the model — transient noise rides
         // right (#72's visible feedback).
         app.tasks = None;
         app.auto_armed = true;
         let rows = app.status_rows();
-        assert!(rows[1].0.is_empty());
+        assert!(rows[0].1.is_empty());
         assert_eq!(rows[1].1, "(mock) mock · auto: armed");
     }
 
@@ -1828,8 +1828,9 @@ mod tests {
             reasoning_tokens: Some(100),
         };
         app.usage_last_prompt = 1000;
-        // The mock's bill: net ↓300 of 1000, no window configured.
-        assert_eq!(app.status_rows()[0].1, "↑250 ↓300 R100 CH70.0%");
+        // The mock's bill sits top-left: net ↓300 of 1000, no window
+        // configured.
+        assert_eq!(app.status_rows()[1].0, "↑250 ↓300 R100 CH70.0%");
         // A configured window joins the share — nothing is guessed.
         let mut providers = std::collections::BTreeMap::new();
         providers.insert(
@@ -1845,7 +1846,7 @@ mod tests {
             },
         );
         app.config = ModelsConfig { providers };
-        assert_eq!(app.status_rows()[0].1, "↑250 ↓300 R100 CH70.0% 0.1%/1M");
+        assert_eq!(app.status_rows()[1].0, "↑250 ↓300 R100 CH70.0% 0.1%/1M");
     }
 
     #[test]
@@ -1857,9 +1858,10 @@ mod tests {
         assert_eq!(app.usage.completion_tokens, 250);
         assert_eq!(app.usage.cached_tokens, Some(700));
         assert_eq!(app.usage_last_prompt, 1000);
-        let right = app.status_rows()[0].1.clone();
-        assert!(right.contains("↑250 ↓300"), "{right}");
-        assert!(right.contains("CH70.0%"), "{right}");
+        let bill = app.status_rows()[1].0.clone();
+        assert!(bill.contains("↑250 ↓300"), "{bill}");
+        assert!(bill.contains("CH70.0%"), "{bill}");
+        assert!(app.status_rows()[0].1.is_empty(), "no tasks, no counts");
     }
 
     fn mandate_count(app: &App) -> usize {

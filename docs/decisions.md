@@ -1031,7 +1031,10 @@ cache when cache is reported; every segment hides when its input is
 absent — no detail object, no CH/R; no `contextWindow`, no share,
 **nothing guessed** (pi guesses 1M; hi reads the config the user
 already wrote). Compact formatting (`1.9M`, trims `.0`) is
-presentation and lives in the tui. Cost stays a non-goal (#39's own
+presentation and lives in the tui. *Amended
+same-day, on sight: the bill moved to the board's top-left corner
+(row 1's left) and the background-task counts moved under the model
+name (row 0's right) — the work sits beneath what it runs against.* Cost stays a non-goal (#39's own
 carried ruling — a pricing table, not a wire fact). The mock emits a
 fixed bill (↑250 ↓300 R100 CH70.0%), so tests and the pty assert the
 rendered line exactly.

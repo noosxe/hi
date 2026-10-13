@@ -55,7 +55,8 @@ pub fn compose_status(left: &str, right: &str, width: u16) -> String {
     format!("{left}{}{right}", " ".repeat(pad))
 }
 
-/// The session's usage line (AD-0026), row 0's right section —
+/// The session's usage line (AD-0026), the board's top-left corner
+/// (row 1's left section) —
 /// `↑8.6M ↓1.9M R250M CH99.2% 10.7%/1M`. The counts are
 /// session-cumulative (↑ output, ↓ input net of the cache, R
 /// reasoning, CH cache-hit share of the prompt); the context share is
