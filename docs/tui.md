@@ -249,20 +249,30 @@ jump at `-`, `/`, `.`.
 | Chord | Action |
 | --- | --- |
 | ← / → , Ctrl+B / F | move one character (clamped) |
-| Home / End, Ctrl+A / E | start / end of input |
-| Alt+B / F, Alt+← / →, Ctrl+← / → | word jump (separator-skip, then word-skip) |
+| Home / End, Ctrl+A / E | start / end of the line (AD-0018) |
+| Alt+B / F, Alt+← / →, Ctrl+← / → | word jump (separator-skip, then word-skip; the newline is a separator) |
+| Shift+Enter, Ctrl+J, literal LF | newline — the encoding is the capability (AD-0018) |
 | Cmd+← / → (SUPER) | start / end — kitty-protocol reporting (AD-0013) |
 | Backspace | remove the character before the cursor |
 | Delete, Ctrl+D | remove the character at the cursor |
 | Ctrl+W, Alt+Backspace | remove the word before the cursor |
 | Alt+D, Alt+Delete | remove the word after the cursor |
-| Ctrl+U / Ctrl+K | remove to start / end |
+| Ctrl+U / Ctrl+K | remove to line start / line end (AD-0018) |
 | ↑ / ↓ | prompt history (below) |
 
 Alt+B / F are the readline word motions — what terminals that intercept
 option+arrows actually send on the wire (Ghostty's macOS defaults decode
 them to `ESC b` / `ESC f`); the Alt/Ctrl arrow chords stay bound for
 terminals that report the chord itself.
+
+**Multi-line input (AD-0018).** The newline chords insert at the cursor
+and the composer grows a row per line (each line wraps on its own
+budget; blank lines are visible; the six-text-row cap stands). Enter
+still submits the whole draft — with pi's escape hatch: a backslash
+right before Enter yields the newline instead. In a multi-line input
+the arrows walk visual rows column-preserving and fall through to
+history at the first/last row's edges; a single-line input keeps
+history from anywhere. Cmd+← / → stay start/end of the whole input.
 
 Prompt history: every non-empty Enter submission — commands included,
 shell parity — lands in `App.history` (cap 100). ↑ from fresh input

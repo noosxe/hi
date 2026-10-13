@@ -594,3 +594,42 @@ fn slash_opens_the_completion_menu_over_a_real_pty() {
         "/exit did not exit cleanly"
     );
 }
+
+/// #66: Shift+Enter opens a newline in the composer through its real
+/// wire form — the kitty encoding Ghostty sends (`CSI 13;2u`) — the
+/// composer grows a row per line, Ctrl+J's raw byte (the legacy
+/// chord, no kitty needed) adds another, and plain Enter submits the
+/// whole multi-line draft, which then echoes into the transcript.
+#[test]
+fn shift_enter_multiline_input_lifecycle_over_a_real_pty() {
+    let mut tui = Tui::spawn(&["--mock"]);
+    tui.sees("\u{2500}");
+    tui.type_keys("top line");
+    tui.write("\x1b[13;2u"); // Shift+Enter, kitty-encoded
+    tui.type_keys("mid line");
+    tui.until("the composer grows a second row", TEXT_TIMEOUT, |f| {
+        f.contains("top line") && f.contains("mid line")
+    });
+    tui.write("\x0a"); // Ctrl+J's raw byte — no kitty needed
+    tui.type_keys("low line");
+    tui.until("the composer grows a third row", TEXT_TIMEOUT, |f| {
+        f.contains("low line")
+    });
+
+    // Plain Enter submits the whole draft; the prompt echoes into the
+    // transcript and the mock turn settles beneath it.
+    tui.write("\r");
+    tui.settled_turn("no API key required");
+    tui.until(
+        "the multi-line prompt in the transcript",
+        TEXT_TIMEOUT,
+        |f| f.contains("top line") && f.contains("low line"),
+    );
+
+    tui.type_keys("/exit");
+    tui.write("\r");
+    assert!(
+        tui.exits_cleanly(Duration::from_secs(20)),
+        "/exit did not exit cleanly"
+    );
+}

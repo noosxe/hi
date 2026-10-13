@@ -26,6 +26,15 @@ const HISTORY_CAP: usize = 100;
 /// keyboard protocol reports it (`KeyModifiers::SUPER` — the terminal
 /// only forwards the chord in that mode, so this can never collide
 /// with a terminal that still owns Cmd+V for its own text paste).
+/// The newline chords: Shift+Enter (the kitty encoding — crossterm
+/// hands us Enter+SHIFT), a literal LF (a terminal binding
+/// shift+enter to `text:\n`), and Ctrl+J (legacy, works everywhere).
+fn is_newline_key(key: &KeyEvent) -> bool {
+    (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT))
+        || key.code == KeyCode::Char('\n')
+        || (key.code == KeyCode::Char('j') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
 fn paste_key(key: &KeyEvent) -> bool {
     key.code == KeyCode::Char('v')
         && (key.modifiers.contains(KeyModifiers::CONTROL)
@@ -64,6 +73,10 @@ pub struct App {
     /// Byte offset into `input` where editing happens — always on a
     /// `char` boundary. The rules live in `editor` (AD-0014).
     pub cursor: usize,
+    /// The composer's width from the last frame — the visual-row math
+    /// behind Up/Down in a multi-line input needs it (AD-0018). A
+    /// sane default until the first frame lands.
+    pub width: u16,
     /// Submitted input, oldest first, for Up/Down recall. Everything
     /// non-empty that went through Enter — commands included, shell
     /// parity (AD-0014). Capped at [`HISTORY_CAP`].
@@ -217,6 +230,7 @@ impl App {
             quit: false,
             input: String::new(),
             cursor: 0,
+            width: 80,
             history: Vec::new(),
             history_pos: None,
             history_draft: None,
@@ -270,6 +284,13 @@ impl App {
         }
         // While the `/` completion menu is open it consumes the
         // navigation keys; everything else falls through to editing.
+        // The newline chords outrank it (pi parity): a newline is an
+        // edit, not a menu pick — the menu narrows on the text, and
+        // an unmodified Enter still selects (AD-0018).
+        if self.completion.is_some() && is_newline_key(&key) {
+            self.insert_newline();
+            return;
+        }
         if self.completion.is_some() && self.handle_completion_key(key) {
             return;
         }
@@ -288,8 +309,15 @@ impl App {
             // the input as a plain &str so every rule is testable
             // without an App; the App shuttles only the cursor field.
             KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => match c {
-                'a' => self.cursor = 0,
-                'e' => self.cursor = self.input.len(),
+                // Ctrl+A/E are line-scoped now: start/end of the
+                // logical line the caret is on — identical to the
+                // whole input while it is single-line (AD-0018).
+                'a' => self.cursor = editor::line_start(&self.input, self.cursor),
+                'e' => self.cursor = editor::line_end(&self.input, self.cursor),
+                // Ctrl+J inserts a newline — the chord that works in
+                // every terminal, no kitty protocol required (pi's
+                // second binding; AD-0018).
+                'j' => self.insert_newline(),
                 'b' => {
                     self.cursor =
                         editor::prev_boundary(&self.input, self.cursor).unwrap_or(self.cursor);
@@ -304,12 +332,14 @@ impl App {
                         self.cursor = editor::delete_range(&mut self.input, self.cursor..next);
                     }
                 }
+                // Line-scoped with the A/E family (AD-0018).
                 'k' => {
-                    let end = self.input.len();
+                    let end = editor::line_end(&self.input, self.cursor);
                     self.cursor = editor::delete_range(&mut self.input, self.cursor..end);
                 }
                 'u' => {
-                    self.cursor = editor::delete_range(&mut self.input, 0..self.cursor);
+                    let start = editor::line_start(&self.input, self.cursor);
+                    self.cursor = editor::delete_range(&mut self.input, start..self.cursor);
                 }
                 'w' => {
                     let range = editor::word_delete_range_back(&self.input, self.cursor);
@@ -327,6 +357,17 @@ impl App {
                 let range = editor::word_delete_range_fwd(&self.input, self.cursor);
                 self.cursor = editor::delete_range(&mut self.input, range);
                 self.sync_completion();
+            }
+            // Newline chords (AD-0018): Shift+Enter rides the kitty
+            // encoding (`CSI 13;2u` — crossterm hands us Enter+SHIFT,
+            // the encoding is the capability, AD-0013's philosophy);
+            // a literal LF arrives where a terminal binds shift+enter
+            // to `text:\n` or a legacy raw-mode Ctrl+J slips through.
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.insert_newline();
+            }
+            KeyCode::Char('\n') => {
+                self.insert_newline();
             }
             // Readline word motions: ESC b / ESC f arrive decoded as
             // Alt+B / Alt+F — what Ghostty's macOS defaults send for
@@ -365,13 +406,15 @@ impl App {
                     editor::next_boundary(&self.input, self.cursor).unwrap_or(self.cursor)
                 };
             }
-            KeyCode::Home => self.cursor = 0,
-            KeyCode::End => self.cursor = self.input.len(),
+            // Home/End follow the A/E family: line-scoped (AD-0018).
+            KeyCode::Home => self.cursor = editor::line_start(&self.input, self.cursor),
+            KeyCode::End => self.cursor = editor::line_end(&self.input, self.cursor),
             // Prompt history: up into the past (draft parked on
             // entry), down toward it — past the newest, the draft
-            // returns (AD-0014).
-            KeyCode::Up => self.history_up(),
-            KeyCode::Down => self.history_down(),
+            // returns (AD-0014). In a multi-line input the arrows
+            // first walk the visual rows, pi-style (AD-0018).
+            KeyCode::Up => self.up_or_history(),
+            KeyCode::Down => self.down_or_history(),
             KeyCode::Backspace => {
                 if key.modifiers.contains(KeyModifiers::ALT) {
                     // The same unit the move lands on, so
@@ -397,8 +440,19 @@ impl App {
                 self.sync_completion();
             }
             KeyCode::Enter => {
-                // Move the input out, leaving an empty String behind —
-                // no clone needed since we own the value anyway.
+                // The escape hatch for terminals with neither newline
+                // chord (pi parity): a backslash right before Enter
+                // yields the newline instead of the submission.
+                if self.cursor > 0 && self.input.as_bytes()[self.cursor - 1] == b'\\' {
+                    self.cursor =
+                        editor::delete_range(&mut self.input, self.cursor - 1..self.cursor);
+                    self.insert_newline();
+                    return;
+                }
+                // Enter always submits — a multi-line draft goes out
+                // whole (AD-0018). Move the input out, leaving an
+                // empty String behind — no clone needed since we own
+                // the value anyway.
                 let msg = std::mem::take(&mut self.input);
                 self.cursor = 0;
                 let trimmed = msg.trim().to_string();
@@ -648,6 +702,55 @@ impl App {
             self.input[..self.cursor].to_string(),
             self.input[self.cursor..].to_string(),
         )
+    }
+
+    /// Insert a newline at the cursor — the multi-line composer
+    /// (AD-0018). The input stops being a command draft the moment a
+    /// newline lands in it, so the completion re-syncs.
+    fn insert_newline(&mut self) {
+        self.cursor = editor::insert_char(&mut self.input, self.cursor, '\n');
+        self.sync_completion();
+    }
+
+    /// Up: the single-line contract is unchanged — history from
+    /// anywhere (AD-0014). A multi-line input walks the visual rows
+    /// first, column-preserving, pi-style; at the first visual row it
+    /// recalls history when the caret sits at an edge (empty input,
+    /// already browsing, or column 0) and otherwise clamps to the row
+    /// start (AD-0018).
+    fn up_or_history(&mut self) {
+        let width = self.width.max(1) as usize;
+        let (row, col) = crate::wrap::cursor_pos(&self.input, self.cursor, width);
+        if row > 0 {
+            self.cursor = crate::wrap::row_col_to_offset(&self.input, row - 1, col, width);
+            return;
+        }
+        let single_row = crate::wrap::wrapped_row_count(&self.input, width) == 1;
+        if single_row || self.input.is_empty() || self.history_pos.is_some() || col == 0 {
+            self.history_up();
+        } else {
+            self.cursor = 0;
+        }
+    }
+
+    /// Down: the mirror of [`Self::up_or_history`] — visual rows
+    /// first, column-preserving; the last visual row recalls history
+    /// only while already browsing (or on the single-line contract)
+    /// and otherwise clamps to the row end (AD-0018).
+    fn down_or_history(&mut self) {
+        let width = self.width.max(1) as usize;
+        let (row, col) = crate::wrap::cursor_pos(&self.input, self.cursor, width);
+        let rows = crate::wrap::wrapped_row_count(&self.input, width);
+        if row + 1 < rows {
+            self.cursor = crate::wrap::row_col_to_offset(&self.input, row + 1, col, width);
+            return;
+        }
+        let single_row = rows == 1;
+        if single_row || self.history_pos.is_some() {
+            self.history_down();
+        } else {
+            self.cursor = crate::wrap::row_col_to_offset(&self.input, row, usize::MAX, width);
+        }
     }
 
     /// Step back through prompt history. Entering from fresh input
@@ -1680,6 +1783,116 @@ mod tests {
         assert_eq!(app.cursor, 0);
         app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::SUPER));
         assert_eq!(app.cursor, 15);
+    }
+
+    fn shift(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    #[test]
+    fn newline_chords_insert_newlines() {
+        // Shift+Enter — what the kitty encoding (`CSI 13;2u`) decodes
+        // to, no handshake gating needed.
+        let mut app = app();
+        for c in "a".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(shift(KeyCode::Enter));
+        assert_eq!(app.input, "a\n");
+        assert_eq!(app.cursor, 2);
+        app.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(app.input, "a\nb");
+        // Ctrl+J — the chord that needs no kitty protocol at all.
+        app.handle_key(ctrl(KeyCode::Char('j')));
+        assert_eq!(app.input, "a\nb\n");
+        // A literal LF (a terminal binding shift+enter to text:\n).
+        app.handle_key(key(KeyCode::Char('\n')));
+        assert_eq!(app.input, "a\nb\n\n");
+        // A newline leaves command space: no menu for "/x\n...".
+        app.input.clear();
+        app.cursor = 0;
+        for c in "/e".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        assert!(app.completion.is_some());
+        app.handle_key(shift(KeyCode::Enter));
+        assert_eq!(app.input, "/e\n");
+        assert!(app.completion.is_none());
+    }
+
+    #[test]
+    fn enter_submits_a_multiline_draft_whole_and_backslash_escapes() {
+        let mut app = app();
+        for c in "two\nlines".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.input.is_empty(), "Enter submits even multi-line");
+        assert_eq!(app.messages.len(), 1);
+        let crate::Message::User(sent) = &app.messages[0] else {
+            panic!("expected a user message, got {:?}", app.messages[0]);
+        };
+        assert_eq!(sent, "two\nlines");
+
+        // The escape hatch: backslash right before Enter yields the
+        // newline instead of the submission.
+        for c in "one\\".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.input, "one\n");
+        assert_eq!(app.messages.len(), 1, "no submission happened");
+    }
+
+    #[test]
+    fn arrows_walk_visual_rows_in_a_multiline_input() {
+        let mut app = app();
+        for c in "alpha\nbeta".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.cursor, 10);
+        // Up from the last row: column preserved (after "beta" -> after "alph").
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.cursor, 4);
+        // Up at the first row's interior clamps to the row start (pi).
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.cursor, 0);
+        // Up at column 0 of the first row: history fallthrough — the
+        // draft parks, history is empty here, nothing moves.
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.cursor, 0);
+        // Down walks back out: start of "beta", then the row end clamp.
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.cursor, 6);
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.cursor, 10);
+        // Down on the last row without history browsing: row end clamp.
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.cursor, 10);
+    }
+
+    #[test]
+    fn line_scoped_chords_match_the_multiline_contract() {
+        let mut app = app();
+        for c in "one\ntwo".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        // Cursor at the end (7): Home/Ctrl+A to the line's start.
+        app.handle_key(key(KeyCode::Home));
+        assert_eq!(app.cursor, 4);
+        app.handle_key(ctrl(KeyCode::Char('a')));
+        assert_eq!(app.cursor, 4);
+        // End/Ctrl+E to the line's end (the whole input's end here).
+        app.handle_key(key(KeyCode::End));
+        assert_eq!(app.cursor, 7);
+        // Ctrl+U kills the current line only.
+        app.handle_key(ctrl(KeyCode::Char('u')));
+        assert_eq!(app.input, "one\n");
+        assert_eq!(app.cursor, 4);
+        // Ctrl+K kills to the line's end only.
+        app.cursor = 0;
+        app.handle_key(ctrl(KeyCode::Char('k')));
+        assert_eq!(app.input, "\n");
     }
 
     #[test]

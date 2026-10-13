@@ -168,6 +168,7 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io
         // stream.
         let size = terminal.size()?;
         let (width, height) = (size.width, size.height);
+        app.width = width;
         app.scroll.sync(&app.messages, width, kitty::detect());
         let stream_h =
             ui::stream_window_height(height, ui::input_height(app, width), app.menu_height());
