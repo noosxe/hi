@@ -17,7 +17,8 @@ use crate::catalog::Catalog;
 /// rendering only *reads* it. No widget, no terminal handle, no
 /// drawing inside here.
 use crate::editor;
-use crate::status::{Status, location_label};
+use crate::status::{Status, location_label, usage_line};
+use hi_core::event::Usage;
 
 /// Prompt-history ceiling (AD-0014).
 const HISTORY_CAP: usize = 100;
@@ -135,6 +136,11 @@ pub struct App {
     /// Status-bar facts: which provider and model this session uses.
     /// Passed in from the CLI — the trait object can't name itself.
     pub status: Status,
+    /// Session-cumulative token economics (AD-0026), merged from
+    /// every `Event::Usage`. `usage_last_prompt` is the latest round's
+    /// prompt size — the context fact the share needs.
+    usage: Usage,
+    usage_last_prompt: u64,
     /// Left side of the status bar, computed once at startup:
     /// `~/Projects/hi (main)`.
     pub location: String,
@@ -366,6 +372,8 @@ impl App {
             task_turns,
             auto_trigger_budget: AUTO_TRIGGER_BUDGET,
             auto_armed: false,
+            usage: Usage::default(),
+            usage_last_prompt: 0,
             scroll: crate::scroll::Scroll::new(),
             session_root: None,
         }
@@ -923,10 +931,18 @@ impl App {
                 context_left = format!("tasks: {}", parts.join(" · "));
             }
         }
-        vec![
-            (self.location.clone(), String::new()),
-            (context_left, context_right),
-        ]
+        let bill = usage_line(&self.usage, self.usage_last_prompt, self.context_window());
+        vec![(self.location.clone(), bill), (context_left, context_right)]
+    }
+
+    /// The configured context window for the live model, if its config
+    /// entry declares one — the denominator of the usage line's
+    /// context share. Discovered models have no entry and show no
+    /// share; nothing is guessed (AD-0026).
+    fn context_window(&self) -> Option<u64> {
+        let entry = self.config.providers.get(&self.status.provider)?;
+        let model = entry.models.iter().find(|m| m.id == self.status.model)?;
+        model.context_window.map(u64::from)
     }
 
     /// The board's row count — the height `layout` and the flush pass
@@ -1550,6 +1566,9 @@ impl App {
         // transcript after the loop — `self.messages` can't be touched
         // while `turn` holds a borrow of `self`.
         let mut transcript: Vec<Message> = Vec::new();
+        // The round's bill (AD-0026): merged across rounds within one
+        // pump, applied to `self` after the borrow ends.
+        let mut round_bill: Option<Usage> = None;
         while let Ok(event) = turn.rx.try_recv() {
             match event {
                 Event::TurnStart => {} // nothing to do yet — tokens follow
@@ -1565,6 +1584,15 @@ impl App {
                     transcript.push(Message::ToolCall(call));
                 }
                 Event::ToolResult(result) => transcript.push(Message::ToolResult(result)),
+                Event::Usage(usage) => {
+                    round_bill = Some(match round_bill {
+                        Some(mut total) => {
+                            total.merge(usage);
+                            total
+                        }
+                        None => usage,
+                    });
+                }
                 Event::Error(message) => turn.error = Some(message),
                 Event::TurnEnd => {
                     finished = true;
@@ -1574,6 +1602,12 @@ impl App {
         }
         for message in transcript {
             self.messages.push(message);
+        }
+        if let Some(bill) = round_bill {
+            self.usage.merge(bill);
+            // The latest round's prompt IS the context size: every
+            // turn re-sends the whole conversation.
+            self.usage_last_prompt = bill.prompt_tokens;
         }
         if finished {
             // `Option::take` removes the turn and leaves `None` behind.
@@ -1781,6 +1815,50 @@ mod tests {
         let rows = app.status_rows();
         assert!(rows[1].0.is_empty());
         assert_eq!(rows[1].1, "(mock) mock · auto: armed");
+    }
+
+    #[test]
+    fn usage_fills_row_0s_right_and_the_share_needs_a_window() {
+        let mut app = test_app();
+        app.usage = Usage {
+            prompt_tokens: 1000,
+            completion_tokens: 250,
+            cached_tokens: Some(700),
+            reasoning_tokens: Some(100),
+        };
+        app.usage_last_prompt = 1000;
+        // The mock's bill: net ↓300 of 1000, no window configured.
+        assert_eq!(app.status_rows()[0].1, "↑250 ↓300 R100 CH70.0%");
+        // A configured window joins the share — nothing is guessed.
+        let mut providers = std::collections::BTreeMap::new();
+        providers.insert(
+            "mock".to_string(),
+            hi_core::ProviderConfig {
+                base_url: "http://x/v1".into(),
+                api_key: None,
+                models: vec![hi_core::ModelConfig {
+                    id: "mock".into(),
+                    context_window: Some(1_000_000),
+                    ..Default::default()
+                }],
+            },
+        );
+        app.config = ModelsConfig { providers };
+        assert_eq!(app.status_rows()[0].1, "↑250 ↓300 R100 CH70.0% 0.1%/1M");
+    }
+
+    #[test]
+    fn a_settled_mock_turn_leaves_the_bill_on_the_board() {
+        let mut app = test_app();
+        app.start_turn();
+        drain_turns(&mut app);
+        // The mock's fixed bill rode the settled turn end to end.
+        assert_eq!(app.usage.completion_tokens, 250);
+        assert_eq!(app.usage.cached_tokens, Some(700));
+        assert_eq!(app.usage_last_prompt, 1000);
+        let right = app.status_rows()[0].1.clone();
+        assert!(right.contains("↑250 ↓300"), "{right}");
+        assert!(right.contains("CH70.0%"), "{right}");
     }
 
     fn mandate_count(app: &App) -> usize {

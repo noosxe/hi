@@ -4,7 +4,7 @@ use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
 
-use crate::event::Event;
+use crate::event::{Event, Usage};
 use crate::message::Message;
 use crate::provider::Provider;
 
@@ -53,6 +53,14 @@ impl Provider for MockProvider {
             }
             thread::sleep(self.delay);
         }
+        // The mock's bill (AD-0026): fixed numbers, so tests and the
+        // pty can assert the rendered usage line exactly.
+        let _ = tx.send(Event::Usage(Usage {
+            prompt_tokens: 1000,
+            completion_tokens: 250,
+            cached_tokens: Some(700),
+            reasoning_tokens: Some(100),
+        }));
         let _ = tx.send(Event::TurnEnd);
     }
 }
@@ -77,7 +85,17 @@ mod tests {
         assert_eq!(events.first(), Some(&Event::TurnStart));
         assert_eq!(events.last(), Some(&Event::TurnEnd));
 
-        let text: String = events[1..events.len() - 1]
+        // Tokens, then the bill (AD-0026), then the close.
+        assert_eq!(
+            events[events.len() - 2],
+            Event::Usage(Usage {
+                prompt_tokens: 1000,
+                completion_tokens: 250,
+                cached_tokens: Some(700),
+                reasoning_tokens: Some(100),
+            })
+        );
+        let text: String = events[1..events.len() - 2]
             .iter()
             .map(|event| match event {
                 Event::Token(word) => word.as_str(),

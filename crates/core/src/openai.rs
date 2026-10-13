@@ -21,7 +21,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ModelConfig, ProviderConfig};
-use crate::event::Event;
+use crate::event::{Event, Usage};
 use crate::message::Message;
 use crate::provider::Provider;
 use crate::thinking::ThinkingLevel;
@@ -232,6 +232,9 @@ impl OpenAiCompatProvider {
             model: &self.model,
             messages,
             stream: true,
+            stream_options: StreamOptions {
+                include_usage: true,
+            },
             tools: self.tools.definitions(),
             prompt_cache_key: self.cache_key.as_deref(),
         };
@@ -267,6 +270,10 @@ impl OpenAiCompatProvider {
         // text tokens, mirroring the protocol's own ordering (a
         // message's content precedes its tool_calls).
         let mut partials: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
+        // The round's bill, kept aside until finalization — the wire
+        // sends usage once, after all content; deferring keeps a
+        // chatty server's per-chunk usage from double counting.
+        let mut round_usage: Option<Usage> = None;
         for line in buffered.lines() {
             let line = line.map_err(|err| format!("reading stream: {err}"))?;
             for datum in parse_data_line(&line) {
@@ -284,8 +291,14 @@ impl OpenAiCompatProvider {
                             accumulate_fragment(&mut partials, fragment);
                         }
                     }
+                    DataLine::Usage(usage) => {
+                        // Last-wins: a server that reports usage on
+                        // every chunk gets only its final word counted.
+                        round_usage = Some(usage);
+                    }
                     DataLine::Done => {
                         emit_tool_calls(partials, tx);
+                        emit_usage(round_usage, tx);
                         return Ok(());
                     }
                     DataLine::Malformed(why) => return Err(why),
@@ -295,6 +308,7 @@ impl OpenAiCompatProvider {
         // Server closed without `[DONE]`: tolerate it and treat the
         // stream as complete — same finalization as `[DONE]`.
         emit_tool_calls(partials, tx);
+        emit_usage(round_usage, tx);
         Ok(())
     }
 }
@@ -402,6 +416,14 @@ impl Provider for OpenAiCompatProvider {
     }
 }
 
+/// The round's bill closes after its work: content, then tools, then
+/// usage, then `[DONE]` — the wire's own ordering, kept.
+fn emit_usage(usage: Option<Usage>, tx: &Sender<Event>) {
+    if let Some(usage) = usage {
+        let _ = tx.send(Event::Usage(usage));
+    }
+}
+
 /// Turn a provider error into something a human can act on. Status
 /// codes are called out because "HTTP 401" is usually the whole
 /// diagnosis (bad or missing key).
@@ -420,6 +442,7 @@ fn describe(action: &str, err: ureq::Error) -> String {
 enum DataLine {
     Token(String),
     ToolFragments(Vec<ToolCallDelta>),
+    Usage(Usage),
     Done,
     Malformed(String),
 }
@@ -440,12 +463,17 @@ fn parse_data_line(line: &str) -> Vec<DataLine> {
             ))];
         }
     };
+    let mut out = Vec::new();
+    // The usage chunk usually rides an empty-choices frame — parse it
+    // before the choices bail-out, never inside it.
+    if let Some(raw) = chunk.usage {
+        out.push(DataLine::Usage(raw.into()));
+    }
     // First choice only. Role-only and empty deltas happen (openers,
     // keep-alives) and are not tokens.
     let Some(choice) = chunk.choices.into_iter().next() else {
-        return Vec::new();
+        return out;
     };
-    let mut out = Vec::new();
     if let Some(content) = choice.delta.content
         && !content.is_empty()
     {
@@ -475,6 +503,16 @@ struct ChatRequest<'a> {
     /// session, so `--no-session` runs look exactly like before.
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<&'a str>,
+    /// Ask for the stream's final usage chunk (AD-0026). Part of the
+    /// OpenAI-compat contract; a server that rejects it is a
+    /// per-provider bug to fix, not a knob.
+    stream_options: StreamOptions,
+}
+
+/// The `stream_options` request field — one switch, sent every time.
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 /// One message on the wire. The optional fields make one struct cover
@@ -674,12 +712,55 @@ fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
     out
 }
 
-/// One streamed chunk. `choices[0]` is all hi reads; ids, finish
-/// reasons, and usage are ignored by serde.
+/// One streamed chunk. `choices[0]` is all hi reads of a content
+/// chunk; ids and finish reasons stay ignored by serde. The final
+/// chunk's `usage` object is the round's bill (AD-0026).
 #[derive(Deserialize)]
 struct StreamChunk {
     #[serde(default)]
     choices: Vec<StreamChoice>,
+    #[serde(default)]
+    usage: Option<RawUsage>,
+}
+
+/// The wire's `usage` object. Defaults everywhere: a half-compatible
+/// server reporting a partial bill parses instead of breaking the
+/// stream, and absent details stay absent (`None` is not zero).
+#[derive(Deserialize)]
+struct RawUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokenDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionTokenDetails>,
+}
+
+#[derive(Deserialize)]
+struct PromptTokenDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct CompletionTokenDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
+}
+
+impl From<RawUsage> for Usage {
+    fn from(raw: RawUsage) -> Self {
+        Usage {
+            prompt_tokens: raw.prompt_tokens,
+            completion_tokens: raw.completion_tokens,
+            cached_tokens: raw.prompt_tokens_details.and_then(|d| d.cached_tokens),
+            reasoning_tokens: raw
+                .completion_tokens_details
+                .and_then(|d| d.reasoning_tokens),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -829,6 +910,68 @@ mod tests {
     }
 
     #[test]
+    fn usage_chunks_parse_with_or_without_details() {
+        assert_eq!(
+            parse_data_line(
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,                 \"completion_tokens\":5,\"prompt_tokens_details\":{\"cached_tokens\":8},                 \"completion_tokens_details\":{\"reasoning_tokens\":3}}}"
+            ),
+            vec![DataLine::Usage(Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                cached_tokens: Some(8),
+                reasoning_tokens: Some(3),
+            })]
+        );
+        // A half-compatible server's bare bill still parses — absent
+        // details stay absent, not zero.
+        assert_eq!(
+            parse_data_line("data: {\"usage\":{\"prompt_tokens\":10}}"),
+            vec![DataLine::Usage(Usage {
+                prompt_tokens: 10,
+                completion_tokens: 0,
+                cached_tokens: None,
+                reasoning_tokens: None,
+            })]
+        );
+    }
+
+    #[test]
+    fn the_usage_chunk_closes_the_round_after_the_tools() {
+        let api = FakeApi::start(sse_response(&[
+            "{\"choices\":[{\"delta\":{\"content\":\"checking\"}}]}",
+            "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"go\",\"arguments\":\"{}\"}}]}}]}",
+            "{\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}",
+            "[DONE]",
+        ]));
+        let provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "m");
+        let events: Vec<Event> = spawn_turn(Arc::new(provider), &[Message::User("go".into())])
+            .iter()
+            .collect();
+
+        // Wire order, kept: text, the calls, then the bill.
+        assert_eq!(events.first(), Some(&Event::TurnStart));
+        assert_eq!(events.last(), Some(&Event::TurnEnd));
+        let bills: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| matches!(e, Event::Usage(_)).then_some(i))
+            .collect();
+        assert_eq!(bills.len(), 1, "one round, one bill: {events:?}");
+        let bill = bills[0];
+        assert!(
+            events[..bill]
+                .iter()
+                .any(|e| matches!(e, Event::ToolCall(_))),
+            "tools precede the bill"
+        );
+        assert_eq!(
+            events[bill + 1],
+            Event::TurnEnd,
+            "the bill is the round's last fact"
+        );
+    }
+
+    #[test]
     fn error_messages_are_never_sent_to_the_model() {
         let history = vec![
             Message::User("question".into()),
@@ -927,6 +1070,11 @@ mod tests {
             request
                 .to_ascii_lowercase()
                 .contains("authorization: bearer sekrit")
+        );
+        // Every stream asks for the bill (AD-0026).
+        assert!(
+            compact_body(api.first_request())
+                .contains(r#""stream_options":{"include_usage":true}"#)
         );
         // send_json pretty-prints, so compare the body without
         // whitespace: collapse it all, then look for compact pairs.

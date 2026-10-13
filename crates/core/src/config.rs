@@ -61,8 +61,10 @@ pub struct ModelConfig {
     /// (false, #29) blinded every dynamically discovered model.
     #[serde(default = "default_vision")]
     pub vision: bool,
-    /// Context window size, in tokens. Informational for now — the
-    /// harness will use it for truncation policy later.
+    /// Context window size, in tokens — the denominator of the usage
+    /// line's context share on the status board (AD-0026). Absent ⇒ no
+    /// share is shown; nothing is guessed. Truncation policy may claim
+    /// it later.
     #[serde(rename = "contextWindow", default)]
     pub context_window: Option<u32>,
     /// Maximum completion tokens the model accepts.

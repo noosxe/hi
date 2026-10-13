@@ -7,6 +7,8 @@
 
 use std::path::{Path, PathBuf};
 
+use hi_core::event::Usage;
+
 /// The right side of the status bar: which backend, which model.
 /// A plain struct because the `Arc<dyn Provider>` trait object has
 /// amnesia — the CLI knows these names, the trait does not carry them.
@@ -51,6 +53,62 @@ pub fn compose_status(left: &str, right: &str, width: u16) -> String {
     let used = left.chars().count() + right.chars().count();
     let pad = width.saturating_sub(used);
     format!("{left}{}{right}", " ".repeat(pad))
+}
+
+/// The session's usage line (AD-0026), row 0's right section —
+/// `↑8.6M ↓1.9M R250M CH99.2% 10.7%/1M`. The counts are
+/// session-cumulative (↑ output, ↓ input net of the cache, R
+/// reasoning, CH cache-hit share of the prompt); the context share is
+/// the *latest* round's prompt against the configured window — a
+/// point-in-time fact, not a sum. Empty until the first bill arrives,
+/// and every segment hides when its input is absent: no cache detail
+/// means no CH and a gross ↓, no reasoning means no R, no configured
+/// window means no share.
+pub fn usage_line(usage: &Usage, last_prompt: u64, context_window: Option<u64>) -> String {
+    if usage.prompt_tokens == 0 && usage.completion_tokens == 0 && last_prompt == 0 {
+        return String::new();
+    }
+    let mut parts = Vec::new();
+    parts.push(format!("↑{}", compact_tokens(usage.completion_tokens)));
+    let net_input = usage.cached_tokens.map_or(usage.prompt_tokens, |cached| {
+        usage.prompt_tokens.saturating_sub(cached)
+    });
+    parts.push(format!("↓{}", compact_tokens(net_input)));
+    if let Some(reasoning) = usage.reasoning_tokens.filter(|r| *r > 0) {
+        parts.push(format!("R{}", compact_tokens(reasoning)));
+    }
+    if let (Some(cached), false) = (
+        usage.cached_tokens.filter(|c| *c > 0),
+        usage.prompt_tokens == 0,
+    ) {
+        parts.push(format!(
+            "CH{:.1}%",
+            cached as f64 * 100.0 / usage.prompt_tokens as f64
+        ));
+    }
+    if let (Some(window), false) = (context_window.filter(|w| *w > 0), last_prompt == 0) {
+        parts.push(format!(
+            "{:.1}%/{}",
+            last_prompt as f64 * 100.0 / window as f64,
+            compact_tokens(window)
+        ));
+    }
+    parts.join(" ")
+}
+
+/// Compact token count: `8.6M`, `250M`, `86.4k`, `999` — one decimal,
+/// trailing `.0` trimmed.
+fn compact_tokens(tokens: u64) -> String {
+    let (value, suffix) = if tokens >= 1_000_000 {
+        (tokens as f64 / 1_000_000.0, "M")
+    } else if tokens >= 1_000 {
+        (tokens as f64 / 1_000.0, "k")
+    } else {
+        return tokens.to_string();
+    };
+    let rendered = format!("{value:.1}");
+    let rendered = rendered.strip_suffix(".0").unwrap_or(&rendered);
+    format!("{rendered}{suffix}")
 }
 
 /// Replace the home prefix with `~` so the bar stays short.
@@ -195,5 +253,39 @@ mod tests {
         assert_eq!(compose_status("left", "right", 9), "leftright");
         // Too narrow: no panic, the widget will clip.
         assert_eq!(compose_status("left", "right", 2), "leftright");
+    }
+
+    #[test]
+    fn usage_line_is_empty_until_the_first_bill() {
+        let usage = Usage::default();
+        assert_eq!(usage_line(&usage, 0, None), "");
+        // A window alone is not a bill either.
+        assert_eq!(usage_line(&usage, 0, Some(1_000_000)), "");
+    }
+
+    #[test]
+    fn usage_line_renders_the_whole_shape() {
+        let usage = Usage {
+            prompt_tokens: 9_500_000, // 1.9M net of 7.6M cached
+            completion_tokens: 8_600_000,
+            cached_tokens: Some(7_600_000),
+            reasoning_tokens: Some(250_000_000),
+        };
+        assert_eq!(
+            usage_line(&usage, 107_000, Some(1_000_000)),
+            "↑8.6M ↓1.9M R250M CH80.0% 10.7%/1M"
+        );
+    }
+
+    #[test]
+    fn usage_line_hides_what_the_wire_never_reported() {
+        let usage = Usage {
+            prompt_tokens: 500,
+            completion_tokens: 20,
+            cached_tokens: None,
+            reasoning_tokens: None,
+        };
+        // No details: gross ↓, no R, no CH, no share without a window.
+        assert_eq!(usage_line(&usage, 500, None), "↑20 ↓500");
     }
 }

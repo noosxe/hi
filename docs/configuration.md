@@ -36,7 +36,7 @@ configs never break older builds (tested for both files).
           "id": "model-id",                    // required; sent to the API as-is
           "name": "Display Name",              // optional; falls back to id
           "reasoning": false,                  // optional; default false
-          "contextWindow": 100000,             // optional; u32 tokens, informational
+          "contextWindow": 100000,             // optional; u32 tokens — the usage line's context-share denominator (AD-0026)
           "maxTokens": 16384,                  // optional; u32, max completion tokens
           "thinkingLevelMap": {                // optional; level name → request kwargs
             "off":  { "thinking": { "type": "disabled" } },

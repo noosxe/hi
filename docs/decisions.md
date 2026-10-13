@@ -1004,3 +1004,34 @@ still holds; the content now always includes row 1. The cost is one
 terminal row in every session — the thing AD-0025's ruling 1
 originally refused — spent knowingly, with three total rows the
 declared ceiling.
+
+---
+
+## AD-0026 — the bill on the board: usage facts ride the final chunk (2026-10-16)
+
+#39's premise made most of pi's footer stats deliverable from the wire
+alone. Every streaming request now asks for the bill
+(`stream_options: {"include_usage": true}` — part of the compat
+contract; a server that rejects it is a per-provider bug, not a
+knob), and the final `usage` chunk surfaces as `Event::Usage` — raw
+counts in core (`prompt_tokens`, `completion_tokens`, optional
+`cached_tokens`/`reasoning_tokens`; absent detail means *not
+reported*, never zero). Wire order is kept: content, tools, bill,
+`[DONE]` — one bill per round, last-wins, so a chatty server cannot
+double count. The exhaustive enum made every consumer adapt: the
+agent loop forwards untouched, the TUI accumulates, headless
+declines politely.
+
+**Display** is row 0's right section — the resident the board held
+empty since the model moved out (AD-0025a): `↑8.6M ↓1.9M R250M
+CH99.2% 10.7%/1M`. Rulings: ↑↓R/CH are session-cumulative, the
+context share is the *latest* round's prompt against the configured
+`contextWindow` (a point-in-time fact, not a sum); ↓ is input net of
+cache when cache is reported; every segment hides when its input is
+absent — no detail object, no CH/R; no `contextWindow`, no share,
+**nothing guessed** (pi guesses 1M; hi reads the config the user
+already wrote). Compact formatting (`1.9M`, trims `.0`) is
+presentation and lives in the tui. Cost stays a non-goal (#39's own
+carried ruling — a pricing table, not a wire fact). The mock emits a
+fixed bill (↑250 ↓300 R100 CH70.0%), so tests and the pty assert the
+rendered line exactly.
