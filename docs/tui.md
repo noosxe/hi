@@ -141,14 +141,19 @@ parse is reported, not overwritten — Esc closes.
   refresh is polish for later.
 - `compose_status(left, right, width)` — one row, filler between, clips on
   narrow terminals, never panics.
-- **The status board (AD-0025, amended)**: `App::status_rows()`
-  returns rows bottom-up, two permanent residents. Row 0 is location
-  on the left — its right sits empty for future residents. Row 1 is
-  the session's own context: the model (+thinking) on the right —
-  the indicator you read all day — tasks on the left
-  (`tasks: 2 running · 1 done`, replacing the old `· N bg` bolt-on),
-  and the auto-trigger arm appended after the model (`auto: armed` —
-  #72's visible feedback; transient noise rides right).
+- **The status board (AD-0025, amended; usage AD-0026)**:
+  `App::status_rows()` returns rows bottom-up, two permanent
+  residents. Row 0 is location on the left and the session's
+  **usage line** on the right — `↑8.6M ↓1.9M R250M CH99.2% 10.7%/1M`
+  from `status::usage_line`: cumulative output / input-net-of-cache /
+  reasoning / cache-hit share, plus the *latest* round's prompt
+  against the model's configured `contextWindow` (absent ⇒ no share;
+  every segment hides when its input is absent; empty until the
+  first `Event::Usage`). Row 1 is the session's own context: the
+  model (+thinking) on the right — the indicator you read all day —
+  tasks on the left (`tasks: 2 running · 1 done`), and the
+  auto-trigger arm appended after the model (`auto: armed` — #72's
+  visible feedback; transient noise rides right).
   `App::status_height()` is the one height `layout` and the flush
   pass both measure with, so draw and flush can never disagree; a
   menu still outranks the whole board (the ruled yield, generalized

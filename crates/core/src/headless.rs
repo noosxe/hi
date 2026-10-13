@@ -73,6 +73,8 @@ pub fn run(
                 transcript.push(Message::ToolCall(call));
             }
             Event::ToolResult(result) => transcript.push(Message::ToolResult(result)),
+            // Headless prints the transcript, not the bill (AD-0026).
+            Event::Usage(_) => {}
             Event::Error(message) => error = Some(message),
             Event::TurnEnd => break,
         }

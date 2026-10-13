@@ -111,6 +111,12 @@ fn run_agent_turn(
                         return;
                     }
                 }
+                // The round's bill rides through untouched, same rule.
+                usage @ Event::Usage(_) => {
+                    if tx.send(usage).is_err() {
+                        return;
+                    }
+                }
                 Event::Error(err) => {
                     failed = true;
                     if tx.send(Event::Error(err)).is_err() {
