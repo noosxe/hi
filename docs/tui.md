@@ -47,7 +47,8 @@ the keyboard), `tick: u8` (spinner frames), `completion: Option<Completion>`
 `system_prompt` + `thinking` (re-attached on provider rebuild),
 `turn: Option<Turn>`, `tasks: Option<hi_core::tasks::TaskManager>` (drained
 per frame in `pump` — completions become transcript notes; the running
-count feeds the status row).
+count feeds the status row), `tasks_view: Option<TasksView>` (the `/tasks`
+pane: list, or one task's output watched live — AD-0021).
 
 `Turn { text, error: Option<String>, started_at: Instant, rx: Receiver<Event>
 }` — `rx` is private on purpose: raw events are consumed only by `pump` and
@@ -82,7 +83,7 @@ Behaviors (each pinned by a test in `app.rs`):
 
 ```rust
 pub struct Command { pub name: &'static str, pub description: &'static str }
-pub const COMMANDS: &[Command]  // sorted: exit, model, quit, resume, tools
+pub const COMMANDS: &[Command]  // sorted: exit, model, quit, resume, tasks, tools
 pub fn matching(typed: &str) -> Vec<&'static Command>   // case-insensitive prefix
 pub fn find_exact(name: &str) -> Option<&'static Command>
 ```
@@ -94,9 +95,11 @@ Adding a command = one entry in `COMMANDS` **plus** one arm in
 `/tools` pushes a dim local-only notice listing the registry — name,
 annotation badges (`read-only` / `destructive`, only when the tool claims
 them), and the first sentence of each description (`ToolRegistry::info()`
-in core snapshots the facts; the TUI formats). Like unknown-command
-reports, the notice persists in the session file but never reaches the
-provider.
+in core snapshots the facts; the TUI formats). `/tasks` opens the tasks
+pane (AD-0021) — bare to list, `/tasks <id>` for one task's live output.
+Like unknown-command reports, notices persist in the session file but
+never reach the provider. Commands may carry arguments: the dispatch
+splits on the first space, name first, the rest rides to the handler.
 
 ## catalog.rs — what the `/model` picker offers
 
@@ -135,6 +138,10 @@ parse is reported, not overwritten — Esc closes.
   next turn's payload to the model.
 
 ## ui.rs — drawing (the only file allowed to draw)
+
+The `/tasks` pane draws in the menu slot like every menu, and reads the
+manager fresh each frame — the frame clock is the poll, nothing caches
+(AD-0021).
 
 `draw(frame, app)` lays out the live viewport — **the whole terminal**
 (AD-0015; the first sketch fixed it at 12 rows, which capped every reply

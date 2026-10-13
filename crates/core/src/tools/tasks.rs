@@ -21,7 +21,7 @@ use std::time::Duration;
 
 /// Format one summary line — the shared shape across status tools.
 fn summarize(summary: &crate::tasks::TaskSummary) -> String {
-    let wall = format_duration(summary.wall);
+    let wall = crate::tasks::format_duration(summary.wall);
     match summary.state {
         crate::tasks::TaskState::Running => {
             format!(
@@ -38,16 +38,6 @@ fn summarize(summary: &crate::tasks::TaskSummary) -> String {
             state = state.label(),
             command = summary.command,
         ),
-    }
-}
-
-/// Seconds-and-minutes phrasing for a wall time (compact, model-facing).
-fn format_duration(wall: Duration) -> String {
-    let secs = wall.as_secs();
-    if secs >= 60 {
-        format!("{}m{}s", secs / 60, secs % 60)
-    } else {
-        format!("{secs}.{:03}", wall.subsec_millis())
     }
 }
 

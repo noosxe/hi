@@ -129,6 +129,18 @@ pub enum TaskState {
     SpawnFailed,
 }
 
+/// Seconds-and-minutes phrasing for a wall time — compact, one
+/// phrasing for the task tools, the transcript notes, and the TUI's
+/// tasks pane. Lives here so every consumer spells it the same way.
+pub fn format_duration(wall: Duration) -> String {
+    let secs = wall.as_secs();
+    if secs >= 60 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}.{:03}", wall.subsec_millis())
+    }
+}
+
 impl TaskState {
     /// Not `Running`.
     pub fn finished(&self) -> bool {

@@ -173,6 +173,9 @@ pub struct App {
     /// The background-task manager shared with the registry (#5). The
     /// app drains completions per frame; `None` when no task tools run.
     pub tasks: Option<hi_core::tasks::TaskManager>,
+    /// The open `/tasks` pane (AD-0021) — list or one task's output.
+    /// `Some` = owns the keyboard, like the pickers.
+    pub tasks_view: Option<TasksView>,
     /// Session-storage root override — tests point this at a temp
     /// directory; production uses the real data dir (`None`).
     pub session_root: Option<std::path::PathBuf>,
@@ -212,6 +215,18 @@ pub struct Turn {
 pub struct Picker {
     pub items: Vec<String>,
     pub selected: usize,
+}
+
+/// The `/tasks` pane's view (AD-0021): the list, or one task's
+/// output watched live. The pane lives in the menu slot under the
+/// input; draw reads the manager fresh every frame — the frame clock
+/// is the poll, no cache, no thread.
+pub enum TasksView {
+    /// Every task, oldest first; `selected` is an index into
+    /// `TaskManager::list()` re-read per frame.
+    List { selected: usize },
+    /// One task's output tail, newest rows at the bottom.
+    Output { id: u64 },
 }
 
 /// The `/` completion menu: filtered commands plus the highlighted
@@ -271,6 +286,7 @@ impl App {
             images,
             images_setting,
             tasks,
+            tasks_view: None,
             scroll: crate::scroll::Scroll::new(),
             session_root: None,
         }
@@ -296,6 +312,13 @@ impl App {
         // the status row while open.
         if self.session_picker.is_some() {
             self.handle_session_picker_key(key);
+            return;
+        }
+        // The `/tasks` pane owns the keyboard like every menu: Esc
+        // backs out (output → list → closed), arrows walk, Enter
+        // opens. Everything else is swallowed while it is open.
+        if self.tasks_view.is_some() {
+            self.handle_tasks_key(key);
             return;
         }
         // While the `/` completion menu is open it consumes the
@@ -490,18 +513,22 @@ impl App {
                 let command_text = trimmed.strip_prefix('/').filter(|rest| !rest.contains('/'));
                 if let Some(command_text) = command_text {
                     // Exact name wins; otherwise the highlighted
-                    // completion speaks for the user.
+                    // completion speaks for the user. The name is the
+                    // first word — everything after it rides to the
+                    // handler ("/tasks 3").
+                    let (name_part, args) =
+                        command_text.split_once(' ').unwrap_or((command_text, ""));
                     let highlighted = self
                         .completion
                         .as_ref()
                         .and_then(|menu| menu.items.get(menu.selected))
                         .map(|(name, _)| *name);
-                    let name = crate::commands::find_exact(command_text)
+                    let name = crate::commands::find_exact(name_part)
                         .map(|command| command.name)
                         .or(highlighted);
                     self.completion = None;
                     match name {
-                        Some(name) => self.run_command(name),
+                        Some(name) => self.run_command(name, args.trim()),
                         None => self.messages.push(Message::System(format!(
                             "unknown command: /{command_text} — type / to see commands"
                         ))),
@@ -697,6 +724,25 @@ impl App {
             // `(n/m)` scroll row only when the matches overflow them.
             let visible = (completion.items.len() as u16).min(5);
             visible + u16::from(completion.items.len() > 5)
+        } else if let Some(view) = &self.tasks_view {
+            match view {
+                TasksView::List { .. } => {
+                    // The picker's geometry plus its key-hint footer.
+                    let count = self
+                        .tasks
+                        .as_ref()
+                        .map(|manager| manager.list().len())
+                        .unwrap_or(0);
+                    if count == 0 {
+                        2 // "no background tasks" + footer
+                    } else {
+                        let visible = (count as u16).min(5);
+                        visible + u16::from(count > 5) + 1
+                    }
+                }
+                // Header + six content rows + key-hint footer.
+                TasksView::Output { .. } => 8,
+            }
         } else {
             0
         }
@@ -882,7 +928,7 @@ impl App {
                 self.input.clear();
                 self.cursor = 0;
                 if let Some((name, _)) = completion.items.get(completion.selected) {
-                    self.run_command(name);
+                    self.run_command(name, "");
                 }
                 true
             }
@@ -892,18 +938,102 @@ impl App {
 
     /// Execute a slash command by name. One arm per registry entry —
     /// a new registry entry without an arm lands here as an honest
-    /// "unknown command" instead of a silent nothing.
-    fn run_command(&mut self, name: &'static str) {
+    /// "unknown command" instead of a silent nothing. `args` carries
+    /// everything after the name ("/tasks 3" → "3"); commands that
+    /// take none ignore it.
+    pub(crate) fn run_command(&mut self, name: &'static str, args: &str) {
         match name {
             "exit" | "quit" => self.quit = true,
             "model" => self.open_picker(),
             "resume" => self.open_session_picker(),
+            "tasks" => self.open_tasks_view(args),
             "tools" => self
                 .messages
                 .push(Message::System(Self::tools_listing(&self.tools))),
             other => self
                 .messages
                 .push(Message::System(format!("unknown command: /{other}"))),
+        }
+    }
+
+    /// Open the `/tasks` pane (AD-0021). Bare `/tasks` lists; an id
+    /// (`/tasks 3`, or `/tasks #3` in the listing's own spelling)
+    /// opens that task's output directly. Honesty rules: no manager
+    /// (--mock sessions) and unknown ids say so in the transcript
+    /// instead of opening an empty pane.
+    fn open_tasks_view(&mut self, args: &str) {
+        let Some(manager) = self.tasks.as_ref() else {
+            self.messages.push(Message::System(
+                "background tasks are unavailable in this session".into(),
+            ));
+            return;
+        };
+        let args = args.trim();
+        if args.is_empty() {
+            self.tasks_view = Some(TasksView::List { selected: 0 });
+            return;
+        }
+        let number = args.strip_prefix('#').unwrap_or(args);
+        match number.parse::<u64>() {
+            Ok(id) if manager.status(id).is_some() => {
+                self.tasks_view = Some(TasksView::Output { id });
+            }
+            Ok(id) => self
+                .messages
+                .push(Message::System(format!("no background task #{id}"))),
+            Err(_) => self
+                .messages
+                .push(Message::System("usage: /tasks [id]".into())),
+        }
+    }
+
+    /// Keys for the open `/tasks` pane: Esc backs out (output → list,
+    /// list → closed), arrows walk the list with the pickers' wrap,
+    /// Enter opens the selected task's output. Everything else is
+    /// swallowed — the pane owns the keyboard while open.
+    fn handle_tasks_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.tasks_view = match self.tasks_view {
+                    Some(TasksView::Output { .. }) => Some(TasksView::List { selected: 0 }),
+                    _ => None,
+                };
+            }
+            KeyCode::Up | KeyCode::Down
+                if matches!(self.tasks_view, Some(TasksView::List { .. })) =>
+            {
+                let Some(TasksView::List { selected }) = self.tasks_view else {
+                    return;
+                };
+                let count = self
+                    .tasks
+                    .as_ref()
+                    .map(|manager| manager.list().len())
+                    .unwrap_or(0);
+                if count == 0 {
+                    return;
+                }
+                let next = if key.code == KeyCode::Up {
+                    selected.checked_sub(1).unwrap_or(count - 1)
+                } else {
+                    (selected + 1) % count
+                };
+                self.tasks_view = Some(TasksView::List { selected: next });
+            }
+            KeyCode::Enter if matches!(self.tasks_view, Some(TasksView::List { .. })) => {
+                let id = match self.tasks_view {
+                    Some(TasksView::List { selected }) => self
+                        .tasks
+                        .as_ref()
+                        .map(|manager| manager.list().get(selected).map(|summary| summary.id))
+                        .unwrap_or(None),
+                    _ => None,
+                };
+                if let Some(id) = id {
+                    self.tasks_view = Some(TasksView::Output { id });
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1281,6 +1411,143 @@ mod tests {
 
     fn ctrl(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    /// An app with a live task manager, for the `/tasks` pane tests.
+    #[cfg(test)]
+    fn app_with_tasks(tag: &str) -> (App, hi_core::tasks::TaskManager) {
+        let mut app = test_app();
+        let tasks = hi_core::tasks::TaskManager::new(
+            std::env::temp_dir().join(format!("hi-tui-tasks-{tag}")),
+        );
+        app.tasks = Some(tasks.clone());
+        (app, tasks)
+    }
+
+    #[test]
+    fn tasks_command_opens_the_list_and_esc_closes_it() {
+        let (mut app, tasks) = app_with_tasks("list");
+        let _id = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "echo hi",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        app.run_command("tasks", "");
+        assert!(matches!(
+            app.tasks_view,
+            Some(crate::app::TasksView::List { selected: 0 })
+        ));
+        // The pane is a real menu: it takes rows from the stream.
+        assert!(app.menu_height() >= 2);
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.tasks_view.is_none());
+        assert_eq!(app.menu_height(), 0);
+    }
+
+    #[test]
+    fn tasks_command_with_an_id_opens_the_output_and_rejects_junk() {
+        let (mut app, tasks) = app_with_tasks("byid");
+        let _id = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "echo hi",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        app.run_command("tasks", "1");
+        assert!(matches!(
+            app.tasks_view,
+            Some(crate::app::TasksView::Output { id: 1 })
+        ));
+        assert_eq!(app.menu_height(), 8); // header + 6 rows + footer
+        // The listing's own spelling works too.
+        app.tasks_view = None;
+        app.run_command("tasks", "#1");
+        assert!(matches!(
+            app.tasks_view,
+            Some(crate::app::TasksView::Output { id: 1 })
+        ));
+        // Unknown ids and non-numeric args earn transcript notices,
+        // never a pane.
+        app.tasks_view = None;
+        app.run_command("tasks", "9");
+        assert!(app.tasks_view.is_none());
+        assert!(app.messages.iter().any(|m| matches!(&m,
+            Message::System(text) if text.contains("no background task #9"))));
+        app.run_command("tasks", "soon");
+        assert!(app.messages.iter().any(|m| matches!(&m,
+            Message::System(text) if text.contains("usage: /tasks"))));
+    }
+
+    #[test]
+    fn tasks_list_keys_walk_enter_opens_output_and_esc_backs_out() {
+        let (mut app, tasks) = app_with_tasks("walk");
+        // Oldest first: #1 lingers, #2 finishes — the list order is
+        // deterministic.
+        let _ = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "sleep 30",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        let _ = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "echo two",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        app.run_command("tasks", "");
+        app.handle_key(key(KeyCode::Down));
+        let Some(crate::app::TasksView::List { selected }) = app.tasks_view else {
+            panic!("list closed by a walk key");
+        };
+        assert_eq!(selected, 1);
+        app.handle_key(key(KeyCode::Up));
+        let Some(crate::app::TasksView::List { selected }) = app.tasks_view else {
+            panic!("list closed by a walk key");
+        };
+        assert_eq!(selected, 0);
+        // Enter opens the selected row's output; Esc returns to the
+        // list, not to nothing.
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            app.tasks_view,
+            Some(crate::app::TasksView::Output { id: 2 })
+        ));
+        app.handle_key(key(KeyCode::Esc));
+        assert!(matches!(
+            app.tasks_view,
+            Some(crate::app::TasksView::List { selected: 0 })
+        ));
+    }
+
+    #[test]
+    fn tasks_without_a_manager_pushes_the_honest_notice() {
+        let mut app = test_app(); // --mock shape: no manager
+        app.run_command("tasks", "");
+        assert!(app.tasks_view.is_none());
+        assert!(app.messages.iter().any(|m| matches!(&m,
+            Message::System(text) if text.contains("unavailable in this session"))));
+    }
+
+    #[test]
+    fn submit_parses_command_arguments() {
+        let (mut app, tasks) = app_with_tasks("args");
+        let _ = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "echo hi",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        // The arg seam through the real submit path: "/tasks 1".
+        app.input = "/tasks 1".into();
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(
+            app.tasks_view,
+            Some(crate::app::TasksView::Output { id: 1 })
+        ));
+        assert!(app.input.is_empty());
     }
 
     #[test]
@@ -1733,7 +2000,7 @@ mod tests {
     fn resume_opens_the_picker_and_esc_closes_it() {
         let mut app = app();
         app.session_root = Some(picker_root("open", "11111111-aaaa", Some("work"), "hello"));
-        app.run_command("resume");
+        app.run_command("resume", "");
         let picker = app.session_picker.as_ref().expect("picker open");
         assert_eq!(picker.summaries.len(), 1);
         assert_eq!(picker.summaries[0].header.name.as_deref(), Some("work"));
@@ -1769,7 +2036,7 @@ mod tests {
         .unwrap();
 
         app.session_root = Some(root);
-        app.run_command("resume");
+        app.run_command("resume", "");
         app.handle_key(key(KeyCode::Char('k'))); // "keeper" only — the other session's id, name, and preview have no k
         assert_eq!(app.session_picker_visible().len(), 1);
 
@@ -1799,7 +2066,7 @@ mod tests {
             started_at: std::time::Instant::now(),
             rx,
         });
-        app.run_command("resume");
+        app.run_command("resume", "");
         assert!(app.session_picker.is_none());
         assert!(
             matches!(app.messages.last(), Some(Message::System(note)) if note.contains("esc first"))
@@ -2101,7 +2368,7 @@ mod tests {
     #[test]
     fn tools_command_pushes_a_local_notice() {
         let mut app = app();
-        app.run_command("tools");
+        app.run_command("tools", "");
         let last = app.messages.last().unwrap();
         match last {
             Message::System(text) => assert_eq!(text, "no tools registered"),

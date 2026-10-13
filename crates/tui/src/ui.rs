@@ -53,13 +53,95 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_stream(frame, stream_area, app);
     draw_input(frame, input_area, app);
     if menu_h > 0 {
-        if app.picker.is_some() {
+        if app.tasks_view.is_some() {
+            draw_tasks(frame, menu_area, app);
+        } else if app.picker.is_some() {
             draw_picker(frame, menu_area, app);
         } else {
             draw_completion(frame, menu_area, app);
         }
     } else {
         draw_status(frame, status_area, app);
+    }
+}
+
+/// The `/tasks` pane (AD-0021): the list as a SelectList with state
+/// descriptions, or one task's output watched live. Both read the
+/// manager fresh every frame — the frame clock is the poll; nothing
+/// caches, nothing blocks.
+fn draw_tasks(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(view) = app.tasks_view.as_ref() else {
+        return;
+    };
+    let Some(manager) = app.tasks.as_ref() else {
+        return;
+    };
+    match view {
+        crate::app::TasksView::List { selected } => {
+            let summaries = manager.list();
+            let items: Vec<(String, String)> = summaries
+                .iter()
+                .map(|summary| {
+                    (
+                        format!("#{} {}", summary.id, summary.name),
+                        format!(
+                            "{} · {}",
+                            summary.state.label(),
+                            hi_core::tasks::format_duration(summary.wall)
+                        ),
+                    )
+                })
+                .collect();
+            let mut rows = if items.is_empty() {
+                vec![Line::from(Span::styled(
+                    "no background tasks",
+                    THEME.fg(Fg::Muted),
+                ))]
+            } else {
+                let refs: Vec<(&str, &str)> = items
+                    .iter()
+                    .map(|(name, description)| (name.as_str(), description.as_str()))
+                    .collect();
+                select_list_rows(refs, *selected, area.width as usize)
+            };
+            rows.push(Line::from(Span::styled(
+                "enter output · esc close",
+                THEME.fg(Fg::Dim),
+            )));
+            frame.render_widget(Paragraph::new(Text::from(rows)), area);
+        }
+        crate::app::TasksView::Output { id } => {
+            let summary = manager.status(*id);
+            let finished = summary.as_ref().is_some_and(|s| s.state.finished());
+            let header = match &summary {
+                Some(summary) => format!(
+                    "#{} '{}' — {} · {}",
+                    summary.id,
+                    summary.name,
+                    summary.state.label(),
+                    hi_core::tasks::format_duration(summary.wall)
+                ),
+                None => format!("#{id}"),
+            };
+            let content_rows = area.height.saturating_sub(2) as usize; // header + footer
+            // The tail's newest rows win: the pane bottom-anchors like
+            // the stream, and a longer tail trims from the top.
+            let tail = manager.output_tail(*id, 8192).unwrap_or_default();
+            let tail_lines: Vec<&str> = tail.lines().collect();
+            let start = tail_lines.len().saturating_sub(content_rows);
+            let mut rows = Vec::with_capacity(content_rows + 2);
+            rows.push(Line::from(Span::styled(
+                header,
+                THEME.fg(if finished { Fg::Muted } else { Fg::Accent }),
+            )));
+            rows.extend(
+                tail_lines[start..]
+                    .iter()
+                    .map(|line| Line::from(line.to_string())),
+            );
+            rows.push(Line::from(Span::styled("esc back", THEME.fg(Fg::Dim))));
+            frame.render_widget(Paragraph::new(Text::from(rows)), area);
+        }
     }
 }
 
@@ -860,6 +942,99 @@ mod tests {
         assert!(row_text(14).trim().is_empty()); // block pad, stream's last row
         // The breathing row itself stays empty.
         assert!(row_text(15).trim().is_empty(), "{:?}", row_text(15));
+    }
+
+    #[test]
+    fn tasks_pane_lists_states_and_watches_the_output() {
+        use crate::app::{TasksView, test_app};
+        let mut app = test_app();
+        let tasks =
+            hi_core::tasks::TaskManager::new(std::env::temp_dir().join("hi-tui-tasks-pane"));
+        app.tasks = Some(tasks.clone());
+        let id = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "echo pane-echo-marker",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        // Watch means draw reads live: wait on the fact, then render.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !tasks.status(id).is_some_and(|s| s.state.finished()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "echo task never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        app.run_command("tasks", "");
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text = frame_text(terminal.backend_mut().buffer(), 60, 20);
+        assert!(text.contains("#1 echo"), "{text}");
+        assert!(text.contains("finished (exit 0)"), "{text}");
+        assert!(text.contains("enter output · esc close"), "{text}");
+        // The output view: header carries the state phrase, the tail
+        // shows the task's actual bytes, the footer offers Esc.
+        app.tasks_view = Some(TasksView::Output { id });
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text = frame_text(terminal.backend_mut().buffer(), 60, 20);
+        assert!(
+            text.contains("#1 'echo pane-echo-marker' — finished (exit 0)"),
+            "{text}"
+        );
+        assert!(text.contains("pane-echo-marker"), "{text}");
+        assert!(text.contains("esc back"), "{text}");
+    }
+
+    #[test]
+    fn tasks_output_pane_bottom_anchors_long_tails() {
+        use crate::app::{TasksView, test_app};
+        let mut app = test_app();
+        let tasks =
+            hi_core::tasks::TaskManager::new(std::env::temp_dir().join("hi-tui-tasks-long"));
+        app.tasks = Some(tasks.clone());
+        let id = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(
+                "seq -f '%05.0f' 1 40",
+                std::env::temp_dir(),
+            ))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let Some(status) = tasks.status(id) else {
+                panic!("task vanished");
+            };
+            if status.state.finished() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "seq task never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        app.tasks_view = Some(TasksView::Output { id });
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let text = frame_text(terminal.backend_mut().buffer(), 60, 20);
+        // Six content rows fit: the newest six lines win (35..40),
+        // the head of the tail is trimmed.
+        assert!(text.contains("00040"), "{text}");
+        assert!(!text.contains("00001"), "{text}");
+    }
+
+    /// All non-blank frame content as one string, row by row.
+    fn frame_text(buf: &Buffer, width: u16, height: u16) -> String {
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]

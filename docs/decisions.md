@@ -840,3 +840,31 @@ not sit flush against the composer's top rule.
   `input_area.y + input_height` (the box's rules, not the margin), and
   the caret's inner-text position is invariant: the +1 footprint and
   the +1 draw offset cancel.
+
+---
+
+## AD-0021 — the tasks pane lives in the menu slot and reads live (2026-10-16)
+
+The model got `task_status`/`task_output` with #5; the human got a
+counter. `/tasks` closes that gap: bare, a SelectList of every task
+(`#id name — state · wall`); `/tasks <id>` (or `#id`, the listing's own
+spelling) opens one task's output directly.
+
+- **The menu slot, not a takeover.** The pane renders where the model
+  picker and the `/` menu live — under the input, status yields, the
+  session continues underneath. Esc backs out (output → list →
+  closed); arrows walk; Enter opens. The pane owns the keyboard while
+  open, like every menu.
+- **Draw reads live.** The frame already redraws ~20 times a second;
+  the pane re-reads `status()` and `output_tail()` on every frame —
+  the frame clock is the poll. No cache to invalidate, no thread, no
+  subscription: watching a running task is just keeping the pane open.
+- **Honest edges.** `--mock` sessions (no manager) and unknown ids get
+  transcript notices, never an empty pane. Output bottom-anchors —
+  newest rows at the bottom, head-trimmed to the six rows that fit —
+  and the header carries the same state phrase and wall phrasing the
+  task tools use (`format_duration` moved to core's `tasks` module so
+  every consumer spells time identically).
+- **The arg seam is general.** Dispatch splits a command line on the
+  first space; `/tasks` is merely its first consumer. Future commands
+  take arguments without touching the submit path again.
