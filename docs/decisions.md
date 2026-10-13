@@ -721,3 +721,31 @@ on are lost to the cooked-mode line discipline (wait for a rendered
 frame first), and needles must be space-free (a space cell is
 byte-identical to the empty background cell, so the frame diff never
 emits it).
+
+---
+
+## Correction to AD-0017 (2026-10-16, the same day): the feature is off again
+
+AD-0017 shipped `scrolling-regions` on the strength of a pty harness that
+matched needles in a byte stream — which cannot see the glass. A real
+terminal-emulator rig (the harness now renders through `avt`, asciinema's
+emulator, and asserts on frames) reproduced the report that motivated the
+revert: **the input box shredded, backgrounds smeared, and the flushed
+rows reached scrollback as blanks** — data loss, not just churn. The
+steal path draws into screen row 0 and scrolls it away per row while
+ratatui's buffer model keeps believing the viewport unchanged, so the
+next diff skips every cell it thinks is untouched and the glass never
+converges; the flushed rows it hands the terminal are not the rows the
+scrollback receives. The feature is back off; the fallback
+(`insert_before_no_scrolling_regions`) repaints through a full
+`clear()` and converges — the behavior that held up in real terminals.
+
+The rig also caught what the byte-stream harness had been sleeping
+around: the fallback's `Terminal::clear` snapshots the cursor position
+before clearing, and crossterm's position query drains the input queue
+on the way — **keys typed during a flush's finalize window are eaten**.
+A human rarely types inside that window; a test harness must wait out
+the settle before typing, and the product owes either an upstream fix
+(ratatui's full-screen steal branch, the cleared-viewport cursor query)
+or hi-side handling. Until then the churn stays: correctness over the
+per-row redraw cost.
