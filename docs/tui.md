@@ -176,7 +176,7 @@ manager fresh each frame — the frame clock is the poll, nothing caches
 at ~8 lines on any screen), bottom-up via the pure `layout()` helper:
 
 ```
-50 rows, resting:  [stream 45] [input 4] [status 1]
+50 rows, resting:  [stream 44] [input 4] [status 2]
 50 rows, menu:     [stream 41] [menu 4]  [input 4] [status 1]
 (status grows upward when rows are earned — AD-0025 — and yields
 entirely to an open menu)
