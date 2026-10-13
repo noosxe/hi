@@ -250,7 +250,7 @@ jump at `-`, `/`, `.`.
 | --- | --- |
 | ← / → , Ctrl+B / F | move one character (clamped) |
 | Home / End, Ctrl+A / E | start / end of input |
-| Alt+← / →, Ctrl+← / → | word jump (separator-skip, then word-skip) |
+| Alt+B / F, Alt+← / →, Ctrl+← / → | word jump (separator-skip, then word-skip) |
 | Cmd+← / → (SUPER) | start / end — kitty-protocol reporting (AD-0013) |
 | Backspace | remove the character before the cursor |
 | Delete, Ctrl+D | remove the character at the cursor |
@@ -258,6 +258,11 @@ jump at `-`, `/`, `.`.
 | Alt+D, Alt+Delete | remove the word after the cursor |
 | Ctrl+U / Ctrl+K | remove to start / end |
 | ↑ / ↓ | prompt history (below) |
+
+Alt+B / F are the readline word motions — what terminals that intercept
+option+arrows actually send on the wire (Ghostty's macOS defaults decode
+them to `ESC b` / `ESC f`); the Alt/Ctrl arrow chords stay bound for
+terminals that report the chord itself.
 
 Prompt history: every non-empty Enter submission — commands included,
 shell parity — lands in `App.history` (cap 100). ↑ from fresh input

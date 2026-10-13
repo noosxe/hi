@@ -26,7 +26,7 @@ later.
 - on kitty-protocol terminals (kitty, Ghostty, WezTerm, Warp) those images render as real graphics in the transcript; everywhere else the text note stays
 - Ctrl-V pastes from the clipboard: an image is staged at a temp file and its path lands in the input as plain text — nothing sends until Enter, and the image enters the conversation only when the model reads it
 - Built-in agent tools: the model can read, search, list, write, edit, and run commands — the `coding` bundle by default, `--tools read-only|none|all` to change
-- 312 tests, including a fake HTTP server and a pty harness that drive the real binary
+- 314 tests, including a fake HTTP server and a pty harness that drive the real binary
 
 Not yet: JSONL event output for scripts, subagents, background tasks, extensions.
 The selection and settings layers are built so each slots in without
@@ -37,7 +37,7 @@ rework.
 ```sh
 nix develop          # Rust toolchain + cargo (or any Rust 1.85+, edition 2024)
 cargo run            # builds the `hi` binary; `hi --mock` needs no config
-cargo test           # 312 tests; no network needed
+cargo test           # 314 tests; no network needed
 ```
 
 
