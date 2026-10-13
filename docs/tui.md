@@ -200,7 +200,10 @@ at ~8 lines on any screen), bottom-up via the pure `layout()` helper:
   fill. Blocks print once, at final state, and are then terminal-owned —
   frozen colors, frozen width on resize, exactly like pi's inline mode.
 - `draw_stream` shows the in-flight `turn.text` as **markdown, undimmed**
-  (pi parity; it re-wraps per frame), or a turn error in the error color.
+  (pi parity; it re-wraps per frame), or a turn error in the error
+  color. The live reply carries the **same block padding and wrap
+  width its flushed self will get** (AD-0024: live == flushed) — the
+  completion is visually a no-op, not a reflow jump.
 - Other pieces: `draw_picker`, `draw_completion`, `draw_status`,
   `welcome_into`.
 

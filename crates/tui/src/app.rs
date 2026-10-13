@@ -243,6 +243,21 @@ pub struct Turn {
     rx: Receiver<Event>,
 }
 
+#[cfg(test)]
+impl Turn {
+    /// A turn mid-stream with fixed text — lets render tests place
+    /// the live region deterministically instead of racing the mock's
+    /// chunk timing.
+    pub(crate) fn with_text(text: &str) -> Turn {
+        Turn {
+            text: text.to_string(),
+            error: None,
+            started_at: Instant::now(),
+            rx: std::sync::mpsc::channel().1,
+        }
+    }
+}
+
 /// The open `/model` chooser: flat `provider/model` items plus the
 /// highlighted row.
 pub struct Picker {
