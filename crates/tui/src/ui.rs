@@ -165,7 +165,10 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .copied()
         .zip(ends)
+        // The newline that closed a line rides at the end of its
+        // last row's byte span — it is the break, not a glyph.
         .map(|(s, e)| &app.input[s..e])
+        .map(|row| row.strip_suffix('\n').unwrap_or(row))
         .collect();
     let (cursor_row, cursor_col) =
         crate::wrap::cursor_pos(&app.input, app.cursor, inner.width as usize);

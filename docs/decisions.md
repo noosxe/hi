@@ -749,3 +749,31 @@ the settle before typing, and the product owes either an upstream fix
 (ratatui's full-screen steal branch, the cleared-viewport cursor query)
 or hi-side handling. Until then the churn stays: correctness over the
 per-row redraw cost.
+
+---
+
+## AD-0018 — the composer goes multi-line; the newline chords are the capability (2026-10-16)
+
+Shift+Enter inserts a newline; Enter submits — pi's daily-driver contract,
+now hi's. The design point: **the wire encoding is the capability, not the
+handshake**. A kitty-capable terminal reports Shift+Enter as `CSI 13;2u`
+(crossterm hands us `Enter` + `SHIFT`); a literal LF arrives where a
+terminal binds shift+enter to text; and Ctrl+J — pi's second binding —
+works in every terminal ever made. No kitty flag management, no
+handshake gating: whichever encoding shows up proves the terminal can
+send it. The chords outrank the `/` menu (a newline is an edit, not a
+menu pick) but not the pickers, and Enter keeps one escape hatch from pi:
+a backslash right before Enter yields the newline instead of a
+submission, for terminals with none of the chords.
+
+Multi-line input forced the composer's rendering honest: `wrap` breaks on
+newlines first (every line earns at least one row, blank lines visible),
+byte spans stay a contiguous partition with the newline riding at the end
+of the row that closed the line, and a caret just after a newline belongs
+to the row that *opens* there — the inverse of the wrap-boundary rule.
+Arrows walk visual rows column-preserving, pi-style, falling through to
+history at the first/last visual row's edges (the single-line contract —
+history from anywhere — is untouched); Home/End/Ctrl+A/E and Ctrl+U/K
+scope to the logical line; word motions treat the newline as a separator.
+The composer's six-text-row height cap stands; a longer draft still
+clamps (recorded limit, not new behavior).

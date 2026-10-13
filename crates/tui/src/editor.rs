@@ -78,6 +78,27 @@ pub fn word_delete_range_back(s: &str, pos: usize) -> std::ops::Range<usize> {
     word_left(s, pos)..pos
 }
 
+/// Byte offset of the current logical line's first byte — the line
+/// the caret is on; a caret just after a newline belongs to the line
+/// that opens there. The whole input while it is single-line.
+pub fn line_start(s: &str, pos: usize) -> usize {
+    let pos = pos.min(s.len());
+    s.as_bytes()[..pos]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |i| i + 1)
+}
+
+/// Byte offset just past the current logical line's last byte —
+/// before its newline, or the end of the input.
+pub fn line_end(s: &str, pos: usize) -> usize {
+    let pos = pos.min(s.len());
+    s.as_bytes()[pos..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(s.len(), |i| pos + i)
+}
+
 /// The range a forward word-delete removes at `pos`.
 pub fn word_delete_range_fwd(s: &str, pos: usize) -> std::ops::Range<usize> {
     pos..word_right(s, pos)
@@ -141,6 +162,29 @@ mod tests {
         assert_eq!(word_delete_range_fwd("/tmp/hi", 0), 0..4);
         assert_eq!(word_delete_range_back("abc", 0), 0..0);
         assert_eq!(word_delete_range_fwd("abc", 3), 3..3);
+    }
+
+    #[test]
+    fn line_bounds_scope_to_the_logical_line() {
+        let s = "one\ntwo\nthree";
+        // Line 1 "one" spans 0..3, line 2 "two" 4..7, line 3 "three" 8..13.
+        assert_eq!(line_start(s, 0), 0);
+        assert_eq!(line_end(s, 0), 3);
+        assert_eq!(line_start(s, 2), 0);
+        assert_eq!(line_start(s, 4), 4); // just after the break
+        assert_eq!(line_end(s, 4), 7);
+        assert_eq!(line_start(s, 8), 8);
+        assert_eq!(line_end(s, 9), 13);
+        // The whole input while it is single-line.
+        assert_eq!(line_start("abc", 2), 0);
+        assert_eq!(line_end("abc", 0), 3);
+        // Out-of-range cursors clamp.
+        assert_eq!(line_start(s, 99), 8);
+        assert_eq!(line_end(s, 99), 13);
+        // Word motions treat the newline as a separator: from the end,
+        // word_left crosses the break into the previous line's word.
+        assert_eq!(word_left("one\ntwo", 7), 4);
+        assert_eq!(word_right("one\ntwo", 0), 3);
     }
 
     #[test]
