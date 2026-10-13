@@ -141,12 +141,14 @@ parse is reported, not overwritten — Esc closes.
 at ~8 lines on any screen), bottom-up via the pure `layout()` helper:
 
 ```
-50 rows, resting:  [stream 46] [input 3] [status 1]
-50 rows, menu:     [stream 42] [menu 4]  [input 3] [status 1]
+50 rows, resting:  [stream 45] [input 4] [status 1]
+50 rows, menu:     [stream 41] [menu 4]  [input 4] [status 1]
 ```
 
 - Status row pinned at the bottom; input grows upward with its wrapped text
-  (`wrapped_row_count` clamped 1–6, +2 rule rows); the menu (completion or
+  (`wrapped_row_count` clamped 1–6, +2 rule rows, +1 breathing row above the
+  box — AD-0020, the input's own margin: owned and cleared each frame, so
+  scrolled content never lingers in it); the menu (completion or
   picker, whichever is open, natural height from `App::menu_height()`) takes
   rows above the input; the streaming area keeps every row that remains —
   a reply fills the window, pi's live viewport is likewise the full

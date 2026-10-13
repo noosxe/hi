@@ -816,3 +816,27 @@ The harness can hold work that outlives a turn: a `TaskManager` in core
   the point; `timeout` is opt-in per task), a cap of 16 running tasks
   with a readable refusal, small monotonic ids (`#1`) the model can
   echo reliably, and a derived two-word name when none is given.
+
+---
+
+## AD-0020 — the composer breathes: one margin row above the input (2026-10-16)
+
+**Status:** implemented. AD-0016 killed the *reserved* blank band
+between conversation and input; this ruling gives back exactly one row,
+deliberately, as part of the input's own footprint: a message should
+not sit flush against the composer's top rule.
+
+- **The margin is the input's padding, not a layout band.**
+  `input_height` = wrapped rows + 2 rules + **1 breathing row** — the
+  one formula draw and the flush pass share, so the stream window, the
+  scrollback flush target, and the box move together. No consumer
+  re-derives the gap.
+- **Owned and cleared, not merely outside the stream area.** Ratatui
+  only repaints what widgets draw; a row no widget claims would keep
+  stale transcript cells as content scrolled through. `draw_input`
+  renders `Clear` over the footprint's first row, then draws the box
+  one row down — the margin can never show ghosts.
+- **Menus and the status row are unaffected.** The menu area anchors to
+  `input_area.y + input_height` (the box's rules, not the margin), and
+  the caret's inner-text position is invariant: the +1 footprint and
+  the +1 draw offset cancel.
