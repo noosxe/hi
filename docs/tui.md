@@ -86,7 +86,7 @@ Behaviors (each pinned by a test in `app.rs`):
 
 ```rust
 pub struct Command { pub name: &'static str, pub description: &'static str }
-pub const COMMANDS: &[Command]  // sorted: exit, model, quit, resume, settings, tasks, tools
+pub const COMMANDS: &[Command]  // sorted: exit, model, name, quit, resume, settings, tasks, tools
 pub fn matching(typed: &str) -> Vec<&'static Command>   // case-insensitive prefix
 pub fn find_exact(name: &str) -> Option<&'static Command>
 ```
@@ -94,6 +94,10 @@ pub fn find_exact(name: &str) -> Option<&'static Command>
 Adding a command = one entry in `COMMANDS` **plus** one arm in
 `App::run_command`. The completion menu inherits both order and descriptions.
 `/exit` and `/quit` (alias) stop the session; `/model` opens the picker;
+`/name <title>` names the session — the record appends, last-wins on
+replay, and the picker row leads with it (see
+[picker.rs](#pickerrs--session-selection)); bare `/name` shows the current
+name;
 `/resume` opens the session picker (see [picker.rs](#pickerrs--session-selection));
 `/settings` opens the policy board (AD-0023) — a curated list of what
 the running session can flip (`task turns`, `images`), each row shown
@@ -372,9 +376,16 @@ error color — pi renders diagnostics as colored text, no labels).
 ## picker.rs — session selection
 
 The session picker exists twice, over one composition. `picker_lines` builds
-the rows — title, the visible `age · name-or-id · first user message` rows
-around the selection, the filter line, the key hint — and both consumers
-render exactly that:
+the rows — title, the visible rows around the selection, the filter line,
+the key hint — and both consumers render exactly that. A row leads with
+the words that recognize the session (#89): its **name**, else its **first
+prompt line**, else the id prefix — and the id (the `--session` key)
+demotes to the dim right edge, surviving any width (the words truncate
+first, at a ten-column floor, pi's). `ctrl-r` on a highlighted row renames
+it: the buffer takes over the prompt line, Enter appends the `name` record
+to that file (empty buffer cancels — renames are only written for real
+names), and the row updates in place. The record is the same append-only
+seam as messages and usage.
 
 - `pick_session(summaries)` — the standalone `--resume` chooser. It owns a
   short inline-viewport terminal before the main TUI boots (pi's
@@ -392,9 +403,8 @@ render exactly that:
   provider events.
 
 Row helpers are pure and unit-tested: `age` (s/m/h/d buckets), `row_text`
-(name wins over the id's first eight chars; first line of the first user
-message as preview), `filter_matches` (case-insensitive over id, name,
-preview).
+(`(main, id)`: name ?? first prompt line ?? id, with the id `None` when it
+already leads), `filter_matches` (case-insensitive over id, name, preview).
 
 ## theme.rs — the palette behind roles
 

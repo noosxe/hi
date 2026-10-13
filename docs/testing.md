@@ -14,7 +14,7 @@ cargo run            # hi --mock needs no config
 
 CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI).
 
-Current count: **380 `#[test]` functions** (the README's count gets refreshed in passing;
+Current count: **392 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 66
 core: openai 21, selection 14, session 12, read 13, settings 15, agent 11, tasks 10, grep 8,
 walk 7, truncate 7, image_util 7, config 6, edit 6, image_resize 6, system_prompt 6,
@@ -95,7 +95,7 @@ assert!(api.first_request().contains("\"stream\":true"));
 | transcript blocks: user fill + padding, plain assistant, system/error styles, tool state fills, args collapse, preview cap + marker, call/result pairing, pending detection | `tui/ui.rs` |
 | palette roles resolve to pi's dark.json values | `tui/theme.rs` |
 | session listing (mtime order, unreadable skipped), id resolution (path/exact/prefix, local then global), fork (copy-only source, header rewrite, name override), header camelCase fields | `core/session.rs` |
-| picker rows (age buckets, name-or-id, preview), filter matching, line composition incl. selection marker and empty-filter note | `tui/picker.rs` |
+| picker rows (age buckets, words-lead with demoted id, rename prompt), filter matching, line composition incl. selection marker and empty-filter note | `tui/picker.rs` |
 | `/resume` opens/filters/switches, Esc closes untouched, refused mid-turn | `tui/app.rs` |
 | selection flags' clap conflict matrix (pi's rules; `--name` pairs with start/fork only) | `cli/main.rs` |
 | wire identity: UA format + presence on chat/discovery, gated attribution (host-exact OpenRouter), cache-key body field, byte-stable prefix across turns; `HI_TELEMETRY`-beats-setting resolution | `core/openai.rs`, `core/settings.rs` |

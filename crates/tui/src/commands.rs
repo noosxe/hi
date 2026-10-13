@@ -20,6 +20,10 @@ pub const COMMANDS: &[Command] = &[
         description: "pick a model for this session (ctrl-s saves the default)",
     },
     Command {
+        name: "name",
+        description: "name this session; bare /name shows the current name",
+    },
+    Command {
         name: "quit",
         description: "alias for /exit",
     },

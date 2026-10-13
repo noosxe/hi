@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 use ratatui::{TerminalOptions, Viewport};
 
@@ -45,26 +45,32 @@ pub fn filter_matches(filter: &str, summary: &SessionSummary, preview: Option<&s
     haystack.to_lowercase().contains(&needle)
 }
 
-/// One picker row: `age · name-or-id-prefix · first user message`.
-/// The name wins when set; otherwise the id's first eight characters
-/// identify the session. Rendering crops overflowing rows.
-pub fn row_text(summary: &SessionSummary, preview: Option<&str>, now: SystemTime) -> String {
-    let label = summary
-        .header
-        .name
-        .clone()
-        .unwrap_or_else(|| summary.header.id.chars().take(8).collect());
-    let mut text = format!("{} · {}", age(summary.modified, now), label);
-    if let Some(first) = preview
-        .unwrap_or("")
-        .lines()
-        .next()
-        .filter(|line| !line.is_empty())
-    {
-        text.push_str(" · ");
-        text.push_str(first);
+/// One picker row's words: `age · lead` plus the id to demote right.
+/// The lead is the words that recognize the session — its name when
+/// it has one, else its first prompt, else the id prefix (pi's row
+/// shape, #89). `None` id means the lead IS the id — nothing to
+/// demote, no duplicate.
+pub fn row_text(
+    summary: &SessionSummary,
+    preview: Option<&str>,
+    now: SystemTime,
+) -> (String, Option<String>) {
+    let lead = summary.header.name.clone().or_else(|| {
+        preview
+            .unwrap_or("")
+            .lines()
+            .next()
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+    });
+    let id = summary.header.id.chars().take(8).collect::<String>();
+    match lead {
+        Some(lead) => (
+            format!("{} · {}", age(summary.modified, now), lead),
+            Some(id),
+        ),
+        None => (format!("{} · {id}", age(summary.modified, now)), None),
     }
-    text
 }
 
 /// First user message text — the preview column. `None` when the file
@@ -83,6 +89,7 @@ pub fn preview_of(path: &Path) -> Option<String> {
 /// The picker's lines: title, the visible rows around `selected`,
 /// filter, and hint. Shared by the standalone chooser and `/resume` —
 /// one composition, so both look and test the same.
+#[allow(clippy::too_many_arguments)] // the params ARE the composition
 pub fn picker_lines(
     summaries: &[SessionSummary],
     previews: &[Option<String>],
@@ -90,6 +97,8 @@ pub fn picker_lines(
     selected: usize,
     height: usize,
     now: SystemTime,
+    width: usize,
+    rename: Option<&str>,
 ) -> Vec<Line<'static>> {
     let visible: Vec<usize> = (0..summaries.len())
         .filter(|index| filter_matches(filter, &summaries[*index], previews[*index].as_deref()))
@@ -104,7 +113,7 @@ pub fn picker_lines(
 
     let mut lines = vec![Line::styled("resume a session", THEME.fg(Fg::Dim))];
     for (offset, index) in visible.iter().skip(start).take(take).enumerate() {
-        let row = row_text(&summaries[*index], previews[*index].as_deref(), now);
+        let (main, id) = row_text(&summaries[*index], previews[*index].as_deref(), now);
         let chosen = start + offset == selected;
         // The selected row colors whole — accent, pi's selectedText;
         // unselected rows ride muted.
@@ -114,7 +123,29 @@ pub fn picker_lines(
             THEME.fg(Fg::Muted)
         };
         let marker = if chosen { "→ " } else { "  " };
-        lines.push(Line::styled(format!("{marker}{row}"), style));
+        // The words lead; the id — the `--session` key — demotes to
+        // the dim right and survives any width (the lead truncates
+        // first, at ten columns minimum, pi's floor).
+        let mut spans = Vec::new();
+        if let Some(id) = id {
+            let marker_cols = marker.chars().count();
+            let budget = width.saturating_sub(marker_cols + id.len() + 1).max(10);
+            let main: String = if main.chars().count() > budget {
+                let cut: String = main.chars().take(budget.saturating_sub(1)).collect();
+                format!("{cut}…")
+            } else {
+                main
+            };
+            let pad = width.saturating_sub(marker_cols + main.chars().count() + id.len());
+            spans.push(Span::styled(format!("{marker}{main}"), style));
+            spans.push(Span::styled(
+                format!("{}{id}", " ".repeat(pad)),
+                THEME.fg(Fg::Dim),
+            ));
+        } else {
+            spans.push(Span::styled(format!("{marker}{main}"), style));
+        }
+        lines.push(Line::from(spans));
     }
     if overflowing {
         lines.push(Line::styled(
@@ -125,11 +156,22 @@ pub fn picker_lines(
     if visible.is_empty() {
         lines.push(Line::styled("no sessions match", THEME.fg(Fg::Dim)));
     }
-    lines.push(Line::styled(format!("› {filter}"), THEME.fg(Fg::UserText)));
-    lines.push(Line::styled(
-        "type to filter · enter switch · esc cancel",
-        THEME.fg(Fg::Dim),
-    ));
+    match rename {
+        Some(buffer) => {
+            lines.push(Line::styled(
+                format!("name: {buffer}"),
+                THEME.fg(Fg::UserText),
+            ));
+            lines.push(Line::styled("enter save · esc cancel", THEME.fg(Fg::Dim)));
+        }
+        None => {
+            lines.push(Line::styled(format!("› {filter}"), THEME.fg(Fg::UserText)));
+            lines.push(Line::styled(
+                "type to filter · ^r rename · enter switch · esc cancel",
+                THEME.fg(Fg::Dim),
+            ));
+        }
+    }
     lines
 }
 
@@ -139,7 +181,7 @@ pub fn picker_lines(
 /// startup-TUI pattern). Esc or Ctrl-C cancels.
 pub fn pick_session(summaries: &[SessionSummary]) -> Option<PathBuf> {
     let previews: Vec<Option<String>> = summaries.iter().map(|s| preview_of(&s.path)).collect();
-    let (_, rows) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
+    let (columns, rows) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
     // Title + list + filter + hint rows, bounded by the real terminal.
     let height = (summaries.len() as u16 + 3)
         .clamp(6, rows.saturating_sub(2))
@@ -171,6 +213,8 @@ pub fn pick_session(summaries: &[SessionSummary]) -> Option<PathBuf> {
             selected,
             height as usize,
             SystemTime::now(),
+            columns as usize,
+            None,
         );
         terminal
             .draw(|frame| {
@@ -246,14 +290,90 @@ mod tests {
     }
 
     #[test]
-    fn rows_prefer_the_name_and_append_the_preview() {
+    fn the_words_lead_the_row() {
+        // pi's row shape (#89): name ?? first prompt ?? id, and the id
+        // demoted to the dim right — never the identity slot.
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(120);
         let named = summary("aaaaaaaa-bbbb", Some("auth refactor"), 0);
-        assert_eq!(row_text(&named, None, now), "2m · auth refactor");
+        let (main, id) = row_text(&named, None, now);
+        assert_eq!(main, "2m · auth refactor");
+        assert_eq!(id.as_deref(), Some("aaaaaaaa"));
         let unnamed = summary("12345678-abcd", None, 0);
+        let (main, id) = row_text(&unnamed, Some("fix the bug\nsecond line"), now);
+        assert_eq!(main, "2m · fix the bug");
+        assert_eq!(id.as_deref(), Some("12345678"));
+        // Nothing to say yet: the id leads, and there is nothing to
+        // demote — no duplicate id on the right.
+        let (main, id) = row_text(&unnamed, None, now);
+        assert_eq!(main, "2m · 12345678");
+        assert_eq!(id, None);
+    }
+
+    #[test]
+    fn the_row_leads_with_words_and_demotes_the_id_right() {
+        // The composed line: words left, id right-aligned, one span
+        // dimmer than the row.
+        let summaries = vec![summary("abcdef12-3456", None, 0)];
+        let previews = vec![Some("fix the flaky test".into())];
+        let lines = picker_lines(
+            &summaries,
+            &previews,
+            "",
+            0,
+            6,
+            SystemTime::UNIX_EPOCH,
+            40,
+            None,
+        );
+        let row = &lines[1];
+        assert_eq!(row.spans[0].content, "→ 0s · fix the flaky test");
+        assert_eq!(row.spans[1].content, "       abcdef12");
+        assert_eq!(row.spans[1].style, THEME.fg(Fg::Dim));
+    }
+
+    #[test]
+    fn a_long_lead_truncates_before_the_id() {
+        // The words bow to the width budget before the id does — the
+        // id is the `--session` key and must survive any width.
+        let summaries = vec![summary("abcdef12-3456", None, 0)];
+        let previews = vec![Some(String::from("w").repeat(80))];
+        let lines = picker_lines(
+            &summaries,
+            &previews,
+            "",
+            0,
+            6,
+            SystemTime::UNIX_EPOCH,
+            40,
+            None,
+        );
+        let row = &lines[1];
+        let main = row.spans[0].content.clone();
+        assert!(main.ends_with('…'), "{main}");
+        assert!(main.chars().count() < 40 - "abcdef12".len(), "{main}");
+        assert!(row.spans[1].content.ends_with("abcdef12"));
+    }
+
+    #[test]
+    fn rename_takes_over_the_prompt_line() {
+        // While a rename is in flight the picker says so: the buffer
+        // rides the prompt line, the hint narrows to the two keys.
+        let summaries = vec![summary("abcdef12-3456", None, 0)];
+        let previews = vec![Some("hello".into())];
+        let lines = picker_lines(
+            &summaries,
+            &previews,
+            "",
+            0,
+            6,
+            SystemTime::UNIX_EPOCH,
+            40,
+            Some("par"),
+        );
+        assert_eq!(lines[lines.len() - 2].spans[0].content, "name: par");
         assert_eq!(
-            row_text(&unnamed, Some("fix the bug\nsecond line"), now),
-            "2m · 12345678 · fix the bug"
+            lines[lines.len() - 1].spans[0].content,
+            "enter save · esc cancel"
         );
     }
 
@@ -274,29 +394,62 @@ mod tests {
             summary("22222222-bbbb", None, 0),
         ];
         let previews = vec![Some("keep me".into()), None];
-        let lines = picker_lines(&summaries, &previews, "", 0, 8, SystemTime::UNIX_EPOCH);
+        let lines = picker_lines(
+            &summaries,
+            &previews,
+            "",
+            0,
+            8,
+            SystemTime::UNIX_EPOCH,
+            60,
+            None,
+        );
         assert_eq!(lines.len(), 5); // title + 2 rows + filter + hint
         assert_eq!(lines[0].spans[0].content, "resume a session");
-        assert_eq!(lines[1].spans[0].content, "→ 0s · keeper · keep me");
+        // The name replaces the preview — pi's `??`, one lead or the
+        // other, never both.
+        assert_eq!(lines[1].spans[0].content, "→ 0s · keeper");
+        assert_eq!(
+            lines[1].spans[1].content,
+            format!("{}11111111", " ".repeat(39))
+        );
         assert_eq!(lines[2].spans[0].content, "  0s · 22222222");
-        assert_eq!(lines[1].style, THEME.fg(Fg::Accent));
-        assert_eq!(lines[2].style, THEME.fg(Fg::Muted));
+        assert_eq!(lines[1].spans[0].style, THEME.fg(Fg::Accent));
+        assert_eq!(lines[2].spans[0].style, THEME.fg(Fg::Muted));
         assert_eq!(lines[3].spans[0].content, "› ");
         // Selected position beyond the list clamps; the marker follows.
-        let lines = picker_lines(&summaries, &previews, "", 9, 8, SystemTime::UNIX_EPOCH);
+        let lines = picker_lines(
+            &summaries,
+            &previews,
+            "",
+            9,
+            8,
+            SystemTime::UNIX_EPOCH,
+            60,
+            None,
+        );
         assert_eq!(lines[2].spans[0].content, "→ 0s · 22222222");
         // Overflowing matches spend a row on the muted count.
         let many: Vec<SessionSummary> = (0..9)
             .map(|i| summary(&format!("0000000{i}-aaaa"), Some(&format!("s{i}")), 0))
             .collect();
         let previews: Vec<Option<String>> = (0..9).map(|_| None).collect();
-        let lines = picker_lines(&many, &previews, "", 0, 8, SystemTime::UNIX_EPOCH);
+        let lines = picker_lines(&many, &previews, "", 0, 8, SystemTime::UNIX_EPOCH, 60, None);
         assert!(
             lines.iter().any(|l| l.spans[0].content == "  (1/9)"),
             "count row on overflow"
         );
         // A filter matching nothing says so instead of hiding rows silently.
-        let lines = picker_lines(&summaries, &previews, "zzz", 0, 8, SystemTime::UNIX_EPOCH);
+        let lines = picker_lines(
+            &summaries,
+            &previews,
+            "zzz",
+            0,
+            8,
+            SystemTime::UNIX_EPOCH,
+            60,
+            None,
+        );
         assert_eq!(lines[1].spans[0].content, "no sessions match");
     }
 }

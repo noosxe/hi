@@ -255,6 +255,9 @@ pub struct SessionPicker {
     pub previews: Vec<Option<String>>,
     pub filter: String,
     pub selected: usize,
+    /// While `Some`, the picker is renaming the highlighted session:
+    /// the buffer rides the prompt line and owns the keyboard.
+    pub renaming: Option<String>,
 }
 
 /// Braille frames for the activity spinner, cycled once per frame.
@@ -1230,9 +1233,47 @@ impl App {
             "tools" => self
                 .messages
                 .push(Message::System(Self::tools_listing(&self.tools))),
+            "name" => self.command_name(args),
             other => self
                 .messages
                 .push(Message::System(format!("unknown command: /{other}"))),
+        }
+    }
+
+    /// `/name <title>`: append the session's name record (#89) —
+    /// names are appended, never rewritten, so the file keeps every
+    /// choice. Bare `/name` shows the current one (pi parity). Same
+    /// degrade-once contract as every session write.
+    fn command_name(&mut self, args: &str) {
+        let Some(session) = self.session.as_mut() else {
+            self.messages
+                .push(Message::System("not persisting — nothing to name".into()));
+            return;
+        };
+        if args.is_empty() {
+            let note = match session.name() {
+                Some(name) => format!("session name: {name}"),
+                None => "session has no name".into(),
+            };
+            self.messages.push(Message::System(note));
+            return;
+        }
+        match session.rename(args) {
+            Ok(()) => {
+                let named = session.name().unwrap_or_default().to_string();
+                if named.is_empty() {
+                    self.messages
+                        .push(Message::System("session name cleared".into()));
+                } else {
+                    self.messages
+                        .push(Message::System(format!("session named: {named}")));
+                }
+            }
+            Err(err) => {
+                self.session = None;
+                self.messages
+                    .push(Message::System(format!("session not saved: {err}")));
+            }
         }
     }
 
@@ -1389,6 +1430,7 @@ impl App {
             previews,
             filter: String::new(),
             selected: 0,
+            renaming: None,
         });
     }
 
@@ -1410,8 +1452,24 @@ impl App {
 
     /// Keyboard owner while the session picker is open.
     fn handle_session_picker_key(&mut self, key: KeyEvent) {
+        // A rename in flight owns the keyboard: chars build the name,
+        // Enter saves, Esc cancels. Everything else waits.
+        if self
+            .session_picker
+            .as_ref()
+            .is_some_and(|picker| picker.renaming.is_some())
+        {
+            return self.handle_picker_rename_key(key);
+        }
         match key.code {
             KeyCode::Esc => self.session_picker = None,
+            // Ctrl-R: rename the highlighted session (#89). The record
+            // appends to that file; the row updates in place.
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(picker) = self.session_picker.as_mut() {
+                    picker.renaming = Some(String::new());
+                }
+            }
             KeyCode::Up => {
                 // pi's SelectList wraps at both ends.
                 let len = self.session_picker_visible().len();
@@ -1450,6 +1508,66 @@ impl App {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Keyboard owner while a picker rename is in flight. Enter with
+    /// an empty buffer cancels — renames are only written for real
+    /// names; clearing is naming it something else.
+    fn handle_picker_rename_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(picker) = self.session_picker.as_mut() {
+                    picker.renaming = None;
+                }
+            }
+            KeyCode::Enter => self.commit_picker_rename(),
+            KeyCode::Backspace => {
+                if let Some(picker) = self.session_picker.as_mut() {
+                    let _ = picker.renaming.as_mut().unwrap().pop();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(picker) = self.session_picker.as_mut() {
+                    picker.renaming.as_mut().unwrap().push(c);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Save the rename: the record appends to the highlighted row's
+    /// file and the summary updates in place. A failed write closes
+    /// the picker with the usual loud note — degrade once.
+    fn commit_picker_rename(&mut self) {
+        let buffer = match self.session_picker.as_mut() {
+            Some(picker) => picker.renaming.take().unwrap_or_default(),
+            None => return,
+        };
+        if buffer.trim().is_empty() {
+            return;
+        }
+        let selected = self.session_picker.as_ref().expect("open").selected;
+        let visible = self.session_picker_visible();
+        let Some(index) = visible.get(selected).copied() else {
+            return;
+        };
+        let path = self.session_picker.as_ref().expect("open").summaries[index]
+            .path
+            .clone();
+        match Session::resume(&path).and_then(|mut session| {
+            let outcome = session.rename(&buffer);
+            outcome.map(|_| session)
+        }) {
+            Ok(session) => {
+                if let Some(picker) = self.session_picker.as_mut() {
+                    picker.summaries[index].header.name = session.name().map(str::to_string);
+                }
+            }
+            Err(err) => {
+                self.session_picker = None;
+                self.messages.push(Message::Error(err));
+            }
         }
     }
 
@@ -2857,6 +2975,133 @@ mod tests {
         )
         .unwrap();
         root
+    }
+
+    #[test]
+    fn name_names_the_session_and_the_file_records_it() {
+        let root = std::env::temp_dir().join(format!("hi-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let session = hi_core::Session::start_in(
+            &root,
+            std::path::Path::new("/p"),
+            "mock",
+            "mock",
+            None,
+            None,
+        )
+        .unwrap();
+        let path = session.path().to_path_buf();
+        drop(session);
+
+        let mut app = test_app();
+        app.switch_session(&path);
+        app.run_command("name", "the scroll fix");
+        let loaded = hi_core::session::load(&path).unwrap();
+        assert_eq!(loaded.header.name.as_deref(), Some("the scroll fix"));
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| matches!(m, Message::System(text) if text.contains("the scroll fix")))
+        );
+
+        // Renaming again wins; the words ride the transcript note.
+        app.run_command("name", "the real fix");
+        let loaded = hi_core::session::load(&path).unwrap();
+        assert_eq!(loaded.header.name.as_deref(), Some("the real fix"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bare_name_shows_the_current_name() {
+        let root = std::env::temp_dir().join(format!("hi-bare-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let session = hi_core::Session::start_in(
+            &root,
+            std::path::Path::new("/p"),
+            "mock",
+            "mock",
+            None,
+            None,
+        )
+        .unwrap();
+        let path = session.path().to_path_buf();
+
+        let mut app = test_app();
+        app.switch_session(&path);
+        app.run_command("name", "");
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| matches!(m, Message::System(text) if text.contains("no name")))
+        );
+        app.run_command("name", "titled");
+        app.messages.clear();
+        app.run_command("name", "");
+        assert!(
+            app.messages.iter().any(
+                |m| matches!(m, Message::System(text) if text.contains("session name: titled"))
+            )
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn name_without_a_session_says_so() {
+        let mut app = test_app();
+        app.run_command("name", "wishes");
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| matches!(m, Message::System(text) if text.contains("not persisting")))
+        );
+    }
+
+    #[test]
+    fn ctrl_r_renames_the_highlighted_session() {
+        let mut app = app();
+        app.session_root = Some(picker_root("rename", "33333333-aaaa", None, "hello"));
+        app.run_command("resume", "");
+        app.handle_key(ctrl(KeyCode::Char('r')));
+        let picker = app.session_picker.as_ref().expect("renaming open");
+        assert!(picker.renaming.is_some());
+
+        for c in "named!".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(key(KeyCode::Enter));
+        // The record rides the file; the row updates in place; the
+        // picker stays open for the next decision.
+        let path = app
+            .session_picker
+            .as_ref()
+            .expect("picker still open")
+            .summaries[0]
+            .path
+            .clone();
+        let loaded = hi_core::session::load(&path).unwrap();
+        assert_eq!(loaded.header.name.as_deref(), Some("named!"));
+        assert_eq!(
+            app.session_picker.as_ref().unwrap().summaries[0]
+                .header
+                .name
+                .as_deref(),
+            Some("named!")
+        );
+        assert!(app.session_picker.as_ref().unwrap().renaming.is_none());
+    }
+
+    #[test]
+    fn esc_cancels_the_picker_rename() {
+        let mut app = app();
+        app.session_root = Some(picker_root("renameesc", "44444444-aaaa", None, "hello"));
+        app.run_command("resume", "");
+        app.handle_key(ctrl(KeyCode::Char('r')));
+        app.handle_key(key(KeyCode::Char('x')));
+        app.handle_key(key(KeyCode::Esc));
+        let picker = app.session_picker.as_ref().expect("picker stays open");
+        assert!(picker.renaming.is_none());
+        let loaded = hi_core::session::load(&picker.summaries[0].path).unwrap();
+        assert_eq!(loaded.header.name, None);
     }
 
     #[test]

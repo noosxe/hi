@@ -154,7 +154,11 @@ torn final line and rejects malformation anywhere else.
   `Session::append_usage(&Usage)` — the round's bill, same contract.
   Replay merges the records (`LoadedSession.usage`) and takes the last
   record's prompt size as `usage_last_prompt` — the context-share fact.
-  A fork inherits the transcript, never the economics.
+  `Session::rename(&str)` — the `name` record (#89): names are
+  **appended, never rewritten**; replay takes the last, an empty record
+  clears, and the effective name lands on `LoadedSession.header.name`
+  (and in the summaries the picker lists). A fork inherits the
+  transcript, never the economics.
 - `session::latest(cwd)` — newest readable session for a project
   (`--continue`); `session::load(path)` — full parse.
 - `SessionHeader` is the flat first line (`camelCase`, `version` field for

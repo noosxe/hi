@@ -1075,3 +1075,26 @@ Drafts and browse position stay session-local; the ring seeds,
 nothing else. A fork inherits the transcript — and the ring is
 transcript-shaped — so its ↑ walks the forked words; the economics
 alone stay fork-reset (#85).
+
+---
+
+## AD-0029 — the words lead, and names are appended (2026-10-16)
+
+#89 started as a layout complaint and turned into the session's
+identity ruling. **The picker row leads with the words that recognize
+the session** — name, else first prompt line, else the id prefix —
+and the id demotes to the dim right edge, where it survives any width
+(the words truncate first, ten-column floor): it is the `--session`
+key, and a key you cannot see is a key you cannot type. Verified
+against pi before writing: pi generates nothing — its row is
+`session.name ?? session.firstMessage`, and its naming is manual and
+**append-only** (`session_info` records, last-wins, empty clears).
+hi repeats that shape on its own seam: `{"type":"name"}` records ride
+the same forward-compat file as messages and usage; `Session::rename`
+sanitizes to one line (pi's normalization), appends, never rewrites;
+`/name` names the live session, `ctrl-r` in the picker names the
+highlighted file, and both refuse to write an empty name — clearing is
+naming it something else. The summary pass scans past the header once
+per listing (pi rescans every frame; hi doesn't need to). No model
+involvement anywhere — titles are human words, and unnamed sessions
+speak through their own first prompt.
