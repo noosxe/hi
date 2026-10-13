@@ -936,3 +936,24 @@ keystrokes, which is what lets conservative defaults stay honest.
 - **Defaults stay conservative.** The board changes the cost of
   consent, never the default. #4's subagents will register their own
   policy here when they land.
+
+---
+
+## AD-0024 — live == flushed: the streaming reply renders as its block (2026-10-16)
+
+The live region rendered the in-flight `turn.text` raw — full width,
+no paddingY, no paddingX — while the flushed assistant block carries
+pi's block padding. Two defects in one: during streaming the text
+hugged the terminal edge with no separation above it, and at TurnEnd
+the padded, re-wrapped block replaced it — a visible reflow jump.
+
+The rule: **the live region renders byte-identically to what the
+flush will print.** Same `pad_plain`, same `width − 2` wrap, same
+blank rows, for the streaming reply and its error twin. The pending
+tool block already complied (`block_rows`); the flush becomes a
+visual no-op, which is the test's assertion shape — padding present
+mid-stream, not merely correct history after.
+
+Found in review (#80 follow-up); fixed in ui.rs only — no app, core,
+or flush-mechanics change. The pty suite ran 5× per the
+flush-adjacent-change rule.

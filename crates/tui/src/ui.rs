@@ -456,11 +456,16 @@ fn draw_stream(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(exec) = pending_tool(&app.messages) {
         rows.extend(block_rows(&TranscriptBlock::Tool(exec), area.width));
     } else if let Some(turn) = app.turn.as_ref() {
+        // The live reply renders with the exact padding and wrap width
+        // its flushed self will get (AD-0024): the same pad_plain and
+        // the same `width - 2` the assistant block uses — completing a
+        // turn is visually a no-op, not a reflow jump.
+        let inner = area.width.saturating_sub(2).max(1);
         if !turn.text.is_empty() {
-            rows.extend(markdown_rows(&turn.text, area.width, Style::new()));
+            rows.extend(pad_plain(markdown_rows(&turn.text, inner, Style::new())));
         }
         if let Some(err) = &turn.error {
-            rows.extend(markdown_rows(err, area.width, THEME.fg(Fg::Error)));
+            rows.extend(pad_plain(markdown_rows(err, inner, THEME.fg(Fg::Error))));
         }
     }
     // The newest rows win, and they hug the input: a short
@@ -935,6 +940,47 @@ mod tests {
         assert!(row_text(14).trim().is_empty()); // the block's lower pad
         assert!(row_text(15).trim().is_empty()); // the margin row
         assert!(row_text(16).contains("─")); // input top rule
+    }
+
+    #[test]
+    fn live_streaming_block_carries_the_block_padding() {
+        use crate::app::{Turn, test_app};
+        let mut app = test_app();
+        // A flushed block above: the live reply must keep the same
+        // one-blank-row separation every block gets — and then the
+        // flush is visually a no-op instead of a reflow jump.
+        app.messages
+            .push(hi_core::Message::User("earlier question".into()));
+        app.scroll.sync(&app.messages, 40, None);
+        app.turn = Some(Turn::with_text("streamed padding probe"));
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend_mut().buffer().clone();
+        let row_text = |y: u16| {
+            (0..40)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        let content = (0..20u16)
+            .find(|&y| row_text(y).contains("streamed padding probe"))
+            .expect("streaming text visible");
+        // paddingX: the live content sits one column in, like every
+        // flushed block.
+        assert!(
+            row_text(content).starts_with(' '),
+            "live text hugs the left edge: {:?}",
+            row_text(content)
+        );
+        // paddingY: the live block opens with its own blank row — two
+        // blank rows now separate the user text from the live text
+        // (the user block's bottom pad plus this one).
+        assert!(
+            row_text(content - 2).trim().is_empty(),
+            "no top pad above the live block: {:?}",
+            row_text(content - 2)
+        );
     }
 
     #[test]
