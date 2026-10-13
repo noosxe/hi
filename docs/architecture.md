@@ -63,6 +63,11 @@ never — that is the point of the core rule.
   resolve, `bounded_agent()` in `crates/core/src/openai.rs`). Turn streams
   themselves are unbounded on purpose — turns think for minutes — and rely on
   the dropped receiver.
+- Background tasks (#5, AD-0019) extend the same spine: one worker thread
+  per task polling its child at 50ms, a completion channel the UI drains
+  with `try_recv` per frame (the same rhythm as the event pump), and
+  process groups so kills reach grandchildren. Threads, not tokio —
+  decided here because the Luau bridge (#6) inherits it.
 
 ## Design principles (visible in the code, enforced by tests)
 
@@ -144,7 +149,10 @@ Works today (see also README "What works today"):
   selected by bundle (`--tools`, default `coding`), results clamped by one
   truncation contract, prompt notes woven into the system prompt (see
   [decisions.md](decisions.md), AD-0004)
-- 325 `#[test]` functions, no network needed (see [testing.md](testing.md))
+- Background task manager (#5): `task_run`/`task_status`/`task_output`/
+  `task_cancel` — long-lived work outlives the turn, groups die at exit
+  (see [decisions.md](decisions.md), AD-0019)
+- 338 `#[test]` functions, no network needed (see [testing.md](testing.md))
 
 Deliberately not yet built:
 

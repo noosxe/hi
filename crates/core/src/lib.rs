@@ -16,6 +16,7 @@ pub mod selection;
 pub mod session;
 pub mod settings;
 pub mod system_prompt;
+pub mod tasks;
 pub mod thinking;
 pub mod tool;
 pub mod tools;

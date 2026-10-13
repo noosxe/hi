@@ -251,6 +251,80 @@ mod tests {
     }
 
     #[test]
+    fn background_task_tools_run_through_the_loop() {
+        // The model spawns a task and polls it in the next round —
+        // the loop itself never blocks on the task (#5, AD-0019).
+        let tasks = crate::tasks::TaskManager::new(std::env::temp_dir().join("hi-agent-tasks"));
+        let mut registry = crate::tool::ToolRegistry::new();
+        for tool in [
+            Arc::new(crate::tools::TaskRunTool::new(
+                tasks.clone(),
+                std::env::temp_dir(),
+            )) as Arc<dyn Tool>,
+            Arc::new(crate::tools::TaskStatusTool::new(tasks.clone())),
+            Arc::new(crate::tools::TaskOutputTool::new(tasks.clone())),
+            Arc::new(crate::tools::TaskCancelTool::new(tasks.clone())),
+        ] {
+            registry.register(tool).unwrap();
+        }
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                Event::TurnStart,
+                Event::ToolCall(call("c1", "task_run", r#"{"command":"echo spawn-ok"}"#)),
+                Event::TurnEnd,
+            ],
+            vec![
+                Event::TurnStart,
+                // The echo text is not model-visible timing: task_status
+                // with no id lists everything, whatever the state.
+                Event::ToolCall(call("c2", "task_status", "{}")),
+                Event::TurnEnd,
+            ],
+            vec![
+                Event::TurnStart,
+                Event::Token("settled".into()),
+                Event::TurnEnd,
+            ],
+        ]));
+        let events = collect(spawn_agent_turn(
+            provider,
+            Arc::new(registry),
+            None,
+            &[Message::User("spawn something".into())],
+            DEFAULT_MAX_TOOL_ROUNDS,
+        ));
+        let results = tool_results(&events);
+        assert_eq!(results.len(), 2);
+        assert!(!results[0].is_error, "{}", results[0].content);
+        assert!(
+            results[0].content.contains("background task #1"),
+            "{}",
+            results[0].content
+        );
+        assert!(!results[1].is_error, "{}", results[1].content);
+        assert!(
+            results[1].content.contains("'echo spawn-ok'"),
+            "{}",
+            results[1].content
+        );
+        // The spawned task finished with the expected output — wait on
+        // the fact, never on timing (the reader thread lands the bytes).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let tail = loop {
+            let tail = tasks.output_tail(1, 4096).unwrap_or_default();
+            if tail.contains("spawn-ok") {
+                break tail;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "spawn-ok never reached the output ring: {tail}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        };
+        let _ = tail;
+    }
+
+    #[test]
     fn provider_without_tool_calls_passes_straight_through() {
         let provider = Arc::new(ScriptedProvider::new(vec![vec![
             Event::TurnStart,

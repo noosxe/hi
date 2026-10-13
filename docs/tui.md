@@ -45,7 +45,9 @@ model switch), `picker: Option<Picker>` (open `/model` chooser; `Some` = owns
 the keyboard), `tick: u8` (spinner frames), `completion: Option<Completion>`
 (`/` menu; `Some` = consumes navigation keys), `queued: Option<String>`,
 `system_prompt` + `thinking` (re-attached on provider rebuild),
-`turn: Option<Turn>`.
+`turn: Option<Turn>`, `tasks: Option<hi_core::tasks::TaskManager>` (drained
+per frame in `pump` — completions become transcript notes; the running
+count feeds the status row).
 
 `Turn { text, error: Option<String>, started_at: Instant, rx: Receiver<Event>
 }` — `rx` is private on purpose: raw events are consumed only by `pump` and
@@ -126,6 +128,11 @@ parse is reported, not overwritten — Esc closes.
   `· thinking:<level>` to the right label (e.g.
   `(zai) glm-4.6 · thinking:high`); `Status::label()` itself stays
   provider/model only.
+- Background tasks (#5, AD-0019): while tasks run, `draw_status` appends
+  `· N bg`; on completion the app's frame pump folds a dim
+  `Message::System` note into the transcript (`background task #3
+  'cargo test' finished (exit 0) after 54s`) and the fact rides the
+  next turn's payload to the model.
 
 ## ui.rs — drawing (the only file allowed to draw)
 

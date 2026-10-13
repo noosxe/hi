@@ -184,10 +184,17 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
 /// right. All dim — decoration is never the star of the frame.
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     // The thinking level rides on the right label when set.
-    let right = match app.thinking {
+    let mut right = match app.thinking {
         Some(level) => format!("{} · thinking:{}", app.status.label(), level.name()),
         None => app.status.label(),
     };
+    // Live background tasks, while there are any (#5).
+    if let Some(tasks) = app.tasks.as_ref() {
+        let running = tasks.running_count();
+        if running > 0 {
+            right.push_str(&format!(" · {running} bg"));
+        }
+    }
     let text = crate::status::compose_status(&app.location, &right, area.width);
     frame.render_widget(Paragraph::new(text).style(Style::new().dim()), area);
 }
