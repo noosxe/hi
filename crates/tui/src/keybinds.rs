@@ -39,14 +39,38 @@ pub const KEYBINDS: &[(&str, &str)] = &[
     ),
 ];
 
+/// One chord as displayed: on macOS the modifier words become their
+/// menu-bar icons (⌃ control, ⌥ option) and the named editing keys
+/// their HIG glyphs (⌫ ⌦); elsewhere the table label passes through.
+/// Pure so the tests pin both platforms on any host.
+fn icon_label(chord: &str, mac: bool) -> String {
+    if !mac {
+        return chord.to_string();
+    }
+    let (modifier, key) = chord.split_once('+').unwrap_or(("", chord));
+    let modifier = match modifier {
+        "Ctrl" => "\u{2303}",
+        "Alt" => "\u{2325}",
+        "Cmd" => "\u{2318}",
+        _ => modifier,
+    };
+    let key = match key {
+        "Backspace" => "\u{232b}",
+        "Delete" => "\u{2326}",
+        other => other,
+    };
+    format!("{modifier} {key}")
+}
+
 /// The `/keybinds` listing: a header with the count, then the table.
 pub fn listing() -> String {
     if KEYBINDS.is_empty() {
         return "no keybinds registered".into();
     }
+    let mac = std::env::consts::OS == "macos";
     let mut out = format!("keybinds ({})", KEYBINDS.len());
     for (chord, description) in KEYBINDS {
-        out.push_str(&format!("\n  {chord:<15} {description}"));
+        out.push_str(&format!("\n  {:<15} {description}", icon_label(chord, mac)));
     }
     out
 }
@@ -118,11 +142,34 @@ mod tests {
     }
 
     #[test]
+    fn mac_renders_modifier_icons_and_the_rest_keeps_words() {
+        assert_eq!(icon_label("Ctrl+Y", true), "⌃ Y");
+        assert_eq!(icon_label("Alt+D", true), "⌥ D");
+        assert_eq!(icon_label("Alt+Backspace", true), "⌥ ⌫");
+        assert_eq!(icon_label("Alt+Delete", true), "⌥ ⌦");
+        assert_eq!(icon_label("Ctrl+V", true), "⌃ V");
+        // No platform, no icons: the table labels pass through.
+        assert_eq!(icon_label("Ctrl+Y", false), "Ctrl+Y");
+        assert_eq!(icon_label("Alt+Backspace", false), "Alt+Backspace");
+        // Every row renders fully on both platforms — no modifier
+        // word may survive the mac mapping.
+        for (chord, _) in KEYBINDS {
+            let mac = icon_label(chord, true);
+            assert!(
+                !mac.contains("Ctrl") && !mac.contains("Alt"),
+                "{chord} → {mac}"
+            );
+        }
+    }
+
+    #[test]
     fn the_listing_carries_every_row() {
         let out = listing();
+        let mac = std::env::consts::OS == "macos";
         assert!(out.starts_with(&format!("keybinds ({})", KEYBINDS.len())));
         for (chord, description) in KEYBINDS {
-            assert!(out.contains(chord), "listing missing {chord}");
+            let label = icon_label(chord, mac);
+            assert!(out.contains(&label), "listing missing {label}");
             assert!(out.contains(description), "listing missing {description:?}");
         }
     }
