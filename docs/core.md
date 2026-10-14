@@ -107,7 +107,11 @@ structural chunk-walk for the kitty renderer — AD-0010 — and
   (kill the whole group). They share the [`TaskManager`](#tasksrs--work-that-outlives-a-turn-5)
   handle; `coding` and `all` bundles get them when the CLI passes the
   manager in. Completion is a fact the front end injects — never a
-  turn-trigger.
+  turn-trigger. Task logs get retention at manager construction
+  (#74): older than 7 days goes, aged survivors beyond 64 MiB (newest
+  kept) go, logs under 24h old are never touched, and a failed unlink
+  never blocks startup — one stderr line only when something was
+  removed.
 - **Truncation contract**: every result clamps at 2000 lines or 50 KiB,
   whichever hits first — head-kept for inspection tools, tail-kept for bash.
   The contract lives in `truncate.rs` and has its own tests.
