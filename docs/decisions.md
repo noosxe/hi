@@ -1180,3 +1180,13 @@ chord nothing binds. Cmd+V folds into the Ctrl+V row's description;
 plain unmodified keys (menus, arrows) stay out of scope — the table
 speaks chords. Adding a binding is now: the arm in the handler, one
 row in the table, or the build tells you which you forgot.
+
+On macOS the chord column reads like the menu bar: `icon_label` maps
+the modifier words to ⌃/⌥ (⌘ for any future cmd chord) and the named
+editing keys to ⌫/⌦, icon then space then key — `⌃ S`, `⌥ D`. The
+table stays canonical: `Ctrl+Y` labels are what the drift scan
+checks; the icons are display, platform-gated at render time, and
+the mapping is a pure function so a test pins mac and word forms on
+any host. Ruled mid-review on #97: the user asked for mac icons; the
+named-key glyphs ride along because a half-icon column reads worse
+than either extreme.

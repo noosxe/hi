@@ -120,7 +120,11 @@ chord from `keybinds::KEYBINDS` — chord and one-line description,
 grouped movement / kills / yank / undo / session-level (#95). The
 table cannot drift from the bindings: a test scans `app.rs` for
 modified-chord arms and fails when a bound chord has no row or a row
-names an unbound chord.
+names an unbound chord. On macOS the chord column renders the
+menu-bar icons — `⌃ S`, `⌥ D`, `⌫`/`⌦` for the named editing keys —
+through `icon_label(chord, mac)`; every other platform keeps the
+table's words. The mapping is pure, so tests pin both platforms on
+any host.
 Like unknown-command reports, notices persist in the session file but
 never reach the provider. Commands may carry arguments: the dispatch
 splits on the first space, name first, the rest rides to the handler.
