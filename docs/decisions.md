@@ -1159,3 +1159,24 @@ and yank-pop are their own undo units via `apply_edit`, and the
 in-flight yank site (`yank_site`) dies with any other keypress —
 captured before dispatch, because the Alt+Y arm is the one key that
 still needs it.
+
+---
+
+## AD-0033 — the keybind table is held to the handler by a scan (2026-10-16)
+
+#95: the chord vocabulary had grown to twenty-two modified keys
+scattered across match arms, and only docs/tui.md answered "what
+does Alt+D do again?". `/keybinds` now prints the answer — the
+`keybinds::KEYBINDS` table (chord, one-line description), pushed as
+the same kind of local-only notice `/tools` uses: persists in the
+session file, never reaches the provider. **The table is the doc,
+the test is the enforcement**: `every_bound_chord_has_a_row_and_
+every_row_is_bound` scans `app.rs` source (baked in via
+`include_str!`) for modified-chord arms — bare `'x' =>` arms of the
+ctrl match, gated `KeyCode::Char` arms with their modifiers, and the
+alt-backspace/delete pairs via two-line lookahead — and fails on
+either drift direction: a bound chord without a row, or a row for a
+chord nothing binds. Cmd+V folds into the Ctrl+V row's description;
+plain unmodified keys (menus, arrows) stay out of scope — the table
+speaks chords. Adding a binding is now: the arm in the handler, one
+row in the table, or the build tells you which you forgot.

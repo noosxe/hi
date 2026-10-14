@@ -17,6 +17,7 @@ mod ui;
 mod wrap;
 
 pub mod catalog;
+pub mod keybinds;
 pub mod status;
 
 /// The standalone session chooser (`--resume`); `/resume` reuses the

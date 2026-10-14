@@ -1227,7 +1227,12 @@ mod tests {
             .find(|&y| row_text(y).contains("pick a model"))
             .expect("completion description column");
         assert!(input_row < menu_row, "menu renders under the input");
-        assert!(row_text(menu_row - 1).contains("→ "), "selected row marker");
+        // The selection starts at the first item, whatever sits above
+        // the others — the marker rides that row.
+        let selected_row = (0..20u16)
+            .find(|&y| row_text(y).contains("quit the session"))
+            .expect("first completion row");
+        assert!(row_text(selected_row).contains("→ "), "selected row marker");
         assert!(
             !row_text(19).contains("mock"),
             "status yields while a menu is open"
