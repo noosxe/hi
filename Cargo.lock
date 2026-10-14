@@ -866,6 +866,7 @@ dependencies = [
  "hi-core",
  "hi-tui",
  "portable-pty",
+ "serde_json",
 ]
 
 [[package]]

@@ -11,6 +11,10 @@ hi-tui = { path = "../tui" }
 
 [dev-dependencies]
 avt = "0.18.0"
+# Dev-only: json-mode integration tests parse the stream the real
+# binary emits; the shipped `hi` never links serde_json (AD-0004
+# stays about runtime deps).
+serde_json = "1"
 # Dev-only: drives the real binary through a pseudo-terminal so the
 # event loop's 50ms poll clock and teardown ordering are tested where
 # a mock event source cannot reach (issue #10). The shipped `hi`

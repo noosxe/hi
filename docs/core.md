@@ -184,8 +184,15 @@ terminal — the CLI only assembles the prompt, session, and exit code.
   survives only in the transcript and session file.
 - `headless::combine_prompt(stdin, arg)` — piped stdin first, positional
   argument second, joined by one newline; both empty is a usage error.
-- `--mode json` (JSONL event stream) is deliberately not here yet —
-  issue #18.
+- `headless::run_with(…, sink)` — the same drain, emitting a
+  `JsonRecord` per event (AD-0038): the `Session` header (when a
+  session file is open), the user `Message`, `Token` deltas,
+  transcript `Message`s as they finalize, `Usage`, and exactly one
+  terminal record — `Done{text}` or, after the partial output and the
+  error line, `Failed{reason}`. `run` is `run_with` with a no-op
+  sink; the session-file contract above is unchanged.
+  `JsonRecord::to_line()` renders one JSONL line; the CLI's
+  `--mode json` writes those lines to stdout.
 
 ## provider.rs — the abstraction + the turn thread
 

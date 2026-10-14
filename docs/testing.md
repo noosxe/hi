@@ -14,13 +14,13 @@ cargo run            # hi --mock needs no config
 
 CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI). Third-party actions are SHA-pinned with a `# vX.Y.Z` comment; `dtolnay/rust-toolchain@stable` stays a moving branch ref on purpose — the compiler channel is pinned by `rust-toolchain.toml` (#24, AD-0037). Dependabot (`.github/dependabot.yml`) opens one grouped PR per ecosystem weekly (`cargo`, `github-actions`), ignoring Rust major bumps.
 
-Current count: **411 `#[test]` functions** (the README's count gets refreshed in passing;
+Current count: **418 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 66
 core: openai 21, selection 14, session 12, read 13, settings 15, agent 11, tasks 10, grep 8,
 walk 7, truncate 7, image_util 7, config 6, edit 6, image_resize 6, system_prompt 6,
-mod 5, headless 5, bash 5, find 4, ls 3, write 3, mock 2, thinking 2, tool 1. tui: app 56,
+mod 5, headless 9, bash 5, find 4, ls 3, write 3, mock 2, thinking 2, tool 1. tui: app 56,
 markdown 19, ui 29, kitty 11, wrap 12, status 8, scroll 7, editor 7, picker 5,
-commands 4, clipboard 3, theme 3, catalog 2. cli: 7 unit + 6 pty integration
+commands 4, clipboard 3, theme 3, catalog 2. cli: 7 unit + 3 json-mode integration + 6 pty integration
 (`tests/tui_pty.rs` — the real binary in a pseudo-terminal, its byte stream
 rendered by the avt emulator (asciinema's), and every wait a predicate over
 rendered frames — typed keys must echo in the composer, a settled turn must
@@ -87,6 +87,8 @@ assert!(api.first_request().contains("\"stream\":true"));
 | system prompt chain, whitespace-only files | `system_prompt.rs` |
 | tool registry rules, gate decisions (deny/mutate), loop rounds + cap, scripted replay | `agent.rs`, `tool.rs` |
 | headless drain: final text, narration flush before tool calls, error contract, session append, prompt assembly | `headless.rs` |
+| json records: transcript order with token deltas, failed terminal, session header when open, usage bill | `headless.rs` |
+| `--mode json` through the real binary: framing, header/done, `--no-session`, text `-p` contract | `crates/cli/tests/json_mode.rs` |
 | built-in tools: truncation contract, gitignore walk, per-tool behavior (paging, uniqueness, exit codes, timeouts), bundle selection | `tools/` |
 | session layout, header/message round-trip incl. tools, torn-tail tolerance, project keys, XDG data dir | `session.rs`, `config.rs` |
 | SSE parsing, streaming end-to-end, discovery shapes, thinking kwargs on the wire, tool-call fragments + wire replay, auth-header rules, error contract | `openai.rs` |
