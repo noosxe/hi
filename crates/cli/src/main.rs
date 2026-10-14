@@ -3,6 +3,7 @@
 //! Thin on purpose. It decides *what* runs — mock, TUI, headless
 //! (`--print`), model listing — while hi-core resolves and hi-tui draws.
 
+use std::io::IsTerminal;
 use std::io::Read;
 use std::path::Path;
 use std::process::ExitCode;
@@ -146,14 +147,28 @@ fn dispatch(cli: Cli) -> ExitCode {
         };
     }
 
+    // pi-parity auto-print (#19): a redirected stream is a script's
+    // context, so with no explicit mode the text path runs instead of
+    // a TUI that could not work there.
+    let auto_print = !cli.print
+        && cli.mode.is_none()
+        && !streams_look_interactive(
+            std::io::stdin().is_terminal(),
+            std::io::stdout().is_terminal(),
+        );
+
     // `[PROMPT]` feeds the headless surfaces; an interactive run has
     // no use for it and must not swallow it silently.
-    if cli.prompt.is_some() && !cli.print && cli.mode.is_none() {
+    if cli.prompt.is_some() && !cli.print && !auto_print && cli.mode.is_none() {
         return fail("[PROMPT] needs --print or --mode json");
     }
 
-    if cli.print || cli.mode == Some(Mode::Json) {
-        return print_mode(&cli, cli.mode == Some(Mode::Json));
+    if cli.print || auto_print {
+        return print_mode(&cli, false);
+    }
+
+    if cli.mode == Some(Mode::Json) {
+        return print_mode(&cli, true);
     }
 
     if cli.mock {
@@ -492,10 +507,19 @@ fn print_mode(cli: &Cli, json: bool) -> ExitCode {
     }
 }
 
+/// The TUI gate (#19): the interface opens only when BOTH streams are
+/// a terminal — pi-parity. Any redirect (piped stdin like
+/// `git diff | hi "review"`, redirected stdout like `hi "prompt" >
+/// log.md`) is a script's context, and dispatch auto-selects text
+/// print mode instead (ruling a). Explicit `--print`/`--mode` always
+/// win; this only fills the no-mode-selected gap.
+fn streams_look_interactive(stdin_is_tty: bool, stdout_is_tty: bool) -> bool {
+    stdin_is_tty && stdout_is_tty
+}
+
 /// Stdin contents when piped or redirected; `None` on a terminal or on
 /// a read error (an unusable stdin must not hang waiting for bytes).
 fn read_piped_stdin() -> Option<String> {
-    use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
         return None;
     }
@@ -796,5 +820,14 @@ mod tests {
         // open_session, where it can carry context).
         assert!(Cli::try_parse_from(["hi", "--session", "a", "--print", "q"]).is_ok());
         assert!(Cli::try_parse_from(["hi", "--resume", "--print", "q"]).is_ok());
+    }
+    #[test]
+    fn the_tui_opens_only_when_both_streams_are_terminals() {
+        // #19 ruling (a): any redirect is a script's context — only a
+        // terminal on BOTH streams opens the interface.
+        assert!(streams_look_interactive(true, true));
+        assert!(!streams_look_interactive(true, false)); // stdout redirected
+        assert!(!streams_look_interactive(false, true)); // piped stdin
+        assert!(!streams_look_interactive(false, false)); // full pipe
     }
 }
