@@ -115,7 +115,10 @@ annotation badges (`read-only` / `destructive`, only when the tool claims
 them), and the first sentence of each description (`ToolRegistry::info()`
 in core snapshots the facts; the TUI formats). `/tasks` opens the tasks
 pane (AD-0021) — bare to list, `/tasks <id>` for one task's live output.
-`/keybinds` pushes the same kind of notice listing every registered
+`/new` starts a fresh session for the directory hi runs in —
+optionally named (`/new scratch`) — and walks the same reset resume
+walks, so transcript, bill, and ring all begin again while the model
+and thinking level carry (#98). `/keybinds` pushes the same kind of notice listing every registered
 chord from `keybinds::KEYBINDS` — chord and one-line description,
 grouped movement / kills / yank / undo / session-level (#95). The
 table cannot drift from the bindings: a test scans `app.rs` for
