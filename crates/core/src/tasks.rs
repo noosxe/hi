@@ -38,6 +38,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
+
+use crate::process::{kill_group, stop_tree};
 use std::time::{Duration, Instant};
 
 /// In-memory output kept for instant tail reads. The full stream goes
@@ -420,28 +422,8 @@ fn bash_command(command: &str, cwd: &std::path::Path) -> Command {
     cmd.arg("-c")
         .arg(format!("exec 2>&1; {command}"))
         .current_dir(cwd);
-    #[cfg(unix)]
-    {
-        // Own process group: the whole tree dies with one killpg.
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    crate::process::own_group(&mut cmd);
     cmd
-}
-
-/// Kill a process group (negative pid targets the group). Best effort:
-/// a vanished group is fine, permissions are not expected here.
-#[cfg(unix)]
-fn kill_group(pid: u32, sig: i32) {
-    unsafe {
-        libc::kill(-(pid as i32), sig);
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_group(pid: u32, sig: i32) {
-    let _ = (pid, sig);
-    // Windows has no process groups in std; nothing to do here.
 }
 
 /// The worker: own the child, drain its output, own every state
@@ -519,21 +501,6 @@ fn exit_state(status: std::process::ExitStatus) -> TaskState {
         Some(code) => TaskState::Failed { exit_code: code },
         None => TaskState::Failed { exit_code: -1 },
     }
-}
-
-/// Kill the whole tree: TERM the group, give it a moment, KILL.
-fn stop_tree(child: &mut Child) {
-    let pid = child.id();
-    kill_group(pid, libc::SIGTERM);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline {
-        match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
-            Ok(None) => std::thread::sleep(POLL),
-        }
-    }
-    kill_group(pid, libc::SIGKILL);
-    let _ = child.wait();
 }
 
 fn summary(id: u64, entry: &TaskEntry) -> TaskSummary {

@@ -1235,3 +1235,20 @@ the terminal emulator. Split to #100, where the chords get re-ruled
 (#67's Ctrl+V is paste here); `Ctrl+Alt+]` folds into `Ctrl+]'s`
 /keybinds row by the Cmd+V precedent (AD-0033), and the drift scan
 learned to see `']'`.
+
+---
+
+## AD-0036 — one process-group module, both killers (2026-10-16)
+
+#30 stopped being a scoping exercise: `own_group` / `kill_group` /
+`stop_tree` lifted out of `tasks.rs` into `core/src/process.rs`, and
+the bash tool now spawns into its own group and kills the tree at
+timeout with the manager's exact TERM → grace → KILL. Before the
+lift, a timed-out `bash` command left grandchildren running *and*
+held the stdout pipe, so the tool blocked until the orphan exited —
+the red test proved both at once (a backgrounded `sleep 30` kept
+`execute` alive the full 30s). The liveness test polls
+`libc::kill(pid, 0)` for ESRCH on a grandchild that announced its
+own pid, the same proof shape the manager's tests use. Windows is
+unchanged until #31 (Job Objects): `own_group` and `kill_group`
+carry the `#[cfg]` halves, `stop_tree` keeps the manager's shape.
