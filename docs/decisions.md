@@ -1109,3 +1109,29 @@ ruling is the shell's: a non-empty draft dies first (cleared, cursor
 home); an empty composer is the user asking to leave, and quits.
 Menus own no text, so from a picker or pane the anywhere-exit
 survives everywhere ctrl-c can't mean "clear".
+
+---
+
+## AD-0031 — undo is snapshots on the app, not a crate (2026-10-16)
+
+#65: the composer had kills and history but no undo — one Ctrl+Z too
+many on a long prompt and the text was gone for good. The ruling is
+the issue's own first design note, taken at face value: for a
+few-KB box, **snapshot-per-unit beats a delta log** — the whole
+`(input, cursor)` state before each edit, capped at 100 units, a few
+hundred KB worst case. Undo is app policy, so it lives on `App` and
+`editor.rs` stays pure (the AD-0014 seam, again): every mutation
+flows through one choke — `apply_edit` for edits, `apply_insert` for
+plain chars — and even ctrl+c's line-kill and a Tab-accepted
+completion are units. **Insert runs coalesce by state, not flags**:
+a plain insert merges into the open run only while the cursor sits
+exactly where the run left off; any other key or cursor move opens a
+fresh unit, and deletes never coalesce — emacs' self-insert rule,
+without bookkeeping. **Ctrl+Z / Alt+Z** (the issue's emacs-style
+redo pick; shift+ctrl+z is indistinguishable on legacy terminals),
+both silent noops on empty stacks. History browse and queue handback
+are navigation, not edits — their `set_input` never snapshots, so
+undo never drags navigation with it. Redo is the states undo popped;
+a fresh edit clears the future, and redo pushes its state back as a
+closed unit — snapshot must not clear the stack it just popped from,
+or one Alt+Z strands the rest.
