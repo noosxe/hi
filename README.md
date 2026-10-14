@@ -16,19 +16,20 @@ later.
   - **OpenAI-compatible** — real HTTP, server-sent events, model discovery
 - pi-style `models.json` configuration with `$ENV` API-key interpolation
 - Failures keep partial output and add a red `error` line; the input stays live
-- A real CLI: `--provider`/`--model`, `--list-models`, `--mock`, `--help` — and Esc cancels a running turn
+- A real CLI: session flags (`--continue`, `-r`, `--session`, `--fork`, `-n`, `--no-session`), headless `-p`/`--print` with piped stdin, `--tools` bundles, `--provider`/`--model`, `--list-models`, `--mock` — and Esc cancels a running turn
 - `/model` picker in the TUI: arrows to move, Enter switches this session, Ctrl-S saves the default
 - Slash commands with completion: type `/` to see the menu, Tab completes, Enter runs
-- Session transcripts persist per project (JSONL, append-only); `hi --continue` resumes the newest, `hi -r` opens a picker, `hi --session <id>` and `hi --fork <id>` select and branch deterministically — headless too
+- Session transcripts persist per project (JSONL, append-only); `hi --continue` resumes the newest, `hi -r` opens a picker, `hi --session <id>` and `hi --fork <id>` select and branch deterministically, `/new` starts a fresh session mid-conversation — headless too
 - Headless one-shot mode: `hi -p "prompt"` (or `git diff | hi -p "review"`) prints the final reply and exits
 - Honest wire identity: `hi/<version> (<os>; <arch>)` on every request; prompt-cache affinity via the session id so multi-turn runs hit server-side caches; telemetry beyond that is strictly opt-in
 - `read` attaches image files (png/jpeg/webp/gif) — fail-open like pi: on unless the `images` master switch is off or a model sets `vision: false`; resized/transcoded to a universal budget first, honest metadata notes otherwise
 - on kitty-protocol terminals (kitty, Ghostty, WezTerm, Warp) those images render as real graphics in the transcript; everywhere else the text note stays
 - Ctrl-V pastes from the clipboard: an image is staged at a temp file and its path lands in the input as plain text — nothing sends until Enter, and the image enters the conversation only when the model reads it
-- Built-in agent tools: the model can read, search, list, write, edit, and run commands — the `coding` bundle by default, `--tools read-only|none|all` to change
+- Built-in agent tools: the model can read, search, list, write, edit, and run commands — the `coding` bundle by default, `--tools read-only|none|all` to change; the `all` bundle adds tracked background tasks (`task_run`/`task_status`/`task_output`/`task_cancel`): the model spawns long jobs and polls without blocking a turn
+- A pi-style composer: `Ctrl-K`/`Ctrl-U`/`Ctrl-W` kill, `Ctrl-Y` yanks the newest kill back, `Alt-Y` cycles older kills; undo/redo (`Ctrl-Z`/`Alt-Z`); jump-to-char (`Ctrl+]` forward, `Ctrl+Alt+]` backward) — `/keybinds` prints the whole table on demand
 - 411 tests, including a fake HTTP server and a pty harness that drive the real binary
 
-Not yet: JSONL event output for scripts, subagents, background tasks, extensions.
+Not yet: JSONL event output for scripts, subagents, extensions.
 The selection and settings layers are built so each slots in without
 rework.
 
@@ -46,16 +47,27 @@ cargo test           # 411 tests; no network needed
 ```text
 A minimalist agent harness
 
-Usage: hi [OPTIONS]
+Usage: hi [OPTIONS] [PROMPT]
+
+Arguments:
+  [PROMPT]  The prompt for --print (piped stdin is prepended)
 
 Options:
       --provider <PROVIDER>  Provider name from models.json
       --model <MODEL>        Model id to use (see --list-models)
+      --tools <TOOLS>        Built-in tool bundle: none | read-only | coding | all (default: coding,
+                             or defaultTools in settings.json)
       --mock                 Use the built-in mock provider — no config, no network
       --list-models          Print the selected provider's models and exit
+      --continue             Resume the most recent session for this directory
+  -r, --resume               Pick a session to resume (arrow list with type-to-filter)
+      --session <SESSION>    Open a session by file path or (partial) id
+      --fork <FORK>          Fork a session (path or id) into a new file for this directory
+  -n, --name <NAME>          Name the new session (fresh start or fork)
+  -p, --print                Run one prompt headlessly: print the final reply and exit
+      --no-session           Run without loading or saving a session file
   -h, --help                 Print help
   -V, --version              Print version
-```
 
 How hi picks a provider and model when you don't name both:
 
@@ -66,7 +78,7 @@ How hi picks a provider and model when you don't name both:
 5. nothing — the first provider (alphabetically) that offers any model
 
 In the TUI: **Enter** sends, **Esc** cancels the running turn (partial
-output stays in the transcript), **Ctrl-C** quits. A dim status row
+output stays in the transcript), **Ctrl-C** clears the draft — and quits when it is already empty. A dim status row
 under the input shows `cwd (branch)` on the left — the branch only
 when you're inside a git repository — and `(provider) model` on the
 right.
@@ -248,7 +260,7 @@ Design notes worth keeping in mind:
   the UI thread never does.
 - **Nothing outlives its session.** Every thread or child process hi
   spawns is born with a deadline — bounded DNS/connect on network
-  attempts, hard timeouts for any future child processes — and dies
+  attempts, hard timeouts for bash child processes — a timeout kills the whole process group, not just the child — and dies
   with the session: teardown sweeps children, so nothing orphans
   itself to the OS and burns a core for hours.
 - Errors are plain `String`s for now — descriptive and user-facing;
