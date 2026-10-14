@@ -20,6 +20,7 @@ ureq = { version = "3", features = ["json"] }
 uuid = { version = "1", features = ["v4"] }
 regex = "1"
 globset = "0.4"
+ignore = "0.4.33"
 
 # Process-group kill for the background task manager (#5, AD-0019).
 # Already in the tree transitively (getrandom/rustls) — zero new crates.

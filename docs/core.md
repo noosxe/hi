@@ -79,7 +79,8 @@ mutates the caller's history — consumers mirror the event stream (details in
 The harness ships tools, not just a loop. One file per tool under
 `crates/core/src/tools/`, plus support modules: `truncate.rs` (the
 output contract), `walk.rs` (gitignore-aware directory walking for
-grep/find), `image_resize.rs` (read's attachment ladder —
+grep/find — full gitignore semantics via the `ignore` crate since #28:
+nested files, `!` negation, `dir/` directory-only, parents-above-root), `image_resize.rs` (read's attachment ladder —
 [decisions.md](decisions.md) AD-0009), and `image_util.rs`
 (presentation-side helpers: header-only `dimensions`, `to_png` with a
 structural chunk-walk for the kitty renderer — AD-0010 — and

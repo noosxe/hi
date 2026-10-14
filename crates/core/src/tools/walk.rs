@@ -1,45 +1,23 @@
 //! Directory walking for `grep` and `find`.
 //!
-//! Recursive, deterministic (sorted per directory), `.git` always skipped,
-//! and the **root-level** `.gitignore` honored. That last part is a
-//! deliberately documented subset (ruling on #26): simple glob patterns,
-//! no `!` negation, no nested `.gitignore` files. Full semantics would
-//! mean the `ignore` crate — issue #28 holds that decision.
+//! Built on the [`ignore`] crate (#28) — full gitignore semantics:
+//! nested `.gitignore` files at every depth, `!` negation, `dir/`
+//! directory-only patterns, and anchored patterns, honored even
+//! outside a git repository (`require_git(false)`; session dirs often
+//! aren't repos, and the v1 walker behaved the same way). Gitignores
+//! above the walk root apply too (`parents(true)`, git semantics — a
+//! deliberate v2 change). Deterministic: single-threaded, sorted per
+//! directory; `.git` is always skipped; symlinked directories are
+//! never descended (cycle safety). `WalkBuilder::build` is the
+//! single-threaded walker; `sort_by_file_name` orders each directory's
+//! entries, which is what makes the output deterministic.
 //!
 //! Paths come back **relative to the walk root**, so callers render them
 //! directly (`find`) or re-join to read (`grep`).
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
-use std::fs;
+use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
-
-/// Parse the root `.gitignore` into a matcher, or `None` when there is
-/// nothing to honor. Malformed or unsupported lines (`!`, comments, blanks)
-/// are skipped, not fatal.
-pub fn root_gitignore(root: &Path) -> Option<GlobSet> {
-    let text = fs::read_to_string(root.join(".gitignore")).ok()?;
-    let mut builder = GlobSetBuilder::new();
-    let mut any = false;
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
-            continue;
-        }
-        let pattern = line.trim_end_matches('/');
-        // Patterns with an interior slash are anchored to the root and match
-        // the relative path; bare names match a path component anywhere.
-        let built = if pattern.contains('/') {
-            GlobBuilder::new(pattern).literal_separator(true).build()
-        } else {
-            GlobBuilder::new(pattern).build()
-        };
-        if let Ok(glob) = built {
-            builder.add(glob);
-            any = true;
-        }
-    }
-    if any { builder.build().ok() } else { None }
-}
 
 /// A user-supplied `glob` filter (`grep`'s `glob`, `find`'s `pattern`).
 /// `*` is allowed to cross separators, matching rg's `--glob` feel.
@@ -54,66 +32,42 @@ pub fn user_glob(pattern: &str) -> Result<GlobSet, String> {
 }
 
 /// Collect file paths (relative to `root`), up to `limit` of them.
-/// `ignore` prunes paths before `filter` selects; both may be `None`.
-pub fn collect(
-    root: &Path,
-    ignore: Option<&GlobSet>,
-    filter: Option<&GlobSet>,
-    limit: usize,
-) -> Vec<PathBuf> {
+/// Gitignores prune before `filter` selects; `filter` may be `None`.
+pub fn collect(root: &Path, filter: Option<&GlobSet>, limit: usize) -> Vec<PathBuf> {
+    let walker = WalkBuilder::new(root)
+        .hidden(false)
+        .require_git(false)
+        .parents(true)
+        .sort_by_file_name(|a, b| a.cmp(b))
+        .filter_entry(|entry| entry.file_name() != ".git")
+        .build();
     let mut out = Vec::new();
-    walk_dir(root, Path::new(""), ignore, filter, limit, &mut out);
-    out
-}
-
-fn walk_dir(
-    root: &Path,
-    rel: &Path,
-    ignore: Option<&GlobSet>,
-    filter: Option<&GlobSet>,
-    limit: usize,
-    out: &mut Vec<PathBuf>,
-) {
-    if out.len() >= limit {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(root.join(rel)) else {
-        return;
-    };
-    let mut entries: Vec<std::fs::DirEntry> = entries.filter_map(Result::ok).collect();
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
+    for entry in walker {
+        let Ok(entry) = entry else { continue };
+        if entry.depth() == 0 || entry.file_type().is_some_and(|t| t.is_dir()) {
+            continue;
+        }
+        // Symlinked directories are never descended *or listed* (v1
+        // cycle safety); symlinked files stay. `file_type` here is
+        // symlink-aware (no follow), so a link to a dir reads as
+        // symlink; `metadata` follows to answer "is the target a dir".
+        let symlinks_to_dir = entry.file_type().is_some_and(|t| t.is_symlink())
+            && std::fs::metadata(entry.path()).is_ok_and(|m| m.is_dir());
+        if symlinks_to_dir {
+            continue;
+        }
         if out.len() >= limit {
-            return;
+            break;
         }
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str == ".git" {
-            continue;
-        }
-        let child_rel = rel.join(&name);
-        let Ok(file_type) = entry.file_type() else {
-            continue;
+        let rel = match entry.path().strip_prefix(root) {
+            Ok(rel) => rel,
+            Err(_) => continue,
         };
-        // Never descend into symlinked directories (cycle safety).
-        if file_type.is_symlink()
-            && fs::metadata(root.join(&child_rel))
-                .map(|m| m.is_dir())
-                .unwrap_or(false)
-        {
-            continue;
-        }
-        if let Some(set) = ignore
-            && (set.is_match(&child_rel) || set.is_match(&*name_str))
-        {
-            continue;
-        }
-        if file_type.is_dir() {
-            walk_dir(root, &child_rel, ignore, filter, limit, out);
-        } else if filter.is_none_or(|f| f.is_match(&child_rel) || f.is_match(&*name_str)) {
-            out.push(child_rel);
+        if filter.is_none_or(|f| f.is_match(rel) || f.is_match(entry.file_name())) {
+            out.push(rel.to_path_buf());
         }
     }
+    out
 }
 
 #[cfg(test)]
@@ -140,7 +94,7 @@ mod tests {
         touch(&root, "a.txt");
         touch(&root, "sub/z.txt");
         touch(&root, "sub/y.txt");
-        let got = collect(&root, None, None, 100);
+        let got = collect(&root, None, 100);
         assert_eq!(
             got,
             vec![
@@ -163,8 +117,7 @@ mod tests {
             "target/\n# comment\n!not-a-negation\n",
         )
         .unwrap();
-        let ignore = root_gitignore(&root);
-        let got = collect(&root, ignore.as_ref(), None, 100);
+        let got = collect(&root, None, 100);
         assert_eq!(
             got,
             vec![PathBuf::from(".gitignore"), PathBuf::from("keep.rs")]
@@ -178,8 +131,7 @@ mod tests {
         touch(&root, "deep/nested/low.log");
         touch(&root, "deep/keep.txt");
         std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
-        let ignore = root_gitignore(&root);
-        let got = collect(&root, ignore.as_ref(), None, 100);
+        let got = collect(&root, None, 100);
         assert_eq!(
             got,
             vec![PathBuf::from(".gitignore"), PathBuf::from("deep/keep.txt")]
@@ -192,8 +144,7 @@ mod tests {
         touch(&root, "build/staging.rs");
         touch(&root, "src/build/staging.rs");
         std::fs::write(root.join(".gitignore"), "build/*.rs\n").unwrap();
-        let ignore = root_gitignore(&root);
-        let got = collect(&root, ignore.as_ref(), None, 100);
+        let got = collect(&root, None, 100);
         assert_eq!(
             got,
             vec![
@@ -203,6 +154,67 @@ mod tests {
         );
     }
 
+    /// The #28 gap, closed: a negation un-hides within the same file.
+    #[test]
+    fn negation_unhides_within_the_same_gitignore() {
+        let root = temp_root("negation");
+        touch(&root, "noise.log");
+        touch(&root, "keep.log");
+        std::fs::write(root.join(".gitignore"), "*.log\n!keep.log\n").unwrap();
+        let got = collect(&root, None, 100);
+        assert_eq!(
+            got,
+            vec![PathBuf::from(".gitignore"), PathBuf::from("keep.log")]
+        );
+    }
+
+    /// Nested `.gitignore` files apply at their depth and can override
+    /// the root file — the v1 walker never read them.
+    #[test]
+    fn nested_gitignore_overrides_the_root() {
+        let root = temp_root("nested");
+        touch(&root, "deep/low.log");
+        touch(&root, "deep/keep.txt");
+        std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+        std::fs::write(root.join("deep/.gitignore"), "!low.log\n").unwrap();
+        let got = collect(&root, None, 100);
+        assert_eq!(
+            got,
+            vec![
+                PathBuf::from(".gitignore"),
+                PathBuf::from("deep/.gitignore"),
+                PathBuf::from("deep/keep.txt"),
+                PathBuf::from("deep/low.log"),
+            ]
+        );
+    }
+
+    /// `build/` matches only directories; a *file* named `build`
+    /// survives (v1 trimmed the slash and hid it).
+    #[test]
+    fn trailing_slash_is_directory_only() {
+        let root = temp_root("dironly");
+        touch(&root, "build/out.rs");
+        touch(&root, "other/build");
+        std::fs::write(root.join(".gitignore"), "build/\n").unwrap();
+        let got = collect(&root, None, 100);
+        assert_eq!(
+            got,
+            vec![PathBuf::from(".gitignore"), PathBuf::from("other/build")]
+        );
+    }
+
+    /// v2 behavior change: gitignores above the walk root apply, like
+    /// git itself (the v1 walker only ever read the root's own file).
+    #[test]
+    fn parent_gitignores_apply_above_the_root() {
+        let outer = temp_root("parents");
+        touch(&outer, "sub/x.log");
+        std::fs::write(outer.join(".gitignore"), "*.log\n").unwrap();
+        let got = collect(&outer.join("sub"), None, 100);
+        assert_eq!(got, Vec::<PathBuf>::new());
+    }
+
     #[test]
     fn filter_matches_rel_path_or_basename() {
         let root = temp_root("filter");
@@ -210,7 +222,7 @@ mod tests {
         touch(&root, "src/lib.rs");
         touch(&root, "notes.md");
         let filter = user_glob("*.rs").unwrap();
-        let got = collect(&root, None, Some(&filter), 100);
+        let got = collect(&root, Some(&filter), 100);
         assert_eq!(
             got,
             vec![PathBuf::from("src/lib.rs"), PathBuf::from("src/main.rs")]
@@ -223,7 +235,7 @@ mod tests {
         for i in 0..10 {
             touch(&root, &format!("f{i}.txt"));
         }
-        let got = collect(&root, None, None, 3);
+        let got = collect(&root, None, 3);
         assert_eq!(got.len(), 3);
     }
 
@@ -232,7 +244,7 @@ mod tests {
         let root = temp_root("symlink");
         touch(&root, "real/inside.txt");
         std::os::unix::fs::symlink(root.join("real"), root.join("loop")).unwrap();
-        let got = collect(&root, None, None, 100);
+        let got = collect(&root, None, 100);
         assert_eq!(got, vec![PathBuf::from("real/inside.txt")]);
     }
 }
