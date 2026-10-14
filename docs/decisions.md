@@ -1271,3 +1271,13 @@ grouped PR per ecosystem weekly (`cargo` and `github-actions`),
 ignores Rust semver-major bumps (majors land by ruling, not by bot),
 and prefixes commits `chore:` / `ci:` — conventional-commit types in
 the house's `feat:`/`fix:` voice.
+
+**AD-0037 addendum (2026-10-16):** the first cut of the config used
+`dependency-type: "all"` to make the actions group catch-everything —
+invalid: `groups.dependency-type` exists only for bundler/composer/
+mix/maven/npm/pip and takes only `production`/`development`. The
+default already includes all dependency types, so the group carries
+`applies-to` alone; the `cargo` group's plain `"minor"`/`"patch"`
+selector wording is the documented form for `groups.update-types`
+(the `version-update:semver-*` prefixed form belongs to
+`allow`/`ignore` only).

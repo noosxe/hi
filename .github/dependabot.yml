@@ -28,6 +28,5 @@ updates:
     groups:
       actions:
         applies-to: version-updates
-        dependency-type: "all"
     commit-message:
       prefix: "ci"
