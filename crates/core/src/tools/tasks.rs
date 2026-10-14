@@ -13,9 +13,10 @@
 //! the manager's own 256 KiB ring, so no read can flood the context.
 
 use super::truncate;
-use super::{args_object, opt_str, opt_usize};
+use super::{args_object, opt_str, opt_usize, resolve_path};
 use crate::tasks::{TaskManager, TaskSpec};
 use crate::tool::{Tool, ToolAnnotations};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -39,6 +40,23 @@ fn summarize(summary: &crate::tasks::TaskSummary) -> String {
             command = summary.command,
         ),
     }
+}
+
+/// `env` must be an object whose every value is a string — the
+/// model-readable shape check ahead of the spawn. Empty is legal: a
+/// merge of nothing.
+fn parse_env(value: &serde_json::Value) -> Result<BTreeMap<String, String>, String> {
+    let Some(map) = value.as_object() else {
+        return Err("task_run env must be an object of string → string values".into());
+    };
+    let mut env = BTreeMap::new();
+    for (key, value) in map {
+        let Some(value) = value.as_str() else {
+            return Err(format!("task_run env[{key:?}] must be a string"));
+        };
+        env.insert(key.clone(), value.to_string());
+    }
+    Ok(env)
 }
 
 /// Parse the required task id, shared by three of the four tools.
@@ -74,7 +92,9 @@ impl Tool for TaskRunTool {
          in its own process group and return immediately with a task id. It keeps running \
          across turns. Poll with task_status, read output with task_output (tail), stop \
          with task_cancel. Optionally provide a timeout in seconds (no default — \
-         background work is expected to be long-lived)."
+         background work is expected to be long-lived), a different working directory \
+         (cwd), and extra environment variables (env, merged over the inherited \
+         environment)."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -92,6 +112,15 @@ impl Tool for TaskRunTool {
                 "timeout": {
                     "type": "number",
                     "description": "Wall-clock limit in seconds (optional, no default)"
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory for the command (relative paths resolve against the session cwd; default: the session cwd)"
+                },
+                "env": {
+                    "type": "object",
+                    "description": "Extra environment variables for this command, merged over the inherited environment",
+                    "additionalProperties": { "type": "string" }
                 }
             },
             "required": ["command"]
@@ -109,11 +138,35 @@ impl Tool for TaskRunTool {
         };
         let name = opt_str(&args, "name")?;
         let timeout = opt_usize(&args, "timeout")?.map(|s| Duration::from_secs(s as u64));
-        let mut spec = TaskSpec::process(command, self.cwd.clone());
+        // cwd: relative against the session cwd, absolute passes
+        // through — the path-tool contract. Refuse a missing
+        // directory here, before the spawn, so the error is a fact
+        // the model can act on instead of an OS spawn message.
+        let cwd = match opt_str(&args, "cwd")? {
+            Some(raw) => {
+                let resolved = resolve_path(&self.cwd, &raw);
+                if !resolved.is_dir() {
+                    return Err(format!(
+                        "task_run cwd '{}': no such directory",
+                        resolved.display()
+                    ));
+                }
+                resolved
+            }
+            None => self.cwd.clone(),
+        };
+        let env = match args.get("env") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(value) => Some(parse_env(value)?),
+        };
+        let mut spec = TaskSpec::process(command, cwd);
         if let Some(name) = name {
             spec.name = name;
         }
         spec.timeout = timeout;
+        if let Some(env) = env {
+            spec = spec.with_env(env);
+        }
         let id = self.tasks.spawn(spec)?;
         Ok(format!(
             "started background task #{id} — poll with task_status, read output with \
@@ -296,5 +349,132 @@ impl Tool for TaskCancelTool {
         Ok(format!(
             "task #{id} cancelled — the process group is being killed"
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tasks::TaskState;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    /// A throwaway root: `logs/` for the manager, `elsewhere/` as a
+    /// cwd-override target, and a tool whose session cwd is the root.
+    fn tool() -> (PathBuf, TaskRunTool, TaskManager) {
+        let root = std::env::temp_dir().join(format!(
+            "hi-taskrun-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(root.join("logs")).unwrap();
+        std::fs::create_dir_all(root.join("elsewhere")).unwrap();
+        let tasks = TaskManager::new(root.join("logs"));
+        let run = TaskRunTool::new(tasks.clone(), root.clone());
+        (root, run, tasks)
+    }
+
+    /// The spawn echo names the id: `started background task #<n> — …`.
+    fn id_from(result: &str) -> u64 {
+        let after = result.split('#').nth(1).unwrap();
+        after
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    /// Predicate wait — no fixed sleeps (house test rule).
+    fn wait_finished(tasks: &TaskManager, id: u64) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if tasks.status(id).is_some_and(|s| s.state.finished()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("task #{id} never finished");
+    }
+
+    #[test]
+    fn the_schema_offers_cwd_and_env() {
+        let (_root, run, _tasks) = tool();
+        let schema = run.parameters().to_string();
+        assert!(schema.contains("\"cwd\""), "{schema}");
+        assert!(schema.contains("\"env\""), "{schema}");
+    }
+
+    #[test]
+    fn cwd_override_runs_the_command_there() {
+        let (root, run, tasks) = tool();
+        let result = run
+            .execute(&json!({"command": "pwd", "cwd": "elsewhere"}).to_string())
+            .unwrap();
+        let id = id_from(&result);
+        wait_finished(&tasks, id);
+        let out = tasks.output_tail(id, 4096).unwrap();
+        let expected = root.join("elsewhere");
+        assert!(
+            out.contains(expected.to_string_lossy().as_ref()),
+            "{out} should name {expected:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_cwd_is_a_readable_error() {
+        let (_root, run, _tasks) = tool();
+        let err = run
+            .execute(&json!({"command": "true", "cwd": "nowhere"}).to_string())
+            .unwrap_err();
+        assert!(err.contains("no such directory"), "{err}");
+    }
+
+    #[test]
+    fn env_reaches_the_command() {
+        let (_root, run, tasks) = tool();
+        let result = run
+            .execute(
+                &json!({
+                    "command": "echo v=$HI_TOOL_ENV",
+                    "env": {"HI_TOOL_ENV": "tool-env"},
+                })
+                .to_string(),
+            )
+            .unwrap();
+        let id = id_from(&result);
+        wait_finished(&tasks, id);
+        let out = tasks.output_tail(id, 4096).unwrap();
+        assert!(out.contains("v=tool-env"), "{out}");
+    }
+
+    #[test]
+    fn env_must_be_an_object_of_strings() {
+        let (_root, run, _tasks) = tool();
+        let err = run
+            .execute(&json!({"command": "true", "env": ["x"]}).to_string())
+            .unwrap_err();
+        assert!(err.contains("object"), "{err}");
+        let err = run
+            .execute(&json!({"command": "true", "env": {"A": 1}}).to_string())
+            .unwrap_err();
+        assert!(err.contains("string"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_env_object_spawns_fine() {
+        let (_root, run, tasks) = tool();
+        let result = run
+            .execute(&json!({"command": "true", "env": {}}).to_string())
+            .unwrap();
+        let id = id_from(&result);
+        wait_finished(&tasks, id);
+        assert!(matches!(
+            tasks.status(id).unwrap().state,
+            TaskState::Succeeded { .. }
+        ));
     }
 }

@@ -31,7 +31,7 @@
 //! [`TaskKind`]. `Process` is the v1 kind; `Agent` arrives with #4 and
 //! slots into the same lifecycle.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -72,6 +72,10 @@ pub struct ProcessSpec {
     pub command: String,
     /// Working directory; resolved against the session's cwd.
     pub cwd: PathBuf,
+    /// Extra environment for this one command, merged over the
+    /// inherited environment (listed keys set or overridden,
+    /// everything else passes through). `None` inherits untouched.
+    pub env: Option<BTreeMap<String, String>>,
 }
 
 /// A task to spawn: what it is, what to call it, how long it may run.
@@ -107,9 +111,18 @@ impl TaskSpec {
             kind: TaskKind::Process(ProcessSpec {
                 command,
                 cwd: cwd.into(),
+                env: None,
             }),
             timeout: None,
         }
+    }
+
+    /// Extra environment for this task, merged over the inherited
+    /// environment. Additive: an override on top of `process()`.
+    pub fn with_env(mut self, env: BTreeMap<String, String>) -> Self {
+        let TaskKind::Process(spec) = &mut self.kind;
+        spec.env = Some(env);
+        self
     }
 }
 
@@ -276,7 +289,7 @@ impl TaskManager {
         // the command runs, so the pipe carries one interleaved,
         // totally ordered stream. The group makes the whole tree
         // killable (Unix; Windows gets a child-only kill, documented).
-        let mut child = bash_command(&process.command, &process.cwd)
+        let mut child = bash_command(&process)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -417,11 +430,17 @@ impl Drop for TaskManager {
 }
 
 /// The `bash -c "exec 2>&1; …"` wrapper every process task runs under.
-fn bash_command(command: &str, cwd: &std::path::Path) -> Command {
+fn bash_command(spec: &ProcessSpec) -> Command {
     let mut cmd = Command::new("bash");
     cmd.arg("-c")
-        .arg(format!("exec 2>&1; {command}"))
-        .current_dir(cwd);
+        .arg(format!("exec 2>&1; {}", spec.command))
+        .current_dir(&spec.cwd);
+    if let Some(env) = &spec.env {
+        // Merge, not replace: `Command::envs` sets or overrides the
+        // listed keys and leaves the rest of the inherited
+        // environment alone.
+        cmd.envs(env);
+    }
     crate::process::own_group(&mut cmd);
     cmd
 }
@@ -547,6 +566,26 @@ mod tests {
     /// True when nothing in the process group `pid` is alive.
     fn group_dead(pid: u32) -> bool {
         unsafe { libc::kill(-(pid as i32), 0) != 0 }
+    }
+
+    #[test]
+    fn process_env_merges_over_the_inherited_environment() {
+        let (m, _dir) = manager();
+        let spec = TaskSpec::process(
+            "echo \"v=$HI_WIRE_TEST p=${PATH:+set}\"",
+            std::env::temp_dir(),
+        )
+        .with_env(BTreeMap::from([(
+            "HI_WIRE_TEST".to_string(),
+            "wire".to_string(),
+        )]));
+        let id = m.spawn(spec).unwrap();
+        until("the env echo", || state_of(&m, id).finished());
+        let out = m.output_tail(id, 4096).unwrap();
+        assert!(out.contains("v=wire"), "{out}");
+        // The merge is over the inherited environment, not a
+        // replacement of it — the child still has PATH.
+        assert!(out.contains("p=set"), "inherited env must survive: {out}");
     }
 
     #[test]

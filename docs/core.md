@@ -97,7 +97,11 @@ structural chunk-walk for the kitty renderer — AD-0010 — and
   rendering, `glob` filter, context), `find` (`globset`, .gitignore-aware),
   `ls` (sorted, `/` suffix for dirs, dotfiles).
 - **The four task tools (#5, AD-0019)**: `task_run` (spawn long-lived
-  work in its own process group, return the id at once), `task_status`
+  work in its own process group, return the id at once; optional `cwd`
+  resolves against the session cwd like every path tool and must exist,
+  optional `env` is a string→string object merged over the inherited
+  environment — both refusals are model-readable errors, #75),
+  `task_status`
   (point-in-time state), `task_output` (the tail so far), `task_cancel`
   (kill the whole group). They share the [`TaskManager`](#tasksrs--work-that-outlives-a-turn-5)
   handle; `coding` and `all` bundles get them when the CLI passes the
