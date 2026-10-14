@@ -1208,3 +1208,30 @@ why the header of a `/new` session can differ in provider from its
 predecessor and that is honest. An optional argument names the
 session (`/new scratch`); bare, and words-lead naming (#89) takes
 over at listing time.
+
+---
+
+## AD-0035 — jump-to-char is a pending mode that eats one key; page-scroll waits for a viewport (2026-10-16)
+
+#67's two halves split on feasibility. The composer half ships:
+`Ctrl+]` arms a forward jump, `Ctrl+Alt+]` a backward one (pi's
+chords, free in hi), and the pending mode eats exactly one key — a
+printable character is the target, the jump chord itself cancels,
+Enter cancels *without submitting* (pi lets Enter fall through; hi's
+Enter commits, so a stray chord pair must not send a half-written
+draft), everything else falls through with the mode consumed. The
+search rule mirrors pi exactly: forward scans strictly after the
+insertion cursor (`next_boundary` then `find`), so repeated jumps
+step through occurrences and die at none; backward `rfind` counts
+the character immediately behind the cursor. The fns are pure in
+`editor.rs`; only `jump_pending: Option<Jump>` lives on the App.
+Legacy terminals send Ctrl+] as the ESC byte — the chord lives under
+the kitty protocol, pi's same trade.
+
+The transcript half could not ship honestly: hi is pure inline mode
+(AD-0015/16), the terminal owns the scrollback, and no in-process
+viewport exists to page — #67's "scroller steps line-wise" described
+the terminal emulator. Split to #100, where the chords get re-ruled
+(#67's Ctrl+V is paste here); `Ctrl+Alt+]` folds into `Ctrl+]'s`
+/keybinds row by the Cmd+V precedent (AD-0033), and the drift scan
+learned to see `']'`.

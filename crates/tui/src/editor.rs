@@ -100,6 +100,30 @@ pub fn line_end(s: &str, pos: usize) -> usize {
 }
 
 /// The range a forward word-delete removes at `pos`.
+/// Direction of a pending jump-to-char (#67): `Ctrl+]` arms a
+/// forward jump, `Ctrl+Alt+]` a backward one.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Jump {
+    Forward,
+    Backward,
+}
+
+/// Byte offset of the first `target` strictly after `pos` — an
+/// occurrence the cursor has not reached yet, so repeated jumps
+/// step forward and die at none (pi's jump-to-char rule). The
+/// search crosses newlines: the composer is one flat string.
+pub fn jump_forward(s: &str, pos: usize, target: char) -> Option<usize> {
+    let from = next_boundary(s, pos.min(s.len()))?;
+    s[from..].find(target).map(|i| from + i)
+}
+
+/// Byte offset of the last `target` before `pos` — the character
+/// immediately behind the cursor counts, so repeated jumps step
+/// backward and die at none.
+pub fn jump_backward(s: &str, pos: usize, target: char) -> Option<usize> {
+    s[..pos.min(s.len())].rfind(target)
+}
+
 pub fn word_delete_range_fwd(s: &str, pos: usize) -> std::ops::Range<usize> {
     pos..word_right(s, pos)
 }
@@ -210,5 +234,43 @@ mod tests {
         let mut s = String::from("中b");
         assert_eq!(delete_range(&mut s, 0..3), 0);
         assert_eq!(s, "b");
+    }
+    #[test]
+    fn jump_forward_steps_strictly_after_the_cursor_and_dies_at_none() {
+        // "abca", cursor 0: the first jump lands on the second `a`,
+        // because a jump takes you to an occurrence you have not
+        // already reached — pi's stepping rule (#67).
+        assert_eq!(jump_forward("abca", 0, 'a'), Some(3));
+        // Standing on that occurrence, the next press finds none.
+        assert_eq!(jump_forward("abca", 3, 'a'), None);
+        // A miss in the middle steps to the next one.
+        assert_eq!(jump_forward("abca", 1, 'a'), Some(3));
+        // At the end there is nothing after the cursor.
+        assert_eq!(jump_forward("abc", 3, 'a'), None);
+        // Multi-byte targets land on boundaries: "éxé" is
+        // é(0..2) x(2..3) é(3..5).
+        assert_eq!(jump_forward("éxé", 0, 'é'), Some(3));
+        assert_eq!(jump_forward("éxé", 3, 'é'), None);
+        // The search crosses newlines — the composer is one flat
+        // string and the jump follows it, pi crossing lines the
+        // same way.
+        assert_eq!(jump_forward("one\ntwo", 0, 't'), Some(4));
+        assert_eq!(jump_forward("one\ntwo", 0, '\n'), Some(3));
+    }
+
+    #[test]
+    fn jump_backward_counts_the_character_behind_the_cursor_and_dies_at_none() {
+        // From the end, the nearest `a` behind is the last one.
+        assert_eq!(jump_backward("abca", 4, 'a'), Some(3));
+        // Standing at an occurrence's start, the next press finds
+        // the one before it.
+        assert_eq!(jump_backward("abca", 3, 'a'), Some(0));
+        // At the very start there is nothing behind.
+        assert_eq!(jump_backward("abca", 0, 'a'), None);
+        // Multi-byte: "éxé" is é(0..2) x(2..3) é(3..5).
+        assert_eq!(jump_backward("éxé", 5, 'é'), Some(3));
+        assert_eq!(jump_backward("éxé", 3, 'é'), Some(0));
+        // Newlines cross backward the same as forward.
+        assert_eq!(jump_backward("one\ntwo", 7, 'n'), Some(1));
     }
 }
