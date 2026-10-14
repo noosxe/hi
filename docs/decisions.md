@@ -1292,3 +1292,15 @@ catch-all, `patterns: ["*"]`. SchemaStore's `dependabot-2.0.json`
 than the runtime here — it accepted the selector-less group — so the
 group shape follows the docs' examples, with the schema check as the
 second gate, not the first.
+
+**AD-0039 — auto-print on a redirected stream (2026-10-18, #19):**
+the TUI opens only when BOTH stdin and stdout are a terminal; any
+redirect with no explicit mode (`--print`/`--mode`) auto-selects text
+print mode, pi-parity. Rulings: (a) either stream counts — a TUI
+drawn into a redirected stdout is garbage, and crossterm cannot drive
+a piped stdin; (b) a redirected stream with no prompt anywhere still
+fails with the honest `hi: no prompt …` — never a TUI attempt on a
+pipe; (c) `--mode json` stays explicit — silent auto-JSON on a pipe
+would surprise. Explicit flags always win; the gate is a gap-filler,
+not a takeover — `std::io::IsTerminal` only, zero new deps, core
+untouched.

@@ -441,6 +441,17 @@ fn complete_utf8(carry: &mut Vec<u8>) -> String {
 }
 
 #[test]
+fn a_terminal_still_opens_the_tui_without_flags() {
+    // #19 is a gap-filler, not a takeover: with both streams a real
+    // terminal and no mode flag, the TUI opens exactly as before. A
+    // wrongly auto-printing binary would emit one reply line and exit
+    // — this frame would never render.
+    let mut tui = Tui::spawn(&["--mock"]);
+    tui.sees("\u{2500}");
+    assert!(tui.exits_cleanly(Duration::from_secs(20)));
+}
+
+#[test]
 fn the_tui_boots_takes_keys_streams_and_exits_cleanly() {
     let mut tui = Tui::spawn(&["--mock"]);
     // The first rendered frame gates typing: until raw mode is on,

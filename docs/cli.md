@@ -21,7 +21,7 @@ The headless branch links no `hi-tui` code paths at runtime.
 | `-n, --name <NAME>` | Name the new session (fresh start or fork); shown in the picker |
 | `--print`, `-p` | Run one prompt headlessly, print the final reply, exit |
 | `--mode <MODE>` | Headless output mode: `json` streams JSONL records instead of the final text (only `json` exists) |
-| `PROMPT` | Positional prompt; requires `--print` or `--mode` (piped stdin is prepended) |
+| `PROMPT` | Positional prompt; requires `--print`, `--mode`, or a redirected stream (#19) — piped stdin is prepended |
 | `--no-session` | Run without loading or saving a session file |
 
 The four selection flags are mutually exclusive (pi's rules), and none of
@@ -99,7 +99,14 @@ whenever the `/model` picker rebuilds it.
 
 ## Headless mode (`--print`)
 
-`--print` runs exactly one turn and exits — the scripting interface:
+`--print` runs exactly one turn and exits — the scripting interface.
+On a redirected stream you do not even need the flag (#19): when
+stdin or stdout is not a terminal and no mode is selected, text print
+mode runs automatically — `git diff | hi "review this"` and
+`hi "note" > log.md` both just work. Explicit `--print`/`--mode`
+always win; only both streams being a terminal opens the TUI. A
+redirected stream with no prompt anywhere still fails honestly with
+`hi: no prompt …` — the TUI is never attempted on a pipe.
 
 ```sh
 hi -p "Summarize this repository"       # positional prompt

@@ -20,14 +20,14 @@ later.
 - `/model` picker in the TUI: arrows to move, Enter switches this session, Ctrl-S saves the default
 - Slash commands with completion: type `/` to see the menu, Tab completes, Enter runs
 - Session transcripts persist per project (JSONL, append-only); `hi --continue` resumes the newest, `hi -r` opens a picker, `hi --session <id>` and `hi --fork <id>` select and branch deterministically, `/new` starts a fresh session mid-conversation — headless too
-- Headless one-shot mode: `hi -p "prompt"` (or `git diff | hi -p "review"`) prints the final reply and exits; `--mode json` streams the whole run as JSONL records instead — session header, token deltas, transcript messages, usage, one `done`/`failed` terminal
+- Headless one-shot mode: `hi -p "prompt"` prints the final reply and exits — and on a redirected stream the flag is optional (`git diff | hi "review"` auto-runs print mode); `--mode json` streams the whole run as JSONL records instead — session header, token deltas, transcript messages, usage, one `done`/`failed` terminal
 - Honest wire identity: `hi/<version> (<os>; <arch>)` on every request; prompt-cache affinity via the session id so multi-turn runs hit server-side caches; telemetry beyond that is strictly opt-in
 - `read` attaches image files (png/jpeg/webp/gif) — fail-open like pi: on unless the `images` master switch is off or a model sets `vision: false`; resized/transcoded to a universal budget first, honest metadata notes otherwise
 - on kitty-protocol terminals (kitty, Ghostty, WezTerm, Warp) those images render as real graphics in the transcript; everywhere else the text note stays
 - Ctrl-V pastes from the clipboard: an image is staged at a temp file and its path lands in the input as plain text — nothing sends until Enter, and the image enters the conversation only when the model reads it
 - Built-in agent tools: the model can read, search, list, write, edit, and run commands — the `coding` bundle by default, `--tools read-only|none|all` to change; the `all` bundle adds tracked background tasks (`task_run`/`task_status`/`task_output`/`task_cancel`): the model spawns long jobs and polls without blocking a turn
 - A pi-style composer: `Ctrl-K`/`Ctrl-U`/`Ctrl-W` kill, `Ctrl-Y` yanks the newest kill back, `Alt-Y` cycles older kills; undo/redo (`Ctrl-Z`/`Alt-Z`); jump-to-char (`Ctrl+]` forward, `Ctrl+Alt+]` backward) — `/keybinds` prints the whole table on demand
-- 418 tests, including a fake HTTP server and a pty harness that drive the real binary
+- 423 tests, including a fake HTTP server and a pty harness that drive the real binary
 
 Not yet: JSONL event output for scripts, subagents, extensions.
 The selection and settings layers are built so each slots in without
@@ -38,7 +38,7 @@ rework.
 ```sh
 nix develop          # Rust toolchain + cargo (or any Rust 1.85+, edition 2024)
 cargo run            # builds the `hi` binary; `hi --mock` needs no config
-cargo test           # 418 tests; no network needed
+cargo test           # 423 tests; no network needed
 ```
 
 
