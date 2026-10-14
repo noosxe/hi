@@ -26,6 +26,9 @@ const HISTORY_CAP: usize = 100;
 /// Undo ceiling (#65): snapshot-per-unit of a few-KB composer is a
 /// few hundred KB worst case — bounded, like the history ring.
 const UNDO_CAP: usize = 100;
+/// Kills the ring remembers (#64) — emacs keeps 60; sixteen is
+/// plenty for moving paragraphs around a prompt.
+const KILL_CAP: usize = 16;
 
 /// One undo unit: the composer state before the edit, plus the
 /// post-cursor a continuing plain insert must land on to merge into
@@ -164,6 +167,16 @@ pub struct App {
     /// navigation, not edits.
     undo: Vec<UndoStep>,
     redo: Vec<(String, usize)>,
+    /// The kill ring (#64): newest last, capped at [`KILL_CAP`].
+    /// Kills feed it, Ctrl+Y yanks the head, Alt+Y cycles.
+    kill_ring: Vec<String>,
+    /// The range the newest kill removed — a further kill joins that
+    /// entry only while it abuts (the insert-run rule, again).
+    last_kill: Option<(usize, usize)>,
+    /// Where the in-flight yank sits and which ring entry it holds:
+    /// `(start, end, index from the head)`. Alt+Y swaps it; any other
+    /// key drops it.
+    yank_site: Option<(usize, usize, usize)>,
     /// The conversation transcript — finalized messages only.
     pub messages: Vec<Message>,
     /// The backend producing assistant turns. A trait object (`dyn`),
@@ -419,6 +432,9 @@ impl App {
             tick: 0,
             queued: None,
             turn: None,
+            kill_ring: Vec::new(),
+            last_kill: None,
+            yank_site: None,
             session_picker: None,
             clipboard_rx: None,
             note: None,
@@ -441,6 +457,11 @@ impl App {
         // The composer note is transient by definition: any keypress
         // supersedes it.
         self.note = None;
+        // So is an in-flight yank (#64): Alt+Y only cycles directly
+        // after Ctrl+Y or another Alt+Y. The yank arms set it fresh —
+        // it's captured first because the Alt+Y arm is the one key
+        // that still needs it.
+        let yank = self.yank_site.take();
         // Ctrl-C is the line-killer, not the app-killer (#91): a
         // non-empty draft dies first (cursor home), an empty composer
         // is the user asking to leave. Menus own no text, so from a
@@ -529,26 +550,25 @@ impl App {
                 }
                 // Ctrl+D and Delete forward-delete the same unit.
                 'd' => {
-                    self.apply_edit(|input, cursor| {
-                        editor::next_boundary(input, cursor)
-                            .map_or(cursor, |next| editor::delete_range(input, cursor..next))
-                    });
+                    if let Some(next) = editor::next_boundary(&self.input, self.cursor) {
+                        self.kill_range(self.cursor..next);
+                    }
                 }
                 // Line-scoped with the A/E family (AD-0018).
                 'k' => {
-                    self.apply_edit(|input, cursor| {
-                        editor::delete_range(input, cursor..editor::line_end(input, cursor))
-                    });
+                    let end = editor::line_end(&self.input, self.cursor);
+                    self.kill_range(self.cursor..end);
                 }
                 'u' => {
-                    self.apply_edit(|input, cursor| {
-                        editor::delete_range(input, editor::line_start(input, cursor)..cursor)
-                    });
+                    let start = editor::line_start(&self.input, self.cursor);
+                    self.kill_range(start..self.cursor);
                 }
                 'w' => {
                     let range = editor::word_delete_range_back(&self.input, self.cursor);
-                    self.apply_edit(|input, _| editor::delete_range(input, range));
+                    self.kill_range(range);
                 }
+                // Ctrl+Y yanks the newest kill back (#64).
+                'y' => self.yank(),
                 // Ctrl+Z reverts the newest composer mutation (#65);
                 // the run of plain inserts counts as one.
                 'z' => self.undo_edit(),
@@ -562,8 +582,12 @@ impl App {
             },
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
                 let range = editor::word_delete_range_fwd(&self.input, self.cursor);
-                self.apply_edit(|input, _| editor::delete_range(input, range));
+                self.kill_range(range);
                 self.sync_completion();
+            }
+            // Alt+Y cycles the in-flight yank through older kills (#64).
+            KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.yank_pop(yank);
             }
             // Alt+Z reapplies what Ctrl+Z reverted (#65) — emacs-style
             // redo, since shift+ctrl+z is indistinguishable on legacy
@@ -633,7 +657,7 @@ impl App {
                     // The same unit the move lands on, so
                     // Alt+Backspace composes with Alt+Left.
                     let range = editor::word_delete_range_back(&self.input, self.cursor);
-                    self.apply_edit(|input, _| editor::delete_range(input, range));
+                    self.kill_range(range);
                 } else {
                     self.apply_edit(|input, cursor| {
                         editor::prev_boundary(input, cursor)
@@ -645,7 +669,7 @@ impl App {
             KeyCode::Delete => {
                 if key.modifiers.contains(KeyModifiers::ALT) {
                     let range = editor::word_delete_range_fwd(&self.input, self.cursor);
-                    self.apply_edit(|input, _| editor::delete_range(input, range));
+                    self.kill_range(range);
                 } else {
                     self.apply_edit(|input, cursor| {
                         editor::next_boundary(input, cursor)
@@ -1117,9 +1141,84 @@ impl App {
     /// the input and the cursor, returns the new cursor.
     fn apply_edit(&mut self, edit: impl FnOnce(&mut String, usize) -> usize) {
         self.snapshot();
+        // Any non-kill edit ends a kill run; kills re-record theirs
+        // through `record_kill` after this clears.
+        self.last_kill = None;
         let mut input = std::mem::take(&mut self.input);
         self.cursor = edit(&mut input, self.cursor);
         self.input = input;
+    }
+
+    /// Remove `range` as a kill (#64): the text joins the ring —
+    /// merging into the previous entry while the kills abut — and
+    /// the removal is one undo unit like any edit.
+    fn kill_range(&mut self, range: std::ops::Range<usize>) {
+        if range.start >= range.end {
+            return;
+        }
+        let prev = self.last_kill;
+        let text = self.input[range.clone()].to_string();
+        let len = text.len();
+        let start = range.start;
+        self.apply_edit(move |input, _| {
+            input.replace_range(range, "");
+            start
+        });
+        if let Some((prev_start, prev_end)) = prev
+            && let Some(entry) = self.kill_ring.last_mut()
+        {
+            if prev_end == start {
+                // Forward-contiguous: the run reads on.
+                entry.push_str(&text);
+                self.last_kill = Some((prev_start, prev_end + len));
+                return;
+            }
+            if prev_start == start + len {
+                // Backward-contiguous: killed text lands before.
+                *entry = format!("{text}{entry}");
+                self.last_kill = Some((prev_start - len, prev_end));
+                return;
+            }
+        }
+        self.kill_ring.push(text);
+        if self.kill_ring.len() > KILL_CAP {
+            self.kill_ring.remove(0);
+        }
+        self.last_kill = Some((start, start + len));
+    }
+
+    /// Ctrl+Y: paste the newest kill at the cursor (#64). Silent when
+    /// the ring is empty.
+    fn yank(&mut self) {
+        let Some(text) = self.kill_ring.last().cloned() else {
+            return;
+        };
+        let start = self.cursor;
+        self.apply_edit(move |input, cursor| {
+            input.insert_str(cursor, &text);
+            cursor + text.len()
+        });
+        self.yank_site = Some((start, self.cursor, 0));
+    }
+
+    /// Alt+Y: swap the in-flight yank for the previous ring entry,
+    /// wrapping past the oldest (#64). Only a yank can be popped —
+    /// `site` is the yank captured before this keypress, if any.
+    fn yank_pop(&mut self, site: Option<(usize, usize, usize)>) {
+        let Some((start, end, idx)) = site else {
+            return;
+        };
+        if self.kill_ring.is_empty() {
+            return;
+        }
+        let next = (idx + 1) % self.kill_ring.len();
+        let text = self.kill_ring[self.kill_ring.len() - 1 - next].clone();
+        let len = text.len();
+        self.apply_edit(move |input, _| {
+            input.replace_range(start..end, &text);
+            start + len
+        });
+        self.yank_site = Some((start, start + len, next));
     }
 
     /// A plain character insert, coalescing into an open run —
@@ -3158,6 +3257,79 @@ mod tests {
         app.handle_key(key(KeyCode::Char('a')));
         app.handle_key(key(KeyCode::Char('r')));
         assert_eq!(app.input, "hizar");
+    }
+
+    #[test]
+    fn kills_feed_the_ring_and_ctrl_y_yanks_the_head() {
+        let mut app = test_app();
+        for c in "hello world".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        // Consecutive kills accumulate as one entry, in reading order.
+        app.handle_key(ctrl(KeyCode::Char('w')));
+        assert_eq!(app.input, "hello ");
+        app.handle_key(ctrl(KeyCode::Char('w')));
+        assert_eq!(app.input, "");
+        assert_eq!(app.kill_ring, ["hello world"]);
+        app.handle_key(ctrl(KeyCode::Char('y')));
+        assert_eq!(app.input, "hello world");
+        // The yank is an undo unit of its own.
+        app.handle_key(ctrl(KeyCode::Char('z')));
+        assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn alt_y_cycles_back_through_earlier_kills() {
+        let mut app = test_app();
+        for c in "alpha".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(ctrl(KeyCode::Char('u')));
+        for c in "beta".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(ctrl(KeyCode::Char('u')));
+        // Typing between the kills kept them separate entries.
+        assert_eq!(app.kill_ring, ["alpha", "beta"]);
+        app.handle_key(ctrl(KeyCode::Char('y')));
+        assert_eq!(app.input, "beta");
+        // Alt+Y swaps in the previous kill; cycling past the oldest
+        // wraps to the newest.
+        app.handle_key(alt(KeyCode::Char('y')));
+        assert_eq!(app.input, "alpha");
+        app.handle_key(alt(KeyCode::Char('y')));
+        assert_eq!(app.input, "beta");
+    }
+
+    #[test]
+    fn yank_and_yank_pop_stay_silent_when_there_is_nothing_to_do() {
+        let mut app = test_app();
+        app.handle_key(ctrl(KeyCode::Char('y')));
+        assert_eq!(app.input, "");
+        for c in "one".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        app.handle_key(ctrl(KeyCode::Char('u')));
+        // Alt+Y with no yank in flight does nothing.
+        app.handle_key(alt(KeyCode::Char('y')));
+        assert_eq!(app.input, "");
+        // A lone ring entry cycles to itself.
+        app.handle_key(ctrl(KeyCode::Char('y')));
+        app.handle_key(alt(KeyCode::Char('y')));
+        assert_eq!(app.input, "one");
+    }
+
+    #[test]
+    fn the_kill_ring_is_bounded() {
+        let mut app = test_app();
+        for c in 'a'..='q' {
+            app.handle_key(key(KeyCode::Char(c)));
+            app.handle_key(ctrl(KeyCode::Char('u')));
+        }
+        assert_eq!(app.kill_ring.len(), 16);
+        // The newest kill survived; the oldest fell off the far end.
+        app.handle_key(ctrl(KeyCode::Char('y')));
+        assert_eq!(app.input, "q");
     }
 
     #[test]
