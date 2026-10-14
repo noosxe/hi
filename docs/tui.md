@@ -317,6 +317,7 @@ jump at `-`, `/`, `.`.
 | Delete, Ctrl+D | remove the character at the cursor |
 | Ctrl+C | clear the draft (cursor home); quit when it's already empty |
 | Ctrl+Z / Alt+Z | undo / redo the last composer edit (#65) — insert runs coalesce into one step, kills and pastes are their own; 100-unit ceiling |
+| Ctrl+Y / Alt+Y | yank the newest kill / cycle it to older kills (#64) — kills (Ctrl+K/U/W/D, Alt+D, Alt+Backspace/Delete) feed a 16-entry ring; consecutive kills merge into one entry |
 | Ctrl+W, Alt+Backspace | remove the word before the cursor |
 | Alt+D, Alt+Delete | remove the word after the cursor |
 | Ctrl+U / Ctrl+K | remove to line start / line end (AD-0018) |

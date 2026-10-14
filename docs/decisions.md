@@ -1135,3 +1135,27 @@ undo never drags navigation with it. Redo is the states undo popped;
 a fresh edit clears the future, and redo pushes its state back as a
 closed unit — snapshot must not clear the stack it just popped from,
 or one Alt+Z strands the rest.
+
+---
+
+## AD-0032 — the kill ring is the composer's memory of kills (2026-10-16)
+
+#64: #52 shipped the kill set, but every kill was a dead end — emacs
+answers with the kill ring, so hi grows one: killed text accumulates
+in a ring capped at 16 (`KILL_CAP`; emacs keeps 60, sixteen is
+plenty for moving paragraphs around a prompt), **Ctrl+Y** yanks the
+newest kill, **Alt+Y** cycles the in-flight yank to older entries,
+wrapping past the oldest. Clipboard stays **Ctrl+V** — Ctrl+Y was
+free. All seven kill chords (Ctrl+K/U/W/D, Alt+D, Alt+Backspace,
+Alt+Delete) feed the ring through one `kill_range` choke; plain
+Backspace/Delete are deletions, not kills. **Consecutive kills
+coalesce by the #65 rule** — a kill joins the previous entry only
+while its range abuts the one before (forward appends, backward
+prepends, reading order preserved); any non-kill edit (`apply_edit`,
+`apply_insert`) ends the run, so kills separated by typing stay
+separate. No region semantics — hi has no mark; only chords kill.
+The ring rides AD-0027/0031 seams: entries are plain strings, yank
+and yank-pop are their own undo units via `apply_edit`, and the
+in-flight yank site (`yank_site`) dies with any other keypress —
+captured before dispatch, because the Alt+Y arm is the one key that
+still needs it.
