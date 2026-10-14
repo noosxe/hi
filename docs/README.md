@@ -13,7 +13,7 @@ docs need fixing.
 | [architecture.md](architecture.md) | Workspace layout, crate rules, dependency direction, threading model, design principles, current status |
 | [turn-lifecycle.md](turn-lifecycle.md) | End-to-end data flow of one turn: input → provider thread → events → pump → finalize; cancellation; queueing |
 | [core.md](core.md) | `hi-core` reference: every module, type, and contract (`Provider`, `Event`, `Message`, config, selection, settings, thinking, system prompt, mock, test support) |
-| [tui.md](tui.md) | `hi-tui` reference: `App` state machine, turn handling, slash commands, completion, `/model` picker, status bar, rendering geometry, terminal lifecycle |
+| [tui.md](tui.md) | `hi-tui` reference: `App` state machine, turn handling, slash commands, completion, `/model` picker, the keybinds table, editor motions, status bar, rendering geometry, terminal lifecycle |
 | [cli.md](cli.md) | The `hi` binary: flags, startup resolution flow, exit codes |
 | [configuration.md](configuration.md) | `models.json` + `settings.json` schemas, credential interpolation, model discovery policy, system-prompt file chain |
 | [testing.md](testing.md) | How to run tests, `FakeApi`, per-module test inventory, test conventions |
@@ -37,6 +37,6 @@ docs need fixing.
 - One wire protocol: OpenAI-compatible chat completions, streamed over SSE.
 - No async runtime anywhere: blocking I/O on dedicated threads, `mpsc` events,
   cancellation by dropping the `Receiver`.
-- Not implemented yet (by design): tools, multi-turn agent loop, session
-  persistence, extensions. See [decisions.md](decisions.md) for what comes
+- Not implemented yet (by design): JSONL event output for scripts, subagents,
+  extensions. See [decisions.md](decisions.md) for what comes
   next and why.
