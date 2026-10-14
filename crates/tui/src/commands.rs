@@ -28,6 +28,10 @@ pub const COMMANDS: &[Command] = &[
         description: "name this session; bare /name shows the current name",
     },
     Command {
+        name: "new",
+        description: "start a new session for this directory",
+    },
+    Command {
         name: "quit",
         description: "alias for /exit",
     },

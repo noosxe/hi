@@ -1469,6 +1469,7 @@ impl App {
                 .messages
                 .push(Message::System(crate::keybinds::listing())),
             "name" => self.command_name(args),
+            "new" => self.command_new(args),
             other => self
                 .messages
                 .push(Message::System(format!("unknown command: /{other}"))),
@@ -1823,22 +1824,27 @@ impl App {
             }
         };
         let count = loaded.messages.len();
-        let mut messages = loaded.messages;
-        messages.insert(
-            0,
-            Message::System(format!("resumed {count} messages from {}", path.display())),
+        self.adopt(
+            session,
+            loaded,
+            format!("resumed {count} messages from {}", path.display()),
         );
+    }
+
+    /// The second half of every session switch: adopt the transcript,
+    /// replay the bill (#85), reseed the ring (#87), re-key the prompt
+    /// cache. `/new` and `/resume` walk the same reset so nothing
+    /// session-scoped leaks across the seam (AD-0034).
+    fn adopt(&mut self, session: Session, loaded: hi_core::session::LoadedSession, intro: String) {
+        let mut messages = loaded.messages;
+        messages.insert(0, Message::System(intro));
         self.messages = messages;
-        // The bill replays with the transcript (#85): merged recorded
-        // rounds, the last recorded prompt the context fact.
         self.usage = loaded.usage;
         self.usage_last_prompt = loaded.usage_last_prompt;
-        // And so does the ring (#87): the switched-to session's
-        // prompts are what ↑ walks now.
         self.history = seed_history(&self.messages);
         self.history_pos = None;
         self.history_draft = None;
-        // Cache routing follows the session: the new id becomes the
+        // Cache routing follows the session: the new id adopts the
         // prompt-cache key before any further turn is spawned.
         let cache_key = session.id().to_string();
         self.session = Some(session);
@@ -1848,9 +1854,53 @@ impl App {
         self.queued = None;
     }
 
+    /// `/new [name]`: a fresh session for the cwd we are in. Creation
+    /// rides the startup seam (`Session::start`), the walk to it the
+    /// resume seam's reset (`adopt`); the model and thinking level
+    /// carry because they are status, not session state (AD-0034).
+    fn command_new(&mut self, args: &str) {
+        if self.turn.is_some() {
+            self.messages.push(Message::System(
+                "cannot switch sessions while a turn is running — esc first".into(),
+            ));
+            return;
+        }
+        let trimmed = args.trim();
+        let name = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
+        let (provider, model) = (self.status.provider.clone(), self.status.model.clone());
+        let thinking = self.thinking.as_ref().map(|t| t.name().to_string());
+        let started = match self.session_root.as_deref() {
+            Some(root) => Session::start_in(
+                root,
+                &std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+                &provider,
+                &model,
+                thinking.as_deref(),
+                name.as_deref(),
+            ),
+            None => Session::start(&provider, &model, thinking.as_deref(), name.as_deref()),
+        };
+        let session = match started {
+            Ok(session) => session,
+            Err(err) => {
+                self.messages.push(Message::Error(err));
+                return;
+            }
+        };
+        let path = session.path().to_path_buf();
+        match hi_core::session::load(&path) {
+            Ok(loaded) => self.adopt(session, loaded, format!("new session {}", path.display())),
+            Err(err) => self.messages.push(Message::Error(err)),
+        }
+    }
+
     /// What the input's right-side title shows while work is in
     /// flight; `None` renders a plain rule. New activity states
-    /// (context compaction, tool runs) become arms here.
+    /// (context compaction, tool runs) adopt arms here.
     pub fn activity_label(&self) -> Option<String> {
         let turn = self.turn.as_ref()?;
         let spinner = SPINNER[usize::from(self.tick) % SPINNER.len()];
@@ -1893,7 +1943,7 @@ impl App {
     }
 
     /// Apply one clipboard outcome: a staged path or text joins the
-    /// input; failures become the transient composer note. A failed
+    /// input; failures adopt the transient composer note. A failed
     /// paste never touches the transcript or the session.
     pub fn handle_clipboard_outcome(&mut self, outcome: crate::clipboard::ClipboardOutcome) {
         use crate::clipboard::ClipboardOutcome;
@@ -1937,7 +1987,7 @@ impl App {
                 self.clipboard_rx = Some(rx);
             }
         }
-        // Task completions next (#5): each becomes a dim System note in
+        // Task completions next (#5): each adopts a dim System note in
         // the transcript and rides the next turn to the model. The
         // append range starts BEFORE the drain so finalize persists the
         // notes; an idle session has no finalize coming, so the notes
@@ -2316,6 +2366,50 @@ mod tests {
         };
         let app = app_with(init);
         assert_eq!(app.history, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    #[test]
+    fn a_new_command_starts_a_fresh_session_for_this_directory() {
+        // /new creates a session file whose header names the cwd we
+        // are in, then walks the same reset resume walks — fresh
+        // transcript, fresh bill, fresh ring — under a new id.
+        let root = std::env::temp_dir().join(format!("hi-new-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = test_app();
+        app.session_root = Some(root.clone());
+        let cwd = std::env::current_dir().unwrap();
+        let first = hi_core::Session::start_in(&root, &cwd, "mock", "mock", None, None).unwrap();
+        app.switch_session(first.path());
+        // A live bill and transcript from the session we are leaving.
+        app.usage = Usage {
+            prompt_tokens: 800,
+            completion_tokens: 60,
+            cached_tokens: None,
+            reasoning_tokens: None,
+        };
+        app.messages
+            .push(Message::User("work from the old session".into()));
+
+        let old_id = app.session.as_ref().unwrap().id().to_string();
+        app.run_command("new", "");
+
+        let note = match app.messages.as_slice() {
+            [Message::System(note)] => note.clone(),
+            other => panic!("expected one fresh-system note, got {other:?}"),
+        };
+        assert!(note.starts_with("new session "), "{note}");
+        assert_eq!(app.usage.completion_tokens, 0, "the bill resets");
+        assert!(app.history.is_empty(), "the ring resets");
+        let new_id = app.session.as_ref().unwrap().id().to_string();
+        assert_ne!(new_id, old_id, "a new session id took over");
+        // The new file exists, headed by the cwd we are in.
+        let loaded = hi_core::session::load(app.session.as_ref().unwrap().path()).unwrap();
+        assert_eq!(loaded.header.cwd, cwd.to_string_lossy());
+        // An optional argument names the session it creates.
+        app.run_command("new", "scratch");
+        let second = hi_core::session::load(app.session.as_ref().unwrap().path()).unwrap();
+        assert_eq!(second.header.name.as_deref(), Some("scratch"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2768,7 +2862,7 @@ mod tests {
     }
 
     #[test]
-    fn finished_background_tasks_become_system_notes_exactly_once() {
+    fn finished_background_tasks_adopt_system_notes_exactly_once() {
         let mut app = test_app();
         let tasks = hi_core::tasks::TaskManager::new(std::env::temp_dir().join("hi-app-tasks"));
         app.tasks = Some(tasks.clone());

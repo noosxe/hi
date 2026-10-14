@@ -1190,3 +1190,21 @@ the mapping is a pure function so a test pins mac and word forms on
 any host. Ruled mid-review on #97: the user asked for mac icons; the
 named-key glyphs ride along because a half-icon column reads worse
 than either extreme.
+
+---
+
+## AD-0034 — /new rides the startup seam out and the resume seam in (2026-10-16)
+
+#98: `/resume` walks back, but starting over meant quitting and
+relaunching. `/new [name]` creates a session file through the same
+`Session::start` startup path — header naming the cwd hi runs in —
+then walks to it through `adopt`, the reset half of resume factored
+out so `/resume` and `/new` cannot drift: fresh transcript, bill
+replay, ring seed, cache key, provider rebuild, queue clear.
+Mid-turn it refuses with the picker's exact wording — the same
+two-sessions'-events-interleaving hazard. The model and thinking
+level carry across: they are status, not session state, which is
+why the header of a `/new` session can differ in provider from its
+predecessor and that is honest. An optional argument names the
+session (`/new scratch`); bare, and words-lead naming (#89) takes
+over at listing time.
