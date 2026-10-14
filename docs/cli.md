@@ -20,7 +20,8 @@ The headless branch links no `hi-tui` code paths at runtime.
 | `--fork <PATH\|ID>` | Copy a session into a new file for this directory (fresh id, `forkedFrom` pointer) and open the copy; the original is never written |
 | `-n, --name <NAME>` | Name the new session (fresh start or fork); shown in the picker |
 | `--print`, `-p` | Run one prompt headlessly, print the final reply, exit |
-| `PROMPT` | Positional prompt; requires `--print` (piped stdin is prepended) |
+| `--mode <MODE>` | Headless output mode: `json` streams JSONL records instead of the final text (only `json` exists) |
+| `PROMPT` | Positional prompt; requires `--print` or `--mode` (piped stdin is prepended) |
 | `--no-session` | Run without loading or saving a session file |
 
 The four selection flags are mutually exclusive (pi's rules), and none of
@@ -126,6 +127,31 @@ hi -p --no-session "throwaway"          # don't touch the session dir
   and session files as the TUI (see [core.md](core.md)).
 - `--tools` composes: `hi -p --tools read-only "…"` runs headless with
   only the observation tools; `--tools none` restores a pure-text model.
+
+### JSON events (`--mode json`)
+
+`--mode json` runs the same turn but streams every event as one JSONL
+record on stdout — strict framing: one object per LF-terminated line,
+stdout carries records only, diagnostics stay on stderr. The terminal
+record is `done` on success or `failed` on failure (exit FAILURE
+either way — the `-p` empty-stdout rule is text-mode only).
+
+| Record | Payload | Meaning |
+|---|---|---|
+| `session` | header fields (`version`, `id`, `cwd`, `provider`, `model`) | First record; only when a session file is open (`--no-session` starts at the user message) |
+| `message` | the finalized `Message` | Session-file JSON shapes: `{"User": …}`, `{"Assistant": …}`, `{"ToolCall": …}`, `{"ToolResult": …}`, `{"Error": …}` — a json run and its transcript agree byte for byte |
+| `token` | `delta` | A streaming fragment; concatenating every `token` reproduces the reply exactly |
+| `usage` | camelCase usage fields | The round's bill, once reported (AD-0026) |
+| `done` | `text` | Success — the last record |
+| `failed` | `reason` | Failure — the last record, after the partial output and the error line |
+
+```sh
+hi --mode json "List files" | jq -c 'select(.type == "done")'
+```
+
+The vocabulary is hi's own, not pi's (`agent_start`/`message_update`
+framing and `contentIndex` bookkeeping do not exist here) — one tag
+per thing the agent loop actually does.
 ## Where new startup behavior goes
 
 - New flags → the `Cli` struct (clap derive handles help).

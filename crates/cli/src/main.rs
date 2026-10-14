@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use hi_core::{
     ImageGate, Message, MockProvider, ModelsConfig, OpenAiCompatProvider, Provider, Session,
@@ -87,8 +87,11 @@ struct Cli {
     #[arg(short = 'p', long)]
     print: bool,
 
-    /// The prompt for --print (piped stdin is prepended)
-    #[arg(requires = "print")]
+    /// Headless output mode: json streams JSONL records (#18)
+    #[arg(long, value_enum)]
+    mode: Option<Mode>,
+
+    /// The prompt for --print or --mode (piped stdin is prepended)
     prompt: Option<String>,
 
     /// Run without loading or saving a session file
@@ -97,6 +100,13 @@ struct Cli {
         conflicts_with_all = ["continue_last", "resume_picker", "session", "fork"]
     )]
     no_session: bool,
+}
+
+/// Headless output modes (`--mode`). Only json exists: it streams one
+/// JSONL record per event instead of the final text (#18).
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum Mode {
+    Json,
 }
 
 fn main() -> ExitCode {
@@ -136,8 +146,14 @@ fn dispatch(cli: Cli) -> ExitCode {
         };
     }
 
-    if cli.print {
-        return print_mode(&cli);
+    // `[PROMPT]` feeds the headless surfaces; an interactive run has
+    // no use for it and must not swallow it silently.
+    if cli.prompt.is_some() && !cli.print && cli.mode.is_none() {
+        return fail("[PROMPT] needs --print or --mode json");
+    }
+
+    if cli.print || cli.mode == Some(Mode::Json) {
+        return print_mode(&cli, cli.mode == Some(Mode::Json));
     }
 
     if cli.mock {
@@ -375,8 +391,10 @@ fn stamp_session_cache_key(target: &mut Target, session: &Session) {
 
 /// `--print`: one prompt in, final assistant text out, no interface.
 /// Errors go to stderr with stdout left empty (pi's contract), so
-/// `out=$(hi -p …)` never captures a half-answer.
-fn print_mode(cli: &Cli) -> ExitCode {
+/// `out=$(hi -p …)` never captures a half-answer. `--mode json` runs
+/// the same turn with a JSONL sink instead: one record per event on
+/// stdout, ending in `done` or `failed` (#18).
+fn print_mode(cli: &Cli, json: bool) -> ExitCode {
     let prompt = match headless::combine_prompt(read_piped_stdin(), cli.prompt.clone()) {
         Ok(prompt) => prompt,
         Err(err) => return fail(&err),
@@ -450,16 +468,24 @@ fn print_mode(cli: &Cli) -> ExitCode {
         // The mock path: no wire, no stamp.
         None => Arc::new(MockProvider::default()),
     };
-    match headless::run(
-        provider,
-        tools,
-        None, // gate: permission UX arrives with the extension host
-        &mut history,
-        &prompt,
-        session,
-    ) {
+    let turn = if json {
+        headless::run_with(
+            provider,
+            tools,
+            None, // gate: permission UX arrives with the extension host
+            &mut history,
+            &prompt,
+            session,
+            &mut |record| println!("{}", record.to_line()),
+        )
+    } else {
+        headless::run(provider, tools, None, &mut history, &prompt, session)
+    };
+    match turn {
         Ok(text) => {
-            println!("{text}");
+            if !json {
+                println!("{text}");
+            }
             ExitCode::SUCCESS
         }
         Err(reason) => fail(&reason),

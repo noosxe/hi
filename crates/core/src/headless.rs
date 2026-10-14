@@ -12,8 +12,9 @@ use crate::agent::{DEFAULT_MAX_TOOL_ROUNDS, spawn_agent_turn};
 use crate::event::{Event, Usage};
 use crate::message::Message;
 use crate::provider::Provider;
-use crate::session::Session;
+use crate::session::{Session, SessionHeader};
 use crate::tool::{ToolGate, ToolRegistry};
+use serde::Serialize;
 
 /// Assemble the headless prompt from piped stdin and the positional
 /// argument. Stdin comes first (pi's contract: pipe contents are
@@ -32,7 +33,8 @@ pub fn combine_prompt(stdin: Option<String>, arg: Option<String>) -> Result<Stri
 }
 
 /// Run one headless turn: push `prompt` onto `history`, drain the agent
-/// loop to completion, and return the final assistant text.
+/// loop to completion, and return the final assistant text — the
+/// text-mode entry point; nothing streams (see `run_with`).
 ///
 /// Every finalized message — the user prompt, tool traffic, the reply,
 /// and on failure the partial text plus a `Message::Error` — lands in
@@ -49,10 +51,85 @@ pub fn run(
     gate: Option<Arc<ToolGate>>,
     history: &mut Vec<Message>,
     prompt: &str,
-    mut session: Option<Session>,
+    session: Option<Session>,
 ) -> Result<String, String> {
+    run_with(
+        provider,
+        registry,
+        gate,
+        history,
+        prompt,
+        session,
+        &mut |_| {},
+    )
+}
+
+/// One JSONL record of `--mode json` (#18, AD-0038): hi's own
+/// vocabulary, one tag per thing the agent loop actually does. The
+/// `Message` payload serializes exactly like a session-file line, so
+/// a json run and its transcript agree byte for byte.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum JsonRecord {
+    /// The session header — the first record, only when a session
+    /// file is open (`--no-session` starts at the user message).
+    Session {
+        #[serde(flatten)]
+        header: SessionHeader,
+    },
+    /// A streaming fragment of the assistant's reply, in order.
+    /// Concatenating every delta reproduces the full reply exactly.
+    Token { delta: String },
+    /// A finalized transcript message — the user prompt, narration,
+    /// tool traffic, partial output, the error line.
+    Message { message: Message },
+    /// The round's bill, once reported (AD-0026).
+    Usage { usage: Usage },
+    /// Success: the final assistant text. The last record.
+    Done { text: String },
+    /// Failure: the reason, after the partial output and the error
+    /// line. The last record; the process exits non-zero.
+    Failed { reason: String },
+}
+
+impl JsonRecord {
+    /// The record as one JSONL line, no trailing newline.
+    /// Serialization of these plain shapes cannot fail.
+    pub fn to_line(&self) -> String {
+        serde_json::to_string(self).expect("JsonRecord serialization cannot fail")
+    }
+}
+
+/// Run one headless turn, emitting a [`JsonRecord`] for everything
+/// that happens — `--mode json`'s engine, with `run` as the no-op
+/// sink.
+///
+/// Record order: the session header (when a session is open), the
+/// user message, then the turn's events in arrival order — token
+/// deltas interleaved with the transcript messages as they finalize —
+/// and exactly one terminal record: `Done` with the reply, or
+/// `Failed` with the reason after the partial output and the error
+/// line. The session-file contract is unchanged: appends stay
+/// best-effort, the bill still rides the file.
+pub fn run_with(
+    provider: Arc<dyn Provider>,
+    registry: Arc<ToolRegistry>,
+    gate: Option<Arc<ToolGate>>,
+    history: &mut Vec<Message>,
+    prompt: &str,
+    mut session: Option<Session>,
+    sink: &mut dyn FnMut(&JsonRecord),
+) -> Result<String, String> {
+    if let Some(session) = session.as_ref() {
+        sink(&JsonRecord::Session {
+            header: session.header().clone(),
+        });
+    }
     let added_from = history.len();
     history.push(Message::User(prompt.to_string()));
+    sink(&JsonRecord::Message {
+        message: Message::User(prompt.to_string()),
+    });
     let rx = spawn_agent_turn(provider, registry, gate, history, DEFAULT_MAX_TOOL_ROUNDS);
 
     // Mirrors the TUI pump's reconstruction rules (app.rs): tokens
@@ -68,17 +145,39 @@ pub fn run(
     for event in rx {
         match event {
             Event::TurnStart => {}
-            Event::Token(token) => text.push_str(&token),
+            Event::Token(token) => {
+                sink(&JsonRecord::Token {
+                    delta: token.clone(),
+                });
+                text.push_str(&token);
+            }
             Event::ToolCall(call) => {
                 if !text.is_empty() {
-                    transcript.push(Message::Assistant(std::mem::take(&mut text)));
+                    let message = Message::Assistant(std::mem::take(&mut text));
+                    sink(&JsonRecord::Message {
+                        message: message.clone(),
+                    });
+                    transcript.push(message);
                 }
-                transcript.push(Message::ToolCall(call));
+                let message = Message::ToolCall(call);
+                sink(&JsonRecord::Message {
+                    message: message.clone(),
+                });
+                transcript.push(message);
             }
-            Event::ToolResult(result) => transcript.push(Message::ToolResult(result)),
+            Event::ToolResult(result) => {
+                let message = Message::ToolResult(result);
+                sink(&JsonRecord::Message {
+                    message: message.clone(),
+                });
+                transcript.push(message);
+            }
             // Headless prints the transcript, not the bill — but it
             // records the bill (AD-0026, #85).
-            Event::Usage(recorded) => bill = Some(recorded),
+            Event::Usage(recorded) => {
+                sink(&JsonRecord::Usage { usage: recorded });
+                bill = Some(recorded);
+            }
             Event::Error(message) => error = Some(message),
             Event::TurnEnd => break,
         }
@@ -87,10 +186,23 @@ pub fn run(
     // Whatever accumulated since the last tool call is the final reply.
     let reply = std::mem::take(&mut text);
     if !reply.is_empty() {
-        transcript.push(Message::Assistant(reply.clone()));
+        let message = Message::Assistant(reply.clone());
+        sink(&JsonRecord::Message {
+            message: message.clone(),
+        });
+        transcript.push(message);
     }
     if let Some(reason) = error.clone() {
-        transcript.push(Message::Error(reason));
+        let message = Message::Error(reason.clone());
+        sink(&JsonRecord::Message {
+            message: message.clone(),
+        });
+        transcript.push(message);
+        sink(&JsonRecord::Failed { reason });
+    } else {
+        sink(&JsonRecord::Done {
+            text: reply.clone(),
+        });
     }
 
     history.extend(transcript);
@@ -303,5 +415,191 @@ mod tests {
         assert_eq!(loaded.usage.cached_tokens, Some(700));
         assert_eq!(loaded.usage_last_prompt, 1000);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── --mode json (#18, AD-0038) ────────────────────────────────
+
+    /// Drain with a collecting sink; returns (result, records).
+    fn json_run(
+        provider: Arc<dyn Provider>,
+        registry: Arc<ToolRegistry>,
+        history: &mut Vec<Message>,
+        prompt: &str,
+        session: Option<Session>,
+    ) -> (Result<String, String>, Vec<JsonRecord>) {
+        let mut records = Vec::new();
+        let result = run_with(
+            provider,
+            registry,
+            None,
+            history,
+            prompt,
+            session,
+            &mut |record| records.push(record.clone()),
+        );
+        (result, records)
+    }
+
+    fn kind(record: &JsonRecord) -> &'static str {
+        match record {
+            JsonRecord::Session { .. } => "session",
+            JsonRecord::Token { .. } => "token",
+            JsonRecord::Message { .. } => "message",
+            JsonRecord::Usage { .. } => "usage",
+            JsonRecord::Done { .. } => "done",
+            JsonRecord::Failed { .. } => "failed",
+        }
+    }
+
+    #[test]
+    fn json_records_follow_the_transcript_and_end_with_done() {
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                Event::Token("checking".into()),
+                Event::ToolCall(call("c1", "{\"x\":1}")),
+            ],
+            vec![Event::Token("done".into()), Event::TurnEnd],
+        ]));
+        let mut history = Vec::new();
+
+        let (reply, records) = json_run(provider, registry(), &mut history, "go", None);
+
+        assert_eq!(reply.unwrap(), "done");
+        let kinds: Vec<&str> = records.iter().map(kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "message", // the user prompt
+                "token",   // "checking"
+                "message", // narration flushes as its own assistant message
+                "message", // the tool call
+                "message", // the tool result
+                "token",   // "done"
+                "message", // the final assistant message
+                "done",    // terminal record carries the reply
+            ]
+        );
+        assert_eq!(
+            records[0],
+            JsonRecord::Message {
+                message: Message::User("go".into())
+            }
+        );
+        assert_eq!(
+            records[2],
+            JsonRecord::Message {
+                message: Message::Assistant("checking".into())
+            }
+        );
+        assert_eq!(
+            records.last().unwrap(),
+            &JsonRecord::Done {
+                text: "done".into()
+            }
+        );
+        // `Token` deltas concatenate to the full reply — the stream
+        // and the transcript agree.
+        let deltas: String = records
+            .iter()
+            .filter_map(|r| match r {
+                JsonRecord::Token { delta } => Some(delta.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(deltas, "checkingdone");
+    }
+
+    #[test]
+    fn json_mode_failure_ends_with_failed_after_the_partial_output() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            Event::Token("par".into()),
+            Event::Error("boom".into()),
+            Event::TurnEnd,
+        ]]));
+        let mut history = Vec::new();
+
+        let (result, records) = json_run(provider, registry(), &mut history, "hi", None);
+
+        assert_eq!(result.unwrap_err(), "boom");
+        let kinds: Vec<&str> = records.iter().map(kind).collect();
+        assert_eq!(
+            kinds,
+            vec!["message", "token", "message", "message", "failed"]
+        );
+        assert_eq!(
+            records[2],
+            JsonRecord::Message {
+                message: Message::Assistant("par".into())
+            }
+        );
+        assert_eq!(
+            records[3],
+            JsonRecord::Message {
+                message: Message::Error("boom".into())
+            }
+        );
+        assert_eq!(
+            records.last().unwrap(),
+            &JsonRecord::Failed {
+                reason: "boom".into()
+            }
+        );
+    }
+
+    #[test]
+    fn json_mode_opens_with_the_session_header_when_a_session_is_open() {
+        let root = std::env::temp_dir().join(format!("hi-json-header-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let session = Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        let header = session.header().clone();
+
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            Event::Token("reply".into()),
+            Event::TurnEnd,
+        ]]));
+        let mut history = Vec::new();
+        let (_, records) = json_run(
+            provider,
+            registry(),
+            &mut history,
+            "question",
+            Some(session),
+        );
+
+        assert_eq!(records.first().unwrap(), &JsonRecord::Session { header });
+        assert_eq!(kind(&records[1]), "message");
+        assert_eq!(kind(records.last().unwrap()), "done");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn json_mode_records_the_rounds_bill_when_reported() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            Event::Token("reply".into()),
+            Event::Usage(crate::event::Usage {
+                prompt_tokens: 1000,
+                completion_tokens: 250,
+                cached_tokens: Some(700),
+                reasoning_tokens: Some(100),
+            }),
+            Event::TurnEnd,
+        ]]));
+        let mut history = Vec::new();
+
+        let (_, records) = json_run(provider, registry(), &mut history, "q", None);
+
+        let kinds: Vec<&str> = records.iter().map(kind).collect();
+        assert_eq!(kinds, vec!["message", "token", "usage", "message", "done"]);
+        assert_eq!(
+            records[2],
+            JsonRecord::Usage {
+                usage: crate::event::Usage {
+                    prompt_tokens: 1000,
+                    completion_tokens: 250,
+                    cached_tokens: Some(700),
+                    reasoning_tokens: Some(100),
+                },
+            }
+        );
     }
 }
