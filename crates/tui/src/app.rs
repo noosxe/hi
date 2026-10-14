@@ -1465,6 +1465,9 @@ impl App {
             "tools" => self
                 .messages
                 .push(Message::System(Self::tools_listing(&self.tools))),
+            "keybinds" => self
+                .messages
+                .push(Message::System(crate::keybinds::listing())),
             "name" => self.command_name(args),
             other => self
                 .messages

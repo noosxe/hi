@@ -16,6 +16,10 @@ pub const COMMANDS: &[Command] = &[
         description: "quit the session",
     },
     Command {
+        name: "keybinds",
+        description: "list the registered keybindings and what they do",
+    },
+    Command {
         name: "model",
         description: "pick a model for this session (ctrl-s saves the default)",
     },

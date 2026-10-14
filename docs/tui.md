@@ -115,6 +115,12 @@ annotation badges (`read-only` / `destructive`, only when the tool claims
 them), and the first sentence of each description (`ToolRegistry::info()`
 in core snapshots the facts; the TUI formats). `/tasks` opens the tasks
 pane (AD-0021) — bare to list, `/tasks <id>` for one task's live output.
+`/keybinds` pushes the same kind of notice listing every registered
+chord from `keybinds::KEYBINDS` — chord and one-line description,
+grouped movement / kills / yank / undo / session-level (#95). The
+table cannot drift from the bindings: a test scans `app.rs` for
+modified-chord arms and fails when a bound chord has no row or a row
+names an unbound chord.
 Like unknown-command reports, notices persist in the session file but
 never reach the provider. Commands may carry arguments: the dispatch
 splits on the first space, name first, the rest rides to the handler.
