@@ -4,6 +4,12 @@ name: CI
 # be) required status checks on the protected `main`. The toolchain channel
 # mirrors `rust-toolchain.toml` / `flake.nix` (stable) so local and CI
 # builds agree.
+#
+# Pinning rule (#24, AD-0037): third-party actions are pinned to full
+# commit SHAs with a `# vX.Y.Z` comment — dependabot bumps the SHA and
+# refreshes the comment weekly. `dtolnay/rust-toolchain@stable` stays a
+# moving branch ref on purpose: it is a branch, not a version tag, and
+# the compiler channel is pinned by rust-toolchain.toml / flake.nix.
 
 on:
   pull_request:
@@ -28,7 +34,7 @@ jobs:
     name: cargo fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -39,11 +45,11 @@ jobs:
     name: cargo clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
@@ -51,9 +57,9 @@ jobs:
     name: cargo test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: cargo test
         run: cargo test --workspace
 
@@ -64,7 +70,7 @@ jobs:
     permissions:
       issues: write # audit-check files GitHub issues on new advisories
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: rustsec/audit-check@v2.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
