@@ -23,6 +23,19 @@ use hi_core::event::Usage;
 /// Prompt-history ceiling (AD-0014).
 const HISTORY_CAP: usize = 100;
 
+/// Undo ceiling (#65): snapshot-per-unit of a few-KB composer is a
+/// few hundred KB worst case — bounded, like the history ring.
+const UNDO_CAP: usize = 100;
+
+/// One undo unit: the composer state before the edit, plus the
+/// post-cursor a continuing plain insert must land on to merge into
+/// this unit — `usize::MAX` means the unit is closed.
+struct UndoStep {
+    input: String,
+    cursor: usize,
+    run_end: usize,
+}
+
 /// Derive the ring from a transcript's user prompts (#87) — the same
 /// view whether the transcript came from `SessionInit` or a session
 /// switch. Oldest-first, whitespace-only prompts invisible (the live
@@ -144,6 +157,13 @@ pub struct App {
     /// The in-progress input, parked when history browsing starts and
     /// restored when it ends.
     pub history_draft: Option<String>,
+    /// Undo/redo for the composer (#65): snapshot-per-unit states
+    /// before each edit, capped at [`UNDO_CAP`]. Redo holds the states
+    /// undo popped, and clears on any fresh edit. Only composer
+    /// mutations land here — history browse and queue handback are
+    /// navigation, not edits.
+    undo: Vec<UndoStep>,
+    redo: Vec<(String, usize)>,
     /// The conversation transcript — finalized messages only.
     pub messages: Vec<Message>,
     /// The backend producing assistant turns. A trait object (`dyn`),
@@ -380,6 +400,8 @@ impl App {
             history,
             history_pos: None,
             history_draft: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
             messages,
             provider,
             status,
@@ -425,8 +447,12 @@ impl App {
         // picker or pane this still quits.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             if !self.input.is_empty() {
-                self.input.clear();
-                self.cursor = 0;
+                // The line-kill is a composer mutation like any other:
+                // one Ctrl-Z and the draft is back (#65).
+                self.apply_edit(|input, _| {
+                    input.clear();
+                    0
+                });
             } else {
                 self.quit = true;
             }
@@ -503,35 +529,47 @@ impl App {
                 }
                 // Ctrl+D and Delete forward-delete the same unit.
                 'd' => {
-                    if let Some(next) = editor::next_boundary(&self.input, self.cursor) {
-                        self.cursor = editor::delete_range(&mut self.input, self.cursor..next);
-                    }
+                    self.apply_edit(|input, cursor| {
+                        editor::next_boundary(input, cursor)
+                            .map_or(cursor, |next| editor::delete_range(input, cursor..next))
+                    });
                 }
                 // Line-scoped with the A/E family (AD-0018).
                 'k' => {
-                    let end = editor::line_end(&self.input, self.cursor);
-                    self.cursor = editor::delete_range(&mut self.input, self.cursor..end);
+                    self.apply_edit(|input, cursor| {
+                        editor::delete_range(input, cursor..editor::line_end(input, cursor))
+                    });
                 }
                 'u' => {
-                    let start = editor::line_start(&self.input, self.cursor);
-                    self.cursor = editor::delete_range(&mut self.input, start..self.cursor);
+                    self.apply_edit(|input, cursor| {
+                        editor::delete_range(input, editor::line_start(input, cursor)..cursor)
+                    });
                 }
                 'w' => {
                     let range = editor::word_delete_range_back(&self.input, self.cursor);
-                    self.cursor = editor::delete_range(&mut self.input, range);
+                    self.apply_edit(|input, _| editor::delete_range(input, range));
                 }
+                // Ctrl+Z reverts the newest composer mutation (#65);
+                // the run of plain inserts counts as one.
+                'z' => self.undo_edit(),
                 // Unbound control chords keep their old behavior: the
                 // character lands in the input (ctrl+c quits and
                 // ctrl+v/cmd+v paste, both handled above).
                 _ => {
-                    self.cursor = editor::insert_char(&mut self.input, self.cursor, c);
+                    self.apply_insert(c);
                     self.sync_completion();
                 }
             },
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
                 let range = editor::word_delete_range_fwd(&self.input, self.cursor);
-                self.cursor = editor::delete_range(&mut self.input, range);
+                self.apply_edit(|input, _| editor::delete_range(input, range));
                 self.sync_completion();
+            }
+            // Alt+Z reapplies what Ctrl+Z reverted (#65) — emacs-style
+            // redo, since shift+ctrl+z is indistinguishable on legacy
+            // terminals.
+            KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.redo_edit();
             }
             // Newline chords (AD-0018): Shift+Enter rides the kitty
             // encoding (`CSI 13;2u` — crossterm hands us Enter+SHIFT,
@@ -595,23 +633,29 @@ impl App {
                     // The same unit the move lands on, so
                     // Alt+Backspace composes with Alt+Left.
                     let range = editor::word_delete_range_back(&self.input, self.cursor);
-                    self.cursor = editor::delete_range(&mut self.input, range);
-                } else if let Some(prev) = editor::prev_boundary(&self.input, self.cursor) {
-                    self.cursor = editor::delete_range(&mut self.input, prev..self.cursor);
+                    self.apply_edit(|input, _| editor::delete_range(input, range));
+                } else {
+                    self.apply_edit(|input, cursor| {
+                        editor::prev_boundary(input, cursor)
+                            .map_or(cursor, |prev| editor::delete_range(input, prev..cursor))
+                    });
                 }
                 self.sync_completion();
             }
             KeyCode::Delete => {
                 if key.modifiers.contains(KeyModifiers::ALT) {
                     let range = editor::word_delete_range_fwd(&self.input, self.cursor);
-                    self.cursor = editor::delete_range(&mut self.input, range);
-                } else if let Some(next) = editor::next_boundary(&self.input, self.cursor) {
-                    self.cursor = editor::delete_range(&mut self.input, self.cursor..next);
+                    self.apply_edit(|input, _| editor::delete_range(input, range));
+                } else {
+                    self.apply_edit(|input, cursor| {
+                        editor::next_boundary(input, cursor)
+                            .map_or(cursor, |next| editor::delete_range(input, cursor..next))
+                    });
                 }
                 self.sync_completion();
             }
             KeyCode::Char(c) => {
-                self.cursor = editor::insert_char(&mut self.input, self.cursor, c);
+                self.apply_insert(c);
                 self.sync_completion();
             }
             KeyCode::Enter => {
@@ -1040,10 +1084,87 @@ impl App {
 
     /// Replace the whole input, cursor parked at the end — the shape
     /// every whole-text assignment wants (completions, queue
-    /// handback, history loads).
+    /// handback, history loads). Navigation, not an edit: nothing
+    /// lands on the undo stack (#65).
     fn set_input(&mut self, text: String) {
         self.cursor = text.len();
         self.input = text;
+    }
+
+    /// Push the current composer state as one closed undo unit,
+    /// capped at [`UNDO_CAP`] (#65).
+    fn push_undo_unit(&mut self) {
+        self.undo.push(UndoStep {
+            input: self.input.clone(),
+            cursor: self.cursor,
+            run_end: usize::MAX,
+        });
+        if self.undo.len() > UNDO_CAP {
+            self.undo.remove(0);
+        }
+    }
+
+    /// Snapshot before a NEW edit: push the unit and drop any redo
+    /// future — every composer edit flows through here (#65). Redo
+    /// itself pushes without the clear, or one Alt+Z would strand
+    /// the rest of the stack.
+    fn snapshot(&mut self) {
+        self.push_undo_unit();
+        self.redo.clear();
+    }
+
+    /// One composer mutation: snapshot, then apply. The closure gets
+    /// the input and the cursor, returns the new cursor.
+    fn apply_edit(&mut self, edit: impl FnOnce(&mut String, usize) -> usize) {
+        self.snapshot();
+        let mut input = std::mem::take(&mut self.input);
+        self.cursor = edit(&mut input, self.cursor);
+        self.input = input;
+    }
+
+    /// A plain character insert, coalescing into an open run —
+    /// emacs' self-insert-command. The run continues only while the
+    /// cursor sits exactly where the last insert ended; any other key
+    /// or cursor move starts a fresh unit.
+    fn apply_insert(&mut self, c: char) {
+        let merges = self
+            .undo
+            .last()
+            .is_some_and(|step| step.run_end == self.cursor);
+        if !merges {
+            self.snapshot();
+        }
+        let mut input = std::mem::take(&mut self.input);
+        self.cursor = editor::insert_char(&mut input, self.cursor, c);
+        self.input = input;
+        if let Some(step) = self.undo.last_mut() {
+            step.run_end = self.cursor;
+        }
+    }
+
+    /// Ctrl+Z: revert the newest unit. The stack only ever holds
+    /// composer mutations, so undo never drags navigation with it.
+    fn undo_edit(&mut self) {
+        let Some(step) = self.undo.pop() else {
+            return;
+        };
+        self.redo
+            .push((std::mem::take(&mut self.input), self.cursor));
+        self.input = step.input;
+        self.cursor = step.cursor;
+        self.sync_completion();
+    }
+
+    /// Alt+Z: reapply the newest undone edit. The state undo came
+    /// from rejoins the stack as a closed unit.
+    fn redo_edit(&mut self) {
+        let Some((input, cursor)) = self.redo.pop() else {
+            return;
+        };
+        self.push_undo_unit();
+        self.input = input;
+        self.cursor = cursor;
+        self.sync_completion();
     }
 
     /// The input split at the cursor — the two halves paste insertion
@@ -1060,7 +1181,7 @@ impl App {
     /// (AD-0018). The input stops being a command draft the moment a
     /// newline lands in it, so the completion re-syncs.
     fn insert_newline(&mut self) {
-        self.cursor = editor::insert_char(&mut self.input, self.cursor, '\n');
+        self.apply_insert('\n');
         self.sync_completion();
     }
 
@@ -1208,7 +1329,11 @@ impl App {
             }
             KeyCode::Tab => {
                 if let Some((name, _)) = completion.items.get(completion.selected) {
-                    self.set_input(format!("/{name}"));
+                    let name = *name;
+                    self.apply_edit(|input, _| {
+                        *input = format!("/{name}");
+                        input.len()
+                    });
                     self.sync_completion();
                 }
                 true
@@ -1672,11 +1797,13 @@ impl App {
         use crate::clipboard::ClipboardOutcome;
         match outcome {
             ClipboardOutcome::Image { path } => {
+                self.snapshot();
                 let (before, after) = self.split_at_cursor();
                 self.input = crate::clipboard::insert_pasted(&before, &path, &after);
                 self.cursor = self.input.len() - after.len();
             }
             ClipboardOutcome::Text(text) if !text.is_empty() => {
+                self.snapshot();
                 let (before, after) = self.split_at_cursor();
                 self.input = crate::clipboard::insert_pasted(&before, &text, &after);
                 self.cursor = self.input.len() - after.len();
@@ -2983,6 +3110,90 @@ mod tests {
         )
         .unwrap();
         root
+    }
+
+    #[test]
+    fn ctrl_z_reverts_in_order_coalesces_runs_and_alt_z_reapplies() {
+        let mut app = test_app();
+        // "ab" is one run, backspace its own step, "c" starts fresh.
+        app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Char('b')));
+        app.handle_key(key(KeyCode::Backspace));
+        app.handle_key(key(KeyCode::Char('c')));
+        assert_eq!(app.input, "ac");
+
+        app.handle_key(ctrl(KeyCode::Char('z')));
+        assert_eq!(app.input, "a");
+        app.handle_key(ctrl(KeyCode::Char('z')));
+        assert_eq!(app.input, "ab");
+        app.handle_key(ctrl(KeyCode::Char('z')));
+        // The whole typed run reverts as one unit.
+        assert_eq!(app.input, "");
+
+        // Alt+Z walks the redo stack back up.
+        app.handle_key(alt(KeyCode::Char('z')));
+        assert_eq!(app.input, "ab");
+        app.handle_key(alt(KeyCode::Char('z')));
+        assert_eq!(app.input, "a");
+        app.handle_key(alt(KeyCode::Char('z')));
+        assert_eq!(app.input, "ac");
+
+        // A fresh edit clears the redo future.
+        app.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(app.input, "acx");
+        app.handle_key(ctrl(KeyCode::Char('z')));
+        assert_eq!(app.input, "ac");
+    }
+
+    #[test]
+    fn paste_is_its_own_undo_unit() {
+        let mut app = test_app();
+        app.handle_key(key(KeyCode::Char('h')));
+        app.handle_key(key(KeyCode::Char('i')));
+        app.handle_clipboard_outcome(crate::clipboard::ClipboardOutcome::Text("world".into()));
+        assert_eq!(app.input, "hi world");
+        app.handle_key(ctrl(KeyCode::Char('z')));
+        assert_eq!(app.input, "hi");
+        app.handle_key(key(KeyCode::Char('z')));
+        app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(app.input, "hizar");
+    }
+
+    #[test]
+    fn a_cleared_draft_comes_back_from_undo() {
+        // The line-kill is a composer mutation like any other (AD-0030
+        // meets #65): typed text after the clear steps back through
+        // undo, and one more Ctrl-Z restores the draft.
+        let mut app = test_app();
+        app.handle_key(key(KeyCode::Char('d')));
+        app.handle_key(key(KeyCode::Char('r')));
+        app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Char('f')));
+        app.handle_key(ctrl(KeyCode::Char('c')));
+        assert_eq!(app.input, "");
+        app.handle_key(key(KeyCode::Char('x')));
+        app.handle_key(ctrl(KeyCode::Char('z')));
+        assert_eq!(app.input, "");
+        app.handle_key(ctrl(KeyCode::Char('z')));
+        assert_eq!(app.input, "draf");
+    }
+
+    #[test]
+    fn the_undo_ceiling_holds_at_100_units() {
+        let mut app = test_app();
+        // Insert + cursor-left per loop: every insert is its own unit.
+        for _ in 0..120 {
+            app.handle_key(key(KeyCode::Char('x')));
+            app.handle_key(key(KeyCode::Left));
+        }
+        assert_eq!(app.undo.len(), 100);
+        for _ in 0..100 {
+            app.handle_key(ctrl(KeyCode::Char('z')));
+        }
+        assert!(app.undo.is_empty());
+        // The 101st is a silent noop.
+        app.handle_key(ctrl(KeyCode::Char('z')));
     }
 
     #[test]
