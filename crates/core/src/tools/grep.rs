@@ -1,6 +1,7 @@
 //! `grep` — regex search over file contents.
 //!
-//! Walks with the shared walker (root `.gitignore`, `.git` skipped), reads
+//! Walks with the shared walker (full gitignore semantics via the
+//! `ignore` crate, `.git` skipped), reads
 //! text files line by line, and renders rg-style: `path:12: match`,
 //! `path-12- context`, `--` between groups. Non-UTF-8 files are skipped
 //! silently; match lines are capped at 500 chars and the whole result at
@@ -33,7 +34,7 @@ impl Tool for GrepTool {
 
     fn description(&self) -> &str {
         "Search file contents for a regex pattern. Returns matching lines as \
-         path:line:text (context lines with dashes), honoring the root .gitignore. \
+         path:line:text (context lines with dashes), honoring gitignore rules. \
          Clamped to 100 matches (or `limit`), 500 chars per line, and the standard \
          50KB output cap. Use `literal: true` when the pattern contains regex \
          metacharacters."
@@ -127,8 +128,7 @@ impl Tool for GrepTool {
             hit_cap = capped;
             out.extend(lines);
         } else {
-            let ignore = walk::root_gitignore(&root);
-            for rel in walk::collect(&root, ignore.as_ref(), filter.as_ref(), usize::MAX) {
+            for rel in walk::collect(&root, filter.as_ref(), usize::MAX) {
                 if matched_total >= limit {
                     hit_cap = true;
                     break;

@@ -26,7 +26,7 @@ impl Tool for FindTool {
     fn description(&self) -> &str {
         "Find files by glob pattern (`*` crosses directories), e.g. '**/*.rs' or \
          'Cargo.toml'. Returns paths relative to the search directory, honoring the \
-         root .gitignore. Clamped to 1000 results (or `limit`) and the standard 50KB \
+         gitignore rules. Clamped to 1000 results (or `limit`) and the standard 50KB \
          output cap."
     }
 
@@ -77,9 +77,8 @@ impl Tool for FindTool {
         if !root.is_dir() {
             return Err(format!("not a directory: {}", root.display()));
         }
-        let ignore = walk::root_gitignore(&root);
         // One extra fetch so an exact-limit result isn't mislabeled.
-        let mut rels = walk::collect(&root, ignore.as_ref(), Some(&filter), limit + 1);
+        let mut rels = walk::collect(&root, Some(&filter), limit + 1);
         let hit_cap = rels.len() > limit;
         rels.truncate(limit);
 
