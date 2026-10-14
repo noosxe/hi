@@ -18,6 +18,13 @@
 //! - **Two-tier buffering.** A bounded ring (256 KiB) backs instant
 //!   `output_tail` reads; the full stream lands in a log file under
 //!   the tasks dir for post-mortems.
+//! - **Logs are bounded on disk too (#74).** Manager construction
+//!   prunes the tasks dir best-effort: logs older than
+//!   [`TASK_LOG_MAX_AGE`] go, aged survivors beyond
+//!   [`TASK_LOG_CEIL_BYTES`] (newest kept) go, and nothing younger
+//!   than [`TASK_LOG_CEIL_GRACE`] is ever evicted — a concurrent
+//!   run's live log is untouchable. Never blocks startup; one stderr
+//!   line only when something was removed.
 //! - **Completion is a fact, not a trigger.** Finishing sends one
 //!   [`TaskCompletion`] into a channel the front end drains per frame;
 //!   auto-starting a turn is out of scope (that is #4's orchestrator).
@@ -33,7 +40,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -50,6 +57,83 @@ pub const RING_BYTES: usize = 256 * 1024;
 pub const MAX_RUNNING: usize = 16;
 /// Child poll cadence — the bash tool's interval.
 const POLL: Duration = Duration::from_millis(50);
+
+/// Retention policy for the tasks dir (#74), applied once at manager
+/// construction: task logs are post-mortem artifacts with a bounded
+/// lifetime, not an archive.
+///
+/// - [`TASK_LOG_MAX_AGE`]: logs older than this are deleted.
+/// - [`TASK_LOG_CEIL_BYTES`]: among the aged survivors, keep only the
+///   newest this many bytes in total.
+/// - [`TASK_LOG_CEIL_GRACE`]: the byte ceiling never touches logs
+///   younger than this, so a concurrent run's live log cannot be
+///   evicted by another instance's startup.
+///
+/// Deliberately constants, not config: the settings surface (and the
+/// pi-parity question behind it) belongs to #23, which covers session
+/// files the same way. Errors never block startup; the prune reports
+/// one stderr line only when it removed something.
+pub const TASK_LOG_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
+pub const TASK_LOG_CEIL_BYTES: usize = 64 * 1024 * 1024;
+pub const TASK_LOG_CEIL_GRACE: Duration = Duration::from_secs(24 * 3600);
+
+/// Delete task logs per the retention policy: `<u64>.log` files older
+/// than `max_age`, then (among files older than `grace`) the oldest
+/// beyond a total of `ceil_bytes`, newest kept. Returns how many
+/// files were removed; every error is swallowed — pruning is
+/// best-effort by ruling and must never block startup.
+fn prune_logs(dir: &Path, max_age: Duration, ceil_bytes: usize, grace: Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let logs: Vec<(PathBuf, std::time::SystemTime, u64)> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            // Only our own logs: `<id>.log` with a numeric id. A
+            // user's stray notes.log is never touched.
+            let id = name.strip_suffix(".log")?;
+            id.parse::<u64>().ok()?;
+            let Ok(meta) = e.metadata() else {
+                return None;
+            };
+            if !meta.is_file() {
+                return None;
+            }
+            let mtime = meta.modified().ok()?;
+            Some((dir.join(name.as_ref()), mtime, meta.len()))
+        })
+        .collect();
+    let mut removed = 0;
+    let mut survivors = Vec::new();
+    for (path, mtime, size) in logs {
+        // Fail-safe: a future mtime (clock skew) counts as fresh and
+        // grace-exempt.
+        let aged = mtime.elapsed().is_ok_and(|d| d > max_age);
+        if aged {
+            if std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        } else {
+            let exempt = mtime.elapsed().map(|d| d < grace).unwrap_or(true);
+            if !exempt {
+                survivors.push((path, mtime, size));
+            }
+        }
+    }
+    // Byte ceiling over the grace-aged survivors, newest kept first.
+    survivors.sort_by(|a, b| b.1.cmp(&a.1).then(b.0.cmp(&a.0)));
+    let mut total = 0usize;
+    for (path, _, size) in survivors {
+        if total + size as usize <= ceil_bytes {
+            total += size as usize;
+        } else if std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
 
 /// hi's task-log directory: `<data-dir>/tasks`.
 pub fn tasks_dir() -> Option<PathBuf> {
@@ -255,15 +339,31 @@ struct Inner {
 pub struct TaskManager(Arc<Inner>);
 
 impl TaskManager {
-    /// Logs land in `logs_dir/<id>.log` (created on demand).
+    /// Logs land in `logs_dir/<id>.log` (created on demand). A
+    /// best-effort retention prune (#74) runs first — before anything
+    /// can spawn — and reports one stderr line only if it removed
+    /// files; a failed unlink never blocks startup.
     pub fn new(logs_dir: impl Into<PathBuf>) -> Self {
+        let logs_dir = logs_dir.into();
+        let removed = prune_logs(
+            &logs_dir,
+            TASK_LOG_MAX_AGE,
+            TASK_LOG_CEIL_BYTES,
+            TASK_LOG_CEIL_GRACE,
+        );
+        if removed > 0 {
+            eprintln!(
+                "task log prune: removed {removed} file(s) from {}",
+                logs_dir.display()
+            );
+        }
         let (tx, rx) = channel();
         Self(Arc::new(Inner {
             next_id: AtomicU64::new(1),
             tasks: Arc::new(Mutex::new(HashMap::new())),
             tx: Arc::new(Mutex::new(tx)),
             completions: Mutex::new(rx),
-            logs_dir: logs_dir.into(),
+            logs_dir,
         }))
     }
 
@@ -547,6 +647,13 @@ mod tests {
         (TaskManager::new(dir.clone()), dir)
     }
 
+    /// Backdate a file's mtime for retention tests (std `FileTimes`).
+    fn backdate(path: &Path, age: Duration) {
+        let f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now() - age))
+            .unwrap();
+    }
+
     /// Predicate wait — no fixed sleeps (house test rule).
     fn until(what: &str, mut pred: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -566,6 +673,104 @@ mod tests {
     /// True when nothing in the process group `pid` is alive.
     fn group_dead(pid: u32) -> bool {
         unsafe { libc::kill(-(pid as i32), 0) != 0 }
+    }
+
+    #[test]
+    fn startup_prune_deletes_old_task_logs() {
+        let (manager, dir) = manager();
+        std::fs::write(dir.join("1.log"), "old").unwrap();
+        backdate(&dir.join("1.log"), Duration::from_secs(8 * 24 * 3600));
+        std::fs::write(dir.join("2.log"), "fresh").unwrap();
+        drop(manager);
+        std::fs::write(dir.join("3.log"), "new").unwrap();
+        let pruned = prune_logs(
+            &dir,
+            TASK_LOG_MAX_AGE,
+            TASK_LOG_CEIL_BYTES,
+            TASK_LOG_CEIL_GRACE,
+        );
+        assert_eq!(pruned, 1);
+        assert!(!dir.join("1.log").exists());
+        assert!(dir.join("2.log").exists());
+        assert!(dir.join("3.log").exists());
+    }
+
+    #[test]
+    fn startup_prune_ceiling_keeps_the_newest_aged_logs() {
+        let (manager, dir) = manager();
+        drop(manager);
+        std::fs::write(dir.join("1.log"), vec![b'a'; 4096]).unwrap();
+        std::fs::write(dir.join("2.log"), vec![b'b'; 4096]).unwrap();
+        backdate(&dir.join("1.log"), Duration::from_secs(2 * 24 * 3600));
+        backdate(&dir.join("2.log"), Duration::from_secs(2 * 24 * 3600 + 60));
+        // Ceiling 4 KiB: the newest aged log (1.log) survives, the
+        // older one goes.
+        let pruned = prune_logs(&dir, TASK_LOG_MAX_AGE, 4096, TASK_LOG_CEIL_GRACE);
+        assert_eq!(pruned, 1);
+        assert!(dir.join("1.log").exists());
+        assert!(!dir.join("2.log").exists());
+    }
+
+    #[test]
+    fn startup_prune_ceiling_never_touches_logs_within_the_grace_window() {
+        let (manager, dir) = manager();
+        drop(manager);
+        std::fs::write(dir.join("1.log"), vec![b'a'; 4096]).unwrap();
+        std::fs::write(dir.join("2.log"), vec![b'b'; 4096]).unwrap();
+        backdate(&dir.join("1.log"), Duration::from_secs(3600));
+        backdate(&dir.join("2.log"), Duration::from_secs(3600 + 60));
+        // Both fit the grace window, so the ceiling must not fire even
+        // though 8 KiB > 4 KiB.
+        let pruned = prune_logs(&dir, TASK_LOG_MAX_AGE, 4096, Duration::from_secs(24 * 3600));
+        assert_eq!(pruned, 0);
+        assert!(dir.join("1.log").exists());
+        assert!(dir.join("2.log").exists());
+    }
+
+    #[test]
+    fn startup_prune_only_touches_task_log_names() {
+        let (manager, dir) = manager();
+        drop(manager);
+        std::fs::write(dir.join("notes.log"), "user data").unwrap();
+        std::fs::write(dir.join("junk.txt"), "user data").unwrap();
+        let pruned = prune_logs(
+            &dir,
+            Duration::ZERO,
+            TASK_LOG_CEIL_BYTES,
+            TASK_LOG_CEIL_GRACE,
+        );
+        assert_eq!(pruned, 0);
+        assert!(dir.join("notes.log").exists());
+        assert!(dir.join("junk.txt").exists());
+    }
+
+    #[test]
+    fn startup_prune_survives_unlink_errors_and_a_missing_dir() {
+        // A directory named like a log cannot be unlinked as a file;
+        // the prune must skip it and carry on.
+        let (manager, dir) = manager();
+        drop(manager);
+        std::fs::create_dir_all(dir.join("9.log")).unwrap();
+        std::fs::write(dir.join("10.log"), "old").unwrap();
+        backdate(&dir.join("10.log"), Duration::from_secs(8 * 24 * 3600));
+        let pruned = prune_logs(
+            &dir,
+            TASK_LOG_MAX_AGE,
+            TASK_LOG_CEIL_BYTES,
+            TASK_LOG_CEIL_GRACE,
+        );
+        assert_eq!(pruned, 1);
+        assert!(dir.join("9.log").exists());
+        // A missing dir is a silent no-op.
+        assert_eq!(
+            prune_logs(
+                &dir.join("nope"),
+                TASK_LOG_MAX_AGE,
+                TASK_LOG_CEIL_BYTES,
+                TASK_LOG_CEIL_GRACE
+            ),
+            0
+        );
     }
 
     #[test]
