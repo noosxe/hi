@@ -177,6 +177,9 @@ pub struct App {
     /// `(start, end, index from the head)`. Alt+Y swaps it; any other
     /// key drops it.
     yank_site: Option<(usize, usize, usize)>,
+    /// Armed jump-to-char (#67): `Ctrl+]` sets it, the next
+    /// printable key is the target, anything else lets it lapse.
+    jump_pending: Option<editor::Jump>,
     /// The conversation transcript — finalized messages only.
     pub messages: Vec<Message>,
     /// The backend producing assistant turns. A trait object (`dyn`),
@@ -435,6 +438,7 @@ impl App {
             kill_ring: Vec::new(),
             last_kill: None,
             yank_site: None,
+            jump_pending: None,
             session_picker: None,
             clipboard_rx: None,
             note: None,
@@ -462,6 +466,35 @@ impl App {
         // it's captured first because the Alt+Y arm is the one key
         // that still needs it.
         let yank = self.yank_site.take();
+        // A pending jump-to-char (#67) eats the next key: a
+        // printable character is the target — the cursor moves, or
+        // nothing at none. Enter cancels without submitting (a
+        // stray chord pair must not send a half-written draft), the
+        // jump chord itself cancels (pi's rule), and everything
+        // else falls through with the pending mode consumed.
+        if let Some(dir) = self.jump_pending.take() {
+            match key.code {
+                KeyCode::Char(c)
+                    if !key.modifiers.intersects(
+                        KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                    ) =>
+                {
+                    let landed = match dir {
+                        editor::Jump::Forward => editor::jump_forward(&self.input, self.cursor, c),
+                        editor::Jump::Backward => {
+                            editor::jump_backward(&self.input, self.cursor, c)
+                        }
+                    };
+                    if let Some(pos) = landed {
+                        self.cursor = pos;
+                    }
+                    return;
+                }
+                KeyCode::Enter => return,
+                KeyCode::Char(']') if key.modifiers.contains(KeyModifiers::CONTROL) => return,
+                _ => {}
+            }
+        }
         // Ctrl-C is the line-killer, not the app-killer (#91): a
         // non-empty draft dies first (cursor home), an empty composer
         // is the user asking to leave. Menus own no text, so from a
@@ -566,6 +599,17 @@ impl App {
                 'w' => {
                     let range = editor::word_delete_range_back(&self.input, self.cursor);
                     self.kill_range(range);
+                }
+                // Jump-to-char, step one (#67): arm the pending
+                // jump. Ctrl+Alt+] arms the backward one — pi's
+                // chords. Legacy terminals send Ctrl+] as the ESC
+                // byte, so this lives under the kitty protocol.
+                ']' => {
+                    self.jump_pending = Some(if key.modifiers.contains(KeyModifiers::ALT) {
+                        editor::Jump::Backward
+                    } else {
+                        editor::Jump::Forward
+                    });
                 }
                 // Ctrl+Y yanks the newest kill back (#64).
                 'y' => self.yank(),
@@ -3112,7 +3156,66 @@ mod tests {
         type_string(&mut app, "hello");
         assert!(app.completion.is_none());
     }
+    #[test]
+    fn a_pending_jump_lands_on_the_next_occurrence_or_dies_at_none() {
+        let mut app = app();
+        type_string(&mut app, "abca");
+        app.cursor = 0;
+        // Ctrl+] arms the jump; `a` is the target. The first `a`
+        // is behind the cursor, so the landing is the second.
+        app.handle_key(ctrl(KeyCode::Char(']')));
+        app.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(app.cursor, 3);
+        // Standing on it, the same pair finds none and moves
+        // nothing.
+        app.handle_key(ctrl(KeyCode::Char(']')));
+        app.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(app.cursor, 3);
+        // Ctrl+Alt+] jumps back — and the character immediately
+        // behind the cursor counts.
+        app.handle_key(ctrl_alt(KeyCode::Char(']')));
+        app.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(app.cursor, 0);
+    }
 
+    #[test]
+    fn a_pending_jump_cancels_on_enter_without_submitting_the_draft() {
+        let mut app = app();
+        type_string(&mut app, "draft");
+        app.cursor = 0;
+        app.handle_key(ctrl(KeyCode::Char(']')));
+        // Enter is the cancel, not a submission: the draft stays.
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.input, "draft");
+        assert!(!app.quit);
+        assert!(app.messages.is_empty(), "nothing was sent");
+        // The pending mode is gone, so plain typing types again.
+        app.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(app.input, "xdraft");
+    }
+
+    #[test]
+    fn a_pending_jump_cancels_on_the_chord_itself_and_lets_other_keys_through() {
+        let mut app = app();
+        type_string(&mut app, "ab");
+        app.cursor = 0;
+        // Re-pressing the chord cancels rather than re-arming (pi's
+        // rule), so the next `a` types instead of jumping.
+        app.handle_key(ctrl(KeyCode::Char(']')));
+        app.handle_key(ctrl(KeyCode::Char(']')));
+        app.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(app.input, "aab");
+        // Any other chord acts normally, pending consumed: a motion
+        // after an armed jump still moves the cursor.
+        app.handle_key(ctrl(KeyCode::Char(']')));
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.cursor, 2, "the chord fell through to the motion");
+        // And a target carrying control is not a target: the pending
+        // mode is consumed and the motion chord still ran.
+        app.handle_key(ctrl(KeyCode::Char(']')));
+        app.handle_key(ctrl(KeyCode::Char('a')));
+        assert_eq!(app.cursor, 0, "ctrl+a still ran, pending consumed");
+    }
     #[test]
     fn enter_on_completion_executes_the_command() {
         let mut app = app();
@@ -3687,6 +3790,10 @@ mod tests {
 
     fn alt(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::ALT)
+    }
+
+    fn ctrl_alt(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL | KeyModifiers::ALT)
     }
 
     #[test]

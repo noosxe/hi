@@ -14,6 +14,10 @@ pub const KEYBINDS: &[(&str, &str)] = &[
     ("Ctrl+F", "cursor forward one character"),
     ("Alt+B", "cursor back one word"),
     ("Alt+F", "cursor forward one word"),
+    (
+        "Ctrl+]",
+        "jump forward to a character (ctrl+alt+] jumps back)",
+    ),
     // kills
     ("Ctrl+D", "delete the character ahead"),
     ("Ctrl+K", "kill to end of line"),
@@ -91,7 +95,7 @@ mod tests {
             // Arms of the ctrl chord match are bare `'x' =>`.
             if let Some(rest) = line.trim_start().strip_prefix('\'')
                 && let Some(letter) = rest.chars().next()
-                && letter.is_ascii_lowercase()
+                && (letter.is_ascii_lowercase() || letter == ']')
                 && rest[1..].starts_with("' =>")
             {
                 bound.push(format!("Ctrl+{}", letter.to_ascii_uppercase()));

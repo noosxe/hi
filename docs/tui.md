@@ -324,6 +324,7 @@ jump at `-`, `/`, `.`.
 | ← / → , Ctrl+B / F | move one character (clamped) |
 | Home / End, Ctrl+A / E | start / end of the line (AD-0018) |
 | Alt+B / F, Alt+← / →, Ctrl+← / → | word jump (separator-skip, then word-skip; the newline is a separator) |
+| Ctrl+] , Ctrl+Alt+] | jump to the next / previous occurrence of a character (#67) — pi's two-step: the chord arms, the next printable key is the target; none moves nothing, Enter cancels rather than submit; needs the kitty protocol (legacy Ctrl+] *is* ESC) |
 | Shift+Enter, Ctrl+J, literal LF | newline — the encoding is the capability (AD-0018) |
 | Cmd+← / → (SUPER) | start / end — kitty-protocol reporting (AD-0013) |
 | Backspace | remove the character before the cursor |
