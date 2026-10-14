@@ -1281,3 +1281,14 @@ default already includes all dependency types, so the group carries
 selector wording is the documented form for `groups.update-types`
 (the `version-update:semver-*` prefixed form belongs to
 `allow`/`ignore` only).
+
+**AD-0037 addendum 2 (2026-10-16):** the selector-less group was
+still wrong — dependabot's runtime schema requires every group to
+match a selector-bearing form (`anyOf` over patterns /
+exclude-patterns / dependency-type / update-types); `applies-to` is
+metadata, not a selector. The actions group now uses the documented
+catch-all, `patterns: ["*"]`. SchemaStore's `dependabot-2.0.json`
+(ajv-validated locally) catches key and enum mistakes but is looser
+than the runtime here — it accepted the selector-less group — so the
+group shape follows the docs' examples, with the schema check as the
+second gate, not the first.
