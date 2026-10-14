@@ -122,7 +122,7 @@ structural chunk-walk for the kitty renderer — AD-0010 — and
   `spawn_agent_turn` — resolve_target keeps them in sync, and the `/model`
   picker re-attaches both.
 - Deferred with issues: full gitignore semantics (#28), images in read
-  (#29), process-group kill for bash (#30), `/tools` command (#27).
+  (#29), `/tools` command (#27), Job Objects on Windows (#31).
 
 ## tasks.rs — work that outlives a turn (#5)
 
@@ -133,8 +133,9 @@ into a 256 KiB ring (instant tails) plus a full log file under
 `<data-dir>/tasks`, and the worker owns every state transition
 (`Running → Succeeded/Failed/Killed/TimedOut`). Unix tasks get their own
 process group, so cancel/timeout/shutdown kill grandchildren too —
-deliberately stronger than the `bash` tool (#30 is bash's limitation,
-not the manager's). Completion is one `TaskCompletion` into a channel
+and since #30 the `bash` tool shares the plumbing (`process.rs`:
+`own_group` at spawn, `stop_tree` TERM → grace → KILL at timeout),
+so a timed-out command cannot leave orphans behind either. Completion is one `TaskCompletion` into a channel
 the front end drains per frame; dropping the last handle kills every
 running group. Threads, not tokio — the choice #6's Luau bridge
 inherits. No default timeout: long-lived work is the point; a cap of

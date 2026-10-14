@@ -75,15 +75,17 @@ impl Tool for BashTool {
         };
         let timeout = opt_usize(&args, "timeout")?;
 
-        let mut child = Command::new("bash")
-            .arg("-c")
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c")
             .arg(&command)
             .current_dir(&self.cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("cannot spawn bash: {e}"))?;
+            .stderr(Stdio::piped());
+        // Own process group (#30): the timeout kill takes the whole
+        // tree — the task manager's rule, shared plumbing.
+        crate::process::own_group(&mut cmd);
+        let mut child = cmd.spawn().map_err(|e| format!("cannot spawn bash: {e}"))?;
         let Some(mut out_pipe) = child.stdout.take() else {
             return Err("bash produced no stdout pipe".into());
         };
@@ -105,8 +107,7 @@ impl Tool for BashTool {
                 if let Some(deadline) = deadline
                     && Instant::now() >= deadline
                 {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    crate::process::stop_tree(&mut child);
                     timed_out = true;
                     break None;
                 }
@@ -216,6 +217,40 @@ mod tests {
             .execute(r#"{"command":"sleep 30","timeout":1}"#)
             .unwrap_err();
         assert!(err.starts_with("timeout after 1s"), "got: {err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn timeout_kills_the_whole_tree_not_just_the_child() {
+        let root = temp_root("tree");
+        let pid_file = root.join("gc.pid");
+        // The direct child is the tool's `bash`; the quoted `sh` is
+        // its grandchild and announces its own pid before sleeping.
+        let cmd = format!(
+            r#"{{"command":"sh -c 'echo $$ > {}; sleep 30' & sleep 30","timeout":1}}"#,
+            pid_file.display()
+        );
+        let started = std::time::Instant::now();
+        let err = tool(&root).execute(&cmd).unwrap_err();
+        assert!(err.starts_with("timeout after 1s"), "got: {err}");
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .expect("grandchild never started")
+            .trim()
+            .parse()
+            .expect("pid file held a pid");
+        // The grandchild must die with the tree: poll for ESRCH —
+        // before #30 it survived its parent's kill and kept the
+        // signal slot alive for a few seconds here.
+        let mut dead = false;
+        while started.elapsed() < std::time::Duration::from_secs(5) {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                dead = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(dead, "grandchild {pid} outlived the timeout kill");
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
     }
 

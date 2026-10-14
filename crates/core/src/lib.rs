@@ -11,6 +11,7 @@ pub mod image_util;
 pub mod message;
 pub mod mock;
 pub mod openai;
+pub(crate) mod process;
 pub mod provider;
 pub mod selection;
 pub mod session;
