@@ -27,6 +27,10 @@ updates:
       interval: weekly
     groups:
       actions:
-        applies-to: version-updates
+        # A group needs at least one selector (patterns, update-types,
+        # ...) — applies-to alone is metadata, not a selector, and the
+        # runtime schema rejects it. '*' is the documented catch-all.
+        patterns:
+          - "*"
     commit-message:
       prefix: "ci"
