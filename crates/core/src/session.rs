@@ -924,7 +924,7 @@ mod tests {
 
     #[test]
     fn name_and_forked_from_are_optional_camel_case_fields() {
-        let root = temp_root("names");
+        let root = temp_root("nameheader");
         let session =
             Session::start_in(&root, Path::new("/p"), "prov", "mod", None, Some("my work"))
                 .unwrap();
