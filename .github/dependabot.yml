@@ -1,0 +1,33 @@
+# Dependency automation (#24, AD-0037): both ecosystems weekly, one
+# grouped PR each, conventional-commit prefixes matching the house
+# history (feat:/fix:). Rust ignores major bumps — majors land by
+# deliberate ruling, not by bot; actions arrive as SHA bumps with the
+# version comment refreshed (the pinning rule in ci.yml).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      rust-deps:
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    commit-message:
+      prefix: "chore"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        applies-to: version-updates
+        dependency-type: "all"
+    commit-message:
+      prefix: "ci"

@@ -12,7 +12,7 @@ cargo test           # full suite; NO network needed
 cargo run            # hi --mock needs no config
 ```
 
-CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI).
+CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI). Third-party actions are SHA-pinned with a `# vX.Y.Z` comment; `dtolnay/rust-toolchain@stable` stays a moving branch ref on purpose — the compiler channel is pinned by `rust-toolchain.toml` (#24, AD-0037). Dependabot (`.github/dependabot.yml`) opens one grouped PR per ecosystem weekly (`cargo`, `github-actions`), ignoring Rust major bumps.
 
 Current count: **411 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 66

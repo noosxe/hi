@@ -1252,3 +1252,22 @@ the red test proved both at once (a backgrounded `sleep 30` kept
 own pid, the same proof shape the manager's tests use. Windows is
 unchanged until #31 (Job Objects): `own_group` and `kill_group`
 carry the `#[cfg]` halves, `stop_tree` keeps the manager's shape.
+
+---
+
+## AD-0037 — SHA-pin the actions, keep the toolchain branch moving, let dependabot drive both (#24, 2026-10-16)
+
+Action tags are mutable; the CI supply chain is not. The three
+third-party actions (`actions/checkout`, `Swatinem/rust-cache`,
+`rustsec/audit-check`) are pinned to full commit SHAs with a
+`# vX.Y.Z` comment — dependabot's recognized format, so its weekly
+bump refreshes the human-readable version alongside the SHA.
+`dtolnay/rust-toolchain@stable` deliberately stays a moving branch
+ref: it is a branch, not a version tag, and the compiler channel is
+already pinned by `rust-toolchain.toml` / `flake.nix` — freezing the
+action's branch logic would buy immutability in the one place the
+repo pins by file instead. `.github/dependabot.yml` opens one
+grouped PR per ecosystem weekly (`cargo` and `github-actions`),
+ignores Rust semver-major bumps (majors land by ruling, not by bot),
+and prefixes commits `chore:` / `ci:` — conventional-commit types in
+the house's `feat:`/`fix:` voice.
