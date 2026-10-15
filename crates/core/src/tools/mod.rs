@@ -23,6 +23,7 @@ mod grep;
 pub(crate) mod image_resize;
 mod ls;
 mod read;
+mod subagent;
 mod tasks;
 mod truncate;
 mod walk;
@@ -34,6 +35,7 @@ pub use find::FindTool;
 pub use grep::GrepTool;
 pub use ls::LsTool;
 pub use read::ReadTool;
+pub use subagent::SubagentTool;
 pub use tasks::{TaskCancelTool, TaskOutputTool, TaskRunTool, TaskStatusTool};
 pub use truncate::{MAX_BYTES, MAX_LINES};
 pub use write::WriteTool;
@@ -112,12 +114,16 @@ impl ToolBundle {
     /// the registry outlives model switches, the policy follows.
     /// `tasks` is the background-task handle (#5): `Some` adds the
     /// `task_*` tools to the process-spawning bundles (`coding`, `all`);
-    /// `None` leaves them out entirely.
+    /// `None` leaves them out entirely. `subagent` is the nested-agent
+    /// handle (#4): `Some` adds the `subagent` tool to the same bundles;
+    /// `None` (as inside every nested run) leaves it out — recursion is
+    /// impossible by construction.
     pub fn registry(
         self,
         cwd: &Path,
         images: ImageGate,
         tasks: Option<crate::tasks::TaskManager>,
+        subagent: Option<crate::subagent::SubagentRunner>,
     ) -> ToolRegistry {
         let task_tools = |tasks: &crate::tasks::TaskManager| -> Vec<Arc<dyn Tool>> {
             vec![
@@ -151,6 +157,14 @@ impl ToolBundle {
                 Arc::new(LsTool::new(cwd)),
             ],
         };
+        if let Some(runner) = subagent {
+            match self {
+                Self::Coding | Self::All => {
+                    tools.push(Arc::new(crate::tools::SubagentTool::new(runner)))
+                }
+                _ => {}
+            }
+        }
         if let Some(tasks) = tasks {
             match self {
                 Self::Coding | Self::All => tools.extend(task_tools(&tasks)),
@@ -240,7 +254,7 @@ mod tests {
     fn bundles_build_the_expected_registries() {
         let cwd = std::env::temp_dir();
         let names = |bundle: ToolBundle| -> Vec<String> {
-            let reg = bundle.registry(&cwd, ImageGate::new(false), None);
+            let reg = bundle.registry(&cwd, ImageGate::new(false), None, None);
             reg.definitions()
                 .iter()
                 .filter_map(|d| d["function"]["name"].as_str().map(str::to_string))
@@ -248,7 +262,7 @@ mod tests {
         };
         assert!(
             ToolBundle::None
-                .registry(&cwd, ImageGate::new(false), None)
+                .registry(&cwd, ImageGate::new(false), None, None)
                 .is_empty()
         );
         assert_eq!(
@@ -261,17 +275,41 @@ mod tests {
         );
         assert_eq!(
             ToolBundle::All
-                .registry(&cwd, ImageGate::new(false), None)
+                .registry(&cwd, ImageGate::new(false), None, None)
                 .len(),
             7
         );
     }
 
     #[test]
+    fn subagent_tool_rides_coding_and_all_only_with_a_runner() {
+        let cwd = std::env::temp_dir();
+        let runner = crate::subagent::SubagentRunner::new(Default::default(), cwd.clone(), false);
+        let names =
+            |bundle: ToolBundle, sub: Option<crate::subagent::SubagentRunner>| -> Vec<String> {
+                bundle
+                    .registry(&cwd, ImageGate::new(false), None, sub)
+                    .definitions()
+                    .iter()
+                    .filter_map(|d| d["function"]["name"].as_str().map(str::to_string))
+                    .collect()
+            };
+        // `definitions()` is sorted by name, not registration order.
+        let coding = names(ToolBundle::Coding, Some(runner.clone()));
+        assert_eq!(coding, vec!["bash", "edit", "read", "subagent", "write"]);
+        let all = names(ToolBundle::All, Some(runner.clone()));
+        assert_eq!(all.len(), 8);
+        assert!(all.contains(&"subagent".into()));
+        // read-only never carries it; no runner, no tool.
+        assert!(!names(ToolBundle::ReadOnly, Some(runner.clone())).contains(&"subagent".into()));
+        assert!(!names(ToolBundle::Coding, None).contains(&"subagent".into()));
+    }
+
+    #[test]
     fn registry_prompt_notes_collect_bullets_in_wire_order() {
         let cwd = std::env::temp_dir();
         let notes = ToolBundle::Coding
-            .registry(&cwd, ImageGate::new(false), None)
+            .registry(&cwd, ImageGate::new(false), None, None)
             .prompt_notes();
         assert!(notes.starts_with("- "), "got: {notes}");
         assert!(notes.contains("Use read to examine files"));

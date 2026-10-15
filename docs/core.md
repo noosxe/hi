@@ -1,7 +1,7 @@
 # `hi-core` reference
 
 Files this doc describes: everything under `crates/core/src/` — `lib.rs`,
-`message.rs`, `event.rs`, `tool.rs`, `agent.rs`, `session.rs`, `headless.rs`, `tools/`, `provider.rs`, `openai.rs`, `mock.rs`, `config.rs`,
+`message.rs`, `event.rs`, `tool.rs`, `agent.rs`, `subagent.rs`, `session.rs`, `headless.rs`, `tools/`, `provider.rs`, `openai.rs`, `mock.rs`, `config.rs`,
 `selection.rs`, `settings.rs`, `thinking.rs`, `system_prompt.rs`,
 `test_support.rs`.
 
@@ -87,7 +87,7 @@ structural chunk-walk for the kitty renderer — AD-0010 — and
 `from_rgba`, pixels → PNG for clipboard pastes —
 [decisions.md](decisions.md) AD-0011).
 
-- **The seven built-ins**: `read` (line-numbered, `offset`/`limit` paging;
+- **The eight built-ins**: `read` (line-numbered, `offset`/`limit` paging;
   image files — png/jpeg/webp/gif, magic-byte sniffed, never extension-guessed — are
   base64-attached for the model when the startup image policy allows, after the
   `image_resize` ladder fits them to a universal budget; notes always say what happened)
@@ -96,7 +96,10 @@ structural chunk-walk for the kitty renderer — AD-0010 — and
   against the ORIGINAL file, each exactly once, overlaps rejected),
   `write` (creates parents, full overwrite), `grep` (`regex` crate, rg-style
   rendering, `glob` filter, context), `find` (`globset`, .gitignore-aware),
-  `ls` (sorted, `/` suffix for dirs, dotfiles).
+  `ls` (sorted, `/` suffix for dirs, dotfiles), `subagent` (one nested
+  agent run per call — fresh history, own provider/model/thinking/toolset,
+  the runner in `subagent.rs`; registered in `coding`/`all` only when the
+  front end hands the registry a runner).
 - **The four task tools (#5, AD-0019)**: `task_run` (spawn long-lived
   work in its own process group, return the id at once; optional `cwd`
   resolves against the session cwd like every path tool and must exist,
@@ -132,6 +135,25 @@ structural chunk-walk for the kitty renderer — AD-0010 — and
   picker re-attaches both.
 - Deferred with issues: full gitignore semantics (#28), images in read
   (#29), `/tools` command (#27), Job Objects on Windows (#31).
+
+## subagent.rs — nested agent runs (#4)
+
+`SubagentRunner::run(&SubagentSpec)` scopes one [`spawn_agent_turn`] to a
+fresh session: history is *built* (`System(subagent prompt)` + the task as
+the single `User` message — the parent transcript never leaks in), the
+toolset comes from a bundle registry built with `subagent: None` (recursion
+impossible by construction; `tasks: None` too — background-task ownership
+stays with the main session), and the round cap defaults to
+`SUBAGENT_MAX_TOOL_ROUNDS` (8), hit as a loud error. Identity is a stamped
+*name pair* (provider, model), never the parent's provider `Arc` — every
+run builds its own provider wired to its own registry; the front end
+restamps on every provider rebuild (`/model`, `/resume`), the
+telemetry-stamp pattern. `run` is blocking by ruling (the tool loop is
+sequential; parallelism is #5's) and returns a shaped `SubagentResult`
+{final text, the subagent's own usage, round count} — `Event::Error`
+becomes `Err`. The `subagent` tool (`tools/subagent.rs`) is the model
+surface: `{prompt, provider?, model?, thinking?, tools?, max_rounds?}`,
+result plus an up/down token line; in `coding`/`all` only.
 
 ## tasks.rs — work that outlives a turn (#5)
 

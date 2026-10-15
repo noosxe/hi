@@ -119,6 +119,11 @@ pub(crate) fn test_app() -> App {
         images_setting: true,
         tasks: None,
         task_turns: false,
+        subagent: hi_core::subagent::SubagentRunner::new(
+            Default::default(),
+            std::env::temp_dir(),
+            false,
+        ),
     })
 }
 
@@ -263,6 +268,8 @@ pub struct App {
     /// The background-task manager shared with the registry (#5). The
     /// app drains completions per frame; `None` when no task tools run.
     pub tasks: Option<hi_core::tasks::TaskManager>,
+    /// The nested-agent runner (#4); restamped on provider rebuilds.
+    pub subagent: hi_core::subagent::SubagentRunner,
     /// The open `/tasks` pane (AD-0021) — list or one task's output.
     /// `Some` = owns the keyboard, like the pickers.
     pub tasks_view: Option<TasksView>,
@@ -404,6 +411,7 @@ impl App {
             images_setting,
             tasks,
             task_turns,
+            subagent,
         } = init;
         // The ring replays from the transcript it rode in on (#87) —
         // a resume or fork hands its prompts back to ↑.
@@ -447,6 +455,7 @@ impl App {
             tasks,
             tasks_view: None,
             task_turns,
+            subagent,
             auto_trigger_budget: AUTO_TRIGGER_BUDGET,
             auto_armed: false,
             usage,
@@ -1031,6 +1040,9 @@ impl App {
                 .with_telemetry(self.telemetry)
                 .with_cache_key(cache_key),
         );
+        // The subagent runner follows the switch: inherited runs use
+        // whatever identity is current, never a stale one.
+        self.subagent.stamp(provider.to_string(), model.to_string());
     }
 
     /// Switch this session to `provider/model`. Safe even mid-turn:
@@ -2378,6 +2390,11 @@ mod tests {
             images_setting: true,
             tasks: None,
             task_turns: false,
+            subagent: hi_core::subagent::SubagentRunner::new(
+                Default::default(),
+                std::env::temp_dir(),
+                false,
+            ),
         };
         let app = app_with(init);
         assert_eq!(app.usage.completion_tokens, 60);
@@ -2407,9 +2424,31 @@ mod tests {
             images_setting: true,
             tasks: None,
             task_turns: false,
+            subagent: hi_core::subagent::SubagentRunner::new(
+                Default::default(),
+                std::env::temp_dir(),
+                false,
+            ),
         };
         let app = app_with(init);
         assert_eq!(app.history, vec!["first".to_string(), "second".to_string()]);
+    }
+
+    #[test]
+    fn model_switch_restamps_the_subagent_runner() {
+        let mut app = test_app();
+        assert_eq!(app.subagent.current(), None);
+        app.config =
+            serde_json::from_str(r#"{"providers":{"mprov":{"baseUrl":"http://127.0.0.1:1/v1"}}}"#)
+                .unwrap();
+        app.apply_model_choice("mprov/m".into());
+        // Inherited subagent runs follow the switch, never a stale
+        // identity.
+        assert_eq!(
+            app.subagent.current(),
+            Some(("mprov".to_string(), "m".to_string()))
+        );
+        assert_eq!(app.status.provider, "mprov");
     }
 
     #[test]
