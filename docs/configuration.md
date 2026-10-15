@@ -83,6 +83,7 @@ A credential *source*, not necessarily a literal:
   "telemetry": false               // opt-in provider attribution; see below
   "images": true                   // image upload master switch; default on
   "taskTurns": false               // opt-in: finished background tasks may start a turn
+  "sessionRetention": 30           // opt-in: prune session files older than N days at startup
 }
 ```
 
@@ -94,6 +95,13 @@ A credential *source*, not necessarily a literal:
   fails startup loudly in both places.
 - `defaultModel` applies **only when no `--provider`/`--model` flags are
   given** (precedence in [core.md](core.md) → selection.rs).
+- `sessionRetention` (#23) is opt-in and absent by default: sessions
+  are user history and are never deleted unless you set it. When set,
+  startup deletes `*.jsonl` session files older than that many days
+  across every project — before any session opens, best-effort, one
+  stderr line only when something was removed. A session being
+  written right now refreshes its mtime, so a live run is never a
+  prune candidate.
 - `/settings` flips what the running session can flip — `taskTurns`,
   `images` — without touching this file; Ctrl-S on the board writes
   one field back here (AD-0023). The file stays the startup source of

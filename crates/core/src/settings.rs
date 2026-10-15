@@ -47,6 +47,13 @@ pub struct Settings {
     /// human spends turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_turns: Option<bool>,
+    /// Opt-in session retention (#23): delete session files older than
+    /// this many days at startup, before any session opens. Absent
+    /// means never prune — sessions are user history, and pi-parity
+    /// was verified (pi never deletes them). Startup policy only, so
+    /// it is not flippable from `/settings`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_retention: Option<u64>,
 }
 
 /// The effective telemetry choice: `HI_TELEMETRY` wins when set (pi's
@@ -191,6 +198,15 @@ mod tests {
     }
 
     #[test]
+    fn session_retention_is_opt_in_camel_case_days() {
+        let raw = r#"{"sessionRetention": 30}"#;
+        let settings: Settings = serde_json::from_str(raw).unwrap();
+        assert_eq!(settings.session_retention, Some(30));
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.session_retention, None);
+    }
+
+    #[test]
     fn empty_object_means_no_default() {
         let settings: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(settings.default_model, None);
@@ -215,6 +231,7 @@ mod tests {
             telemetry: Some(true),
             images: Some(false),
             task_turns: None,
+            session_retention: None,
         };
         existing.save_to(&path).unwrap();
 
@@ -243,6 +260,7 @@ mod tests {
             telemetry: Some(true),
             images: Some(false),
             task_turns: None,
+            session_retention: None,
         };
         existing.save_to(&path).unwrap();
 
@@ -329,6 +347,7 @@ mod tests {
             telemetry: None,
             images: None,
             task_turns: None,
+            session_retention: None,
         };
         original.save_to(&path).unwrap();
         let loaded = Settings::load_from(&path).unwrap();

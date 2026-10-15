@@ -22,7 +22,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -367,6 +367,48 @@ pub fn sessions_all_root(root: &Path) -> Result<Vec<SessionSummary>, String> {
     }
     summaries.sort_by_key(|summary| std::cmp::Reverse(summary.modified));
     Ok(summaries)
+}
+
+/// Opt-in session retention (#23): delete `<project>/*.jsonl` files
+/// whose mtime is older than `max_age`. Sessions are user history, so
+/// nothing is ever pruned unless the `sessionRetention` setting is
+/// set (pi-parity verified: pi never deletes session files). Age-only
+/// by ruling: a session being appended to refreshes its mtime, so a
+/// live file is never a candidate — mtime *is* the liveness signal,
+/// and no byte ceiling exists to evict fresh files. Only plain
+/// `.jsonl` files are touched (a directory named like one survives);
+/// every error is swallowed; a missing root is a silent no-op.
+/// Returns the removal count.
+pub fn prune_sessions(root: &Path, max_age: Duration) -> usize {
+    let Ok(projects) = std::fs::read_dir(root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for project in projects.flatten() {
+        if !project.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(project.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let is_our_kind = file.file_name().to_string_lossy().ends_with(".jsonl")
+                && file.file_type().is_ok_and(|t| t.is_file());
+            if !is_our_kind {
+                continue;
+            }
+            let aged = file
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|m| m.elapsed().ok())
+                .is_some_and(|d| d > max_age);
+            if aged && std::fs::remove_file(file.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
 }
 
 /// Invert [`project_key`]: the encoded directory component back to the
@@ -1185,5 +1227,101 @@ mod tests {
         };
         assert!(result.images.is_empty());
         assert_eq!(result.content, "text only");
+    }
+
+    #[test]
+    fn prune_removes_only_aged_session_files() {
+        let root = temp_root("retention");
+        let cwd = Path::new("/ret-demo");
+        Session::start_in(&root, cwd, "p", "m", None, None).unwrap();
+        Session::start_in(&root, cwd, "p", "m", None, None).unwrap();
+        let dir = root.join(project_key(cwd));
+        let paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(paths.len(), 2);
+        backdate(&paths[0], Duration::from_secs(31 * 24 * 3600));
+        backdate(&paths[1], Duration::from_secs(8 * 24 * 3600));
+        let removed = prune_sessions(&root, Duration::from_secs(30 * 24 * 3600));
+        assert_eq!(removed, 1);
+        assert!(!paths[0].exists());
+        assert!(paths[1].exists());
+    }
+
+    #[test]
+    fn prune_walks_every_project_dir() {
+        let root = temp_root("retention-multi");
+        Session::start_in(&root, Path::new("/a"), "p", "m", None, None).unwrap();
+        Session::start_in(&root, Path::new("/b"), "p", "m", None, None).unwrap();
+        // Don't hardcode the project-key encoding — walk whatever
+        // subdirs exist.
+        for entry in std::fs::read_dir(&root).unwrap().flatten() {
+            let file = std::fs::read_dir(entry.path())
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            backdate(&file, Duration::from_secs(40 * 24 * 3600));
+        }
+        assert_eq!(
+            prune_sessions(&root, Duration::from_secs(30 * 24 * 3600)),
+            2
+        );
+    }
+
+    #[test]
+    fn prune_never_touches_non_session_entries() {
+        let root = temp_root("retention-stray");
+        let dir = root.join(project_key(Path::new("/stray")));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.txt"), "user data").unwrap();
+        std::fs::write(dir.join("keep.jsonl"), "fresh session").unwrap();
+        std::fs::create_dir_all(dir.join("9c9e9999-0000-0000-0000-000000000000.jsonl")).unwrap();
+        // A jsonl so old it would go if it were a file.
+        let old = dir.join("1000000000000_deadbeef-0000-0000-0000-000000000000.jsonl");
+        std::fs::write(&old, "x").unwrap();
+        backdate(&old, Duration::from_secs(400 * 24 * 3600));
+        let removed = prune_sessions(&root, Duration::from_secs(30 * 24 * 3600));
+        assert_eq!(removed, 1);
+        assert!(dir.join("notes.txt").exists());
+        assert!(dir.join("keep.jsonl").exists());
+        assert!(
+            dir.join("9c9e9999-0000-0000-0000-000000000000.jsonl")
+                .exists()
+        );
+        // A missing root is a silent no-op.
+        assert_eq!(prune_sessions(&root.join("nope"), Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn latest_still_finds_the_newest_after_prune() {
+        let root = temp_root("retention-latest");
+        let cwd = Path::new("/ret-latest");
+        Session::start_in(&root, cwd, "p", "old", None, None).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+        Session::start_in(&root, cwd, "p", "new", None, None).unwrap();
+        let dir = root.join(project_key(cwd));
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .collect();
+        paths.sort();
+        backdate(&paths[0], Duration::from_secs(31 * 24 * 3600));
+        prune_sessions(&root, Duration::from_secs(30 * 24 * 3600));
+        let found = latest_in_root(&root, cwd)
+            .unwrap()
+            .expect("newest survives");
+        assert!(found.path.file_name().unwrap() == paths[1].file_name().unwrap());
+    }
+
+    /// Backdate a file's mtime (the tasks.rs retention-test pattern).
+    fn backdate(path: &Path, age: Duration) {
+        let f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now() - age))
+            .unwrap();
     }
 }

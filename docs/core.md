@@ -156,7 +156,11 @@ One JSONL file per session under the data dir (`config::data_dir()` +
 `sessions/`), in a cwd-keyed project directory (pi-style encoding). Only
 finalized messages — and one `usage` record per round (the bill, #85) —
 are persisted, appended and flushed at turn end; the reader tolerates a
-torn final line and rejects malformation anywhere else.
+torn final line and rejects malformation anywhere else. Retention is
+opt-in (#23): with `sessionRetention` set (days), startup deletes aged
+`*.jsonl` files across every project before any session opens —
+best-effort, mtime is the liveness signal, absent key means never
+prune (pi never deletes sessions either).
 
 - `Session::start` / `Session::resume(path)` — create or reopen; the file
   handle stays open in append mode for the session's life.
