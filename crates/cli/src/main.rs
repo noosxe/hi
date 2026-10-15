@@ -182,6 +182,8 @@ fn dispatch(cli: Cli) -> ExitCode {
             Catalog::default(),
             ModelsConfig::default(),
             // The mock ignores system prompts — nothing to resolve.
+            // The runner is inert here (empty registry, no subagent
+            // tool), but the field is mandatory.
             SessionInit {
                 system_prompt: None,
                 thinking: None,
@@ -194,6 +196,11 @@ fn dispatch(cli: Cli) -> ExitCode {
                 images_setting: true,
                 tasks: None,
                 task_turns: false,
+                subagent: hi_core::subagent::SubagentRunner::new(
+                    ModelsConfig::default(),
+                    std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
+                    false,
+                ),
             },
             // The mock never touches the wire — nothing to attribute.
             false,
@@ -270,6 +277,7 @@ fn dispatch(cli: Cli) -> ExitCode {
         images_setting: target.images_setting,
         tasks: target.tasks,
         task_turns: target.task_turns,
+        subagent: target.subagent,
     };
     launch(
         target.provider,
@@ -309,6 +317,10 @@ struct Target {
     /// the TUI drains its completion channel per frame (#5, AD-0019).
     /// Headless runs hold it only here, so drop = exit = groups killed.
     tasks: Option<hi_core::tasks::TaskManager>,
+    /// The nested-agent runner (#4) the registry's `subagent` tool
+    /// shares; handed to SessionInit so the TUI's provider rebuilds
+    /// (/model, /resume) restamp the inherited identity.
+    subagent: hi_core::subagent::SubagentRunner,
 }
 
 fn resolve_target(
@@ -361,7 +373,15 @@ fn resolve_target(
     let task_turns = settings.task_turns_enabled();
     let images = ImageGate::new(entry.images_allowed(&selected.model, images_setting));
     let tasks = hi_core::tasks::tasks_dir().map(hi_core::tasks::TaskManager::new);
-    let tools = Arc::new(bundle.registry(&cwd, images.clone(), tasks.clone()));
+    // The nested-agent runner (#4): restamped on every provider rebuild
+    // so inherits follow /model and /resume.
+    let subagent = hi_core::subagent::SubagentRunner::new(
+        config.clone(),
+        cwd.clone(),
+        settings.telemetry_enabled(),
+    );
+    let tools =
+        Arc::new(bundle.registry(&cwd, images.clone(), tasks.clone(), Some(subagent.clone())));
     let system_prompt = {
         let mut prompt = hi_core::system_prompt::resolve();
         let notes = tools.prompt_notes();
@@ -383,6 +403,7 @@ fn resolve_target(
             .with_tools(Arc::clone(&tools))
             .with_telemetry(settings.telemetry_enabled()),
     );
+    subagent.stamp(selected.provider.clone(), selected.model.clone());
     Ok(Target {
         provider,
         status: Status {
@@ -399,6 +420,7 @@ fn resolve_target(
         images_setting,
         tasks,
         task_turns,
+        subagent,
     })
 }
 
@@ -411,6 +433,9 @@ fn stamp_session_cache_key(target: &mut Target, session: &Session) {
     let Some(entry) = target.config.providers.get(&target.status.provider) else {
         return; // mock or unknown provider — nothing on the wire to stamp
     };
+    target
+        .subagent
+        .stamp(target.status.provider.clone(), target.status.model.clone());
     target.provider = Arc::new(
         OpenAiCompatProvider::from_config(entry, target.status.model.clone())
             .with_system_prompt(target.system_prompt.clone())

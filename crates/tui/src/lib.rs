@@ -72,6 +72,10 @@ pub struct SessionInit {
     /// The background-task manager shared with the registry's `task_*`
     /// tools. The app drains its completion channel per frame and shows
     /// the running count in the status row (`None` = no task tools).
+    /// The nested-agent runner (#4): the `subagent` tool's handle. The
+    /// app restamps it on every provider rebuild so inherited runs
+    /// follow /model and /resume.
+    pub subagent: hi_core::subagent::SubagentRunner,
     pub tasks: Option<hi_core::tasks::TaskManager>,
     /// The `settings.taskTurns` opt-in, resolved at startup (#72,
     /// AD-0022): a finished task may start a turn. The app owns the

@@ -69,6 +69,11 @@ into the scrollback above the viewport exactly once
   before `TurnEnd` — the single finalization path is unchanged.
 - Cancellation is unchanged: dropping the `Receiver` fails the loop's next
   send and everything unwinds.
+- Subagents (#4) ride this contract one level down: a subagent is an
+  in-flight tool call, so a cancelled turn abandons its thread exactly as
+  it abandons a running `bash`; the abandoned subagent then self-stops at
+  its *own* next `send` — the same dropped-`Receiver` contract, no new
+  cancellation primitive.
 
 ## Cancellation (Esc)
 

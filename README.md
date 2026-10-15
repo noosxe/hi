@@ -25,11 +25,11 @@ later.
 - `read` attaches image files (png/jpeg/webp/gif) — fail-open like pi: on unless the `images` master switch is off or a model sets `vision: false`; resized/transcoded to a universal budget first, honest metadata notes otherwise
 - on kitty-protocol terminals (kitty, Ghostty, WezTerm, Warp) those images render as real graphics in the transcript; everywhere else the text note stays
 - Ctrl-V pastes from the clipboard: an image is staged at a temp file and its path lands in the input as plain text — nothing sends until Enter, and the image enters the conversation only when the model reads it
-- Built-in agent tools: the model can read, search, list, write, edit, and run commands — the `coding` bundle by default, `--tools read-only|none|all` to change; the `all` bundle adds tracked background tasks (`task_run`/`task_status`/`task_output`/`task_cancel`): the model spawns long jobs and polls without blocking a turn
+- Built-in agent tools: the model can read, search, list, write, edit, and run commands — the `coding` bundle by default, `--tools read-only|none|all` to change; `coding` and `all` also carry `subagent`: the model runs nested agent sessions (fresh history, own provider/model/toolset choice, capped rounds, no recursion); the `all` bundle additionally adds tracked background tasks (`task_run`/`task_status`/`task_output`/`task_cancel`): the model spawns long jobs and polls without blocking a turn
 - A pi-style composer: `Ctrl-K`/`Ctrl-U`/`Ctrl-W` kill, `Ctrl-Y` yanks the newest kill back, `Alt-Y` cycles older kills; undo/redo (`Ctrl-Z`/`Alt-Z`); jump-to-char (`Ctrl+]` forward, `Ctrl+Alt+]` backward) — `/keybinds` prints the whole table on demand
-- 449 tests, including a fake HTTP server and a pty harness that drive the real binary
+- 463 tests, including a fake HTTP server and a pty harness that drive the real binary
 
-Not yet: JSONL event output for scripts, subagents, extensions.
+Not yet: JSONL event output for scripts, extensions.
 The selection and settings layers are built so each slots in without
 rework.
 
@@ -38,7 +38,7 @@ rework.
 ```sh
 nix develop          # Rust toolchain + cargo (or any Rust 1.85+, edition 2024)
 cargo run            # builds the `hi` binary; `hi --mock` needs no config
-cargo test           # 449 tests; no network needed
+cargo test           # 463 tests; no network needed
 ```
 
 

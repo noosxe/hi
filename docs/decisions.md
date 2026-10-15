@@ -1304,3 +1304,36 @@ pipe; (c) `--mode json` stays explicit — silent auto-JSON on a pipe
 would surprise. Explicit flags always win; the gate is a gap-filler,
 not a takeover — `std::io::IsTerminal` only, zero new deps, core
 untouched.
+
+---
+
+## AD-0040 — Subagents: a scoped loop, identity stamps, no recursion (2026-10-18)
+
+#4's runner is a scoping function over `spawn_agent_turn`, never a second
+implementation. The rulings:
+
+- **History is built, not taken.** A subagent starts from
+  `System(subagent prompt)` plus the task as its single `User` message;
+  the parent transcript never leaks in. What crosses back is a shaped
+  `SubagentResult` — final text, the run's own usage, round count —
+  never raw events.
+- **The slot stamps identity, not Arcs.** `stamp(provider, model)` records
+  names; every run resolves its own provider from config and wires it to
+  the subagent's own registry. Reusing the parent's provider `Arc` would
+  put the parent's toolset on the wire. The front end restamps on every
+  provider rebuild — `/model`, `/resume` — the telemetry-stamp pattern.
+- **Recursion is impossible by construction.** The nested registry is
+  built with `subagent: None` (and `tasks: None` — background-task
+  ownership stays with the main session), so there is no path to a nested
+  `subagent` call and no depth counter exists to enforce.
+- **Sequential, bounded.** One tool call runs one subagent to completion;
+  parallelism stays task_run territory (#5). The round cap defaults to 8
+  — half the main loop's belt — and hits as a loud error.
+- **`coding` and `all`, per ruling.** The maintainer overrode the
+  conservative design draft: subagents ship in the default bundle. The
+  name is `subagent`.
+- **No transcript persistence in v1.** The result rides the caller's
+  transcript as an ordinary tool result (spawn-echo precedent);
+  recording subagent runs as their own session files is a filed
+  follow-up. Cancellation needs no new primitive — the abandoned
+  subagent self-stops at its own next send (turn-lifecycle.md).

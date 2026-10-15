@@ -16,6 +16,7 @@ pub mod provider;
 pub mod selection;
 pub mod session;
 pub mod settings;
+pub mod subagent;
 pub mod system_prompt;
 pub mod tasks;
 pub mod thinking;
