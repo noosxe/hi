@@ -319,6 +319,23 @@ fn resolve_target(
     let config = ModelsConfig::load()
         .map_err(|err| format!("{err}\n  create one (see the README) or run with --mock"))?;
     let settings = Settings::load()?;
+    // Opt-in session retention (#23) — before any session opens, so a
+    // run never prunes the file it is about to write. Best-effort; one
+    // stderr line only when something was removed.
+    if let Some(days) = settings.session_retention
+        && let Some(root) = hi_core::session::sessions_dir()
+    {
+        let removed = hi_core::session::prune_sessions(
+            &root,
+            std::time::Duration::from_secs(days.saturating_mul(24 * 3600)),
+        );
+        if removed > 0 {
+            eprintln!(
+                "session prune: removed {removed} file(s) from {}",
+                root.display()
+            );
+        }
+    }
     let selected = hi_core::selection::resolve(
         &config,
         provider_flag,
