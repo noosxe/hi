@@ -395,8 +395,17 @@ fn resolve_target(
             None
         },
     );
-    let tools =
-        Arc::new(bundle.registry(&cwd, images.clone(), tasks.clone(), Some(subagent.clone())));
+    // The `subagents` master switch (AD-0043): off = the tool is
+    // absent from the registry entirely — no schema entry, no call
+    // to reject (ruling 2). Built once here; the TUI shares this
+    // registry via SessionInit and never rebuilds it, so no
+    // SessionInit plumbing is needed.
+    let subagent_tool = if settings.subagents_enabled() {
+        Some(subagent.clone())
+    } else {
+        None
+    };
+    let tools = Arc::new(bundle.registry(&cwd, images.clone(), tasks.clone(), subagent_tool));
     let system_prompt = {
         let mut prompt = hi_core::system_prompt::resolve();
         let notes = tools.prompt_notes();
@@ -872,6 +881,38 @@ mod tests {
         .unwrap();
         point_xdg_at(&root);
         assert!(resolve_target(None, None, Some("nonexistent")).is_err());
+    }
+
+    #[test]
+    fn subagents_off_drops_the_tool() {
+        // AD-0043 ruling 2: off = absent from the registry — the model
+        // never sees the tool, no schema entry, no call to reject.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = hermetic_root("subagents-off");
+        std::fs::write(
+            root.join("hi/models.json"),
+            config_with_models(r#"[{"id": "glm-4.6"}]"#),
+        )
+        .unwrap();
+        std::fs::write(root.join("hi/settings.json"), r#"{"subagents": false}"#).unwrap();
+        point_xdg_at(&root);
+        let target = resolve_target(None, None, None).unwrap();
+        assert!(target.tools.get("subagent").is_none());
+    }
+
+    #[test]
+    fn subagents_default_on() {
+        // Ruling 3 default: no settings key at all — the tool ships.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = hermetic_root("subagents-default");
+        std::fs::write(
+            root.join("hi/models.json"),
+            config_with_models(r#"[{"id": "glm-4.6"}]"#),
+        )
+        .unwrap();
+        point_xdg_at(&root);
+        let target = resolve_target(None, None, None).unwrap();
+        assert!(target.tools.get("subagent").is_some());
     }
 
     #[test]
