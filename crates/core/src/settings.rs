@@ -184,6 +184,21 @@ impl Settings {
         Self::persist_with(path, |settings| settings.task_turns = Some(enabled))
     }
 
+    /// Persist `/thinking`'s level choice (AD-0044 ruling 2): `None`
+    /// means auto — the key is simply cleared, provider decides.
+    pub fn persist_thinking(level: Option<crate::thinking::ThinkingLevel>) -> Result<(), String> {
+        let path = settings_path().ok_or("could not determine config directory")?;
+        Self::persist_thinking_to(&path, level)
+    }
+
+    /// The path-independent half of `persist_thinking`.
+    fn persist_thinking_to(
+        path: &Path,
+        level: Option<crate::thinking::ThinkingLevel>,
+    ) -> Result<(), String> {
+        Self::persist_with(path, |settings| settings.thinking = level)
+    }
+
     /// Persist the `/settings` board's image flip (#79, AD-0023).
     pub fn persist_images(enabled: bool) -> Result<(), String> {
         let path = settings_path().ok_or("could not determine config directory")?;
@@ -227,6 +242,23 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persist_thinking_round_trips_and_clears() {
+        let dir = std::env::temp_dir().join(format!("hi-set-think-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"defaultModel": "m"}"#).unwrap();
+        Settings::persist_thinking_to(&path, Some(crate::thinking::ThinkingLevel::Xhigh)).unwrap();
+        let s = Settings::load_from(&path).unwrap();
+        assert_eq!(s.thinking, Some(crate::thinking::ThinkingLevel::Xhigh));
+        assert_eq!(s.default_model.as_deref(), Some("m"), "siblings survive");
+        Settings::persist_thinking_to(&path, None).unwrap();
+        let s = Settings::load_from(&path).unwrap();
+        assert_eq!(s.thinking, None, "auto = key cleared");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn subagents_default_on_camel_case() {

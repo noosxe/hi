@@ -78,7 +78,7 @@ A credential *source*, not necessarily a literal:
 ```jsonc
 {
   "defaultModel": "zai/glm-5.3",   // "provider/model"; stale/malformed falls through to autopick
-  "thinking": "high",              // off | minimal | low | medium | high; optional
+  "thinking": "high",              // off | minimal | low | medium | high | xhigh | max; absent = auto (provider decides)
   "defaultTools": "coding"         // none | read-only | coding | all; --tools overrides per run
   "telemetry": false               // opt-in provider attribution; see below
   "images": true                   // image upload master switch; default on
@@ -136,9 +136,22 @@ A credential *source*, not necessarily a literal:
   completion→turn→spawn→completion chains; when it runs out hi says so
   once in the transcript and further completions ride the human's next
   turn, exactly as before.
-- `thinking` reaches the wire only through the selected model's
-  `thinkingLevelMap`; the active level is shown in the status row
-  (`(provider) model · thinking:high`).
+- `thinking` reaches the wire through the selected model's
+  `thinkingLevelMap` (config wins) or — when unmapped — a URL-family
+  default (`api.z.ai` → `thinking.type` binary, `api.openai.com` →
+  `reasoning_effort`, `openrouter.ai` → `reasoning.effort`); unknown
+  hosts send nothing. `/thinking` lists the ladder with per-model
+  marks and switches mid-session (persisted here);
+  `thinking:auto` = send nothing, provider decides. The status row
+  always shows the state (`(provider) model · thinking:high` or
+  `thinking:auto`).
+- **Model metadata tiers** (AD-0044): a field you set here wins; then
+  live OpenRouter metadata when the provider is OpenRouter
+  (best-effort); then hi's shipped vendor table (context window, max
+  output, supported efforts, pricing, vision) regenerated per release;
+  then nothing. This is why the context share can appear without a
+  `contextWindow` — a vendor-published number is a fact, not a guess
+  (AD-0026 revised).
 - **Telemetry is opt-in, and it is the only telemetry.** hi sends no
   analytics, ever. The always-on identifier is the honest
   `User-Agent: hi/<version> (<os>; <arch>)` on provider requests.

@@ -1407,3 +1407,52 @@ once in `resolve_target` and the TUI never rebuilds it, so no
 SessionInit plumbing exists or is needed (unlike `images`, whose
 AD-0012 per-message consent semantics earn a runtime switch).
 Composes by omission: off also means no recordings (nothing runs).
+
+**AD-0044 (2026-10-19): model metadata tiers + the thinking ladder.**
+Research across provider docs (OpenAI, Anthropic, Gemini, xAI, z.ai)
+and pi's implementation: effort vocabularies are model-dependent
+(OpenAI runs `none…max`, Gemini subsets of `minimal…high`, z.ai is a
+binary switch), provider defaults vary wildly when nothing is sent,
+and — the decisive negative — **no provider returns a machine-readable
+level list on error**; wrong values are prose 400s. pi's answer is
+knowledge before the call: a generated catalog plus pre-flight
+clamping. hi adopts the same shape, config-first:
+
+1. **Ladder of seven**: `off | minimal | low | medium | high | xhigh |
+   max` — pi's and OpenAI's ladder exactly. Vendors map what they map.
+2. **Tier chain for metadata** (context window, max output, efforts,
+   pricing, vision): explicit `models.json` fields win; then live
+   OpenRouter metadata *when the selected provider is OpenRouter*
+   (best-effort, 3s, silent on failure); then the shipped snapshot
+   (`catalog.json`, regenerated per release by
+   `scripts/gen-catalog.py`); then nothing. AD-0026's "nothing is
+   guessed" now reads "nothing is guessed beyond vendor metadata" —
+   a context share from the vendor's published number is a fact, not
+   a guess.
+3. **URL-family default kwargs** (`thinking::family_kwargs`): z.ai →
+   `thinking.type` binary, OpenAI → `reasoning_effort`, OpenRouter →
+   `reasoning.effort`. Config map entries override; unknown hosts send
+   nothing. This is what makes `/thinking` work on unconfigured models.
+4. **`/thinking [level|auto]`**: bare lists the ladder with per-model
+   marks (✓ reaches the wire via map, family, or vendor efforts; –
+   would send nothing); a level switches mid-session, rebuilds the
+   provider, and persists to settings.json (taskTurns pattern); `auto`
+   clears to send-nothing. The status board always shows
+   `thinking:auto` or `thinking:<level>` — invisible states invite
+   wrong assumptions (field report: "ultra" was invented in exactly
+   such a gap).
+5. **No error-driven autoswitch.** Errors surface verbatim; the
+   pre-flight marks are the protection, because a silent downgrade
+   changes cost and quality invisibly. Wrong levels on the wire are
+   the model of record: the human decides.
+6. **Dollar estimates on the bill** (`~$3.90`): net prompt × prompt
+   rate + cached × cache-read rate + output × completion rate, from
+   vendor pricing. Cache writes stay out (session-shape-dependent).
+
+Rejections: interactive picker for `/thinking` in v1 (the listing is
+the marks surface; a picker can come later); tiered `pricing.overrides`
+(flat rates v1); vendoring `description`/`benchmarks`/`tokenizer`
+(nothing acts on them). The suffix match (`claude-opus-4.7` →
+`anthropic/claude-opus-4.7`) is unique-or-nothing — the snapshot's
+bare names are collision-free today and the uniqueness guard keeps
+that load-bearing, not lucky.

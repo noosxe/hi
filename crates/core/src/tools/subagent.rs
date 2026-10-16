@@ -52,7 +52,13 @@ impl Tool for SubagentTool {
                 },
                 "thinking": {
                     "type": "string",
-                    "description": "Reasoning effort: off | minimal | low | medium | high"
+                    // The enum (not just prose) so a guessed tier like
+                    // "ultra" is rejected by schema validation before
+                    // it ever becomes a runner error (field report).
+                    "enum": [
+                        "off", "minimal", "low", "medium", "high", "xhigh", "max"
+                    ],
+                    "description": "Reasoning effort; default: provider decides"
                 },
                 "tools": {
                     "type": "string",
@@ -91,7 +97,7 @@ impl Tool for SubagentTool {
         let thinking = match opt_str(&args, "thinking")? {
             None => None,
             Some(raw) => Some(ThinkingLevel::parse(&raw).ok_or_else(|| {
-                format!("thinking must be off|minimal|low|medium|high, got {raw}")
+                format!("thinking must be off|minimal|low|medium|high|xhigh|max, got {raw}")
             })?),
         };
         let tools = match opt_str(&args, "tools")? {
@@ -228,6 +234,22 @@ mod tests {
         tool.runner.stamp("prov", "m");
         let out = tool.execute(r#"{"prompt":"x"}"#).unwrap();
         assert!(!out.contains("recorded"), "{out}");
+    }
+
+    #[test]
+    fn schema_enumerates_thinking_levels() {
+        let tool = SubagentTool::new(runner("http://unused.invalid/v1"));
+        let schema = tool.parameters();
+        let levels: Vec<&str> = schema["properties"]["thinking"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            levels,
+            ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+        );
     }
 
     #[test]

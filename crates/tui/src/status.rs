@@ -65,7 +65,12 @@ pub fn compose_status(left: &str, right: &str, width: u16) -> String {
 /// and every segment hides when its input is absent: no cache detail
 /// means no CH and a gross ↓, no reasoning means no R, no configured
 /// window means no share.
-pub fn usage_line(usage: &Usage, last_prompt: u64, context_window: Option<u64>) -> String {
+pub fn usage_line(
+    usage: &Usage,
+    last_prompt: u64,
+    context_window: Option<u64>,
+    pricing: Option<&hi_core::catalog::ModelInfo>,
+) -> String {
     if usage.prompt_tokens == 0 && usage.completion_tokens == 0 && last_prompt == 0 {
         return String::new();
     }
@@ -93,6 +98,20 @@ pub fn usage_line(usage: &Usage, last_prompt: u64, context_window: Option<u64>) 
             last_prompt as f64 * 100.0 / window as f64,
             compact_tokens(window)
         ));
+    }
+    // The dollar estimate (AD-0044 ruling 6): net prompt + cached-read +
+    // completion against the vendor's rates. Cache *writes* are
+    // session-shape-dependent and stay out; absent rates, absent segment.
+    let has_tokens = usage.prompt_tokens > 0 || usage.completion_tokens > 0;
+    if let Some(info) = pricing
+        && has_tokens
+        && let (Some(prompt_rate), Some(completion_rate)) = (info.prompt_rate, info.completion_rate)
+    {
+        let cached = usage.cached_tokens.unwrap_or(0).min(usage.prompt_tokens);
+        let cost = usage.prompt_tokens.saturating_sub(cached) as f64 * prompt_rate
+            + cached as f64 * info.cache_read_rate.unwrap_or(prompt_rate)
+            + usage.completion_tokens as f64 * completion_rate;
+        parts.push(format!("~${cost:.2}"));
     }
     parts.join(" ")
 }
@@ -259,9 +278,9 @@ mod tests {
     #[test]
     fn usage_line_is_empty_until_the_first_bill() {
         let usage = Usage::default();
-        assert_eq!(usage_line(&usage, 0, None), "");
+        assert_eq!(usage_line(&usage, 0, None, None), "");
         // A window alone is not a bill either.
-        assert_eq!(usage_line(&usage, 0, Some(1_000_000)), "");
+        assert_eq!(usage_line(&usage, 0, Some(1_000_000), None), "");
     }
 
     #[test]
@@ -273,7 +292,7 @@ mod tests {
             reasoning_tokens: Some(250_000_000),
         };
         assert_eq!(
-            usage_line(&usage, 107_000, Some(1_000_000)),
+            usage_line(&usage, 107_000, Some(1_000_000), None),
             "↑8.6M ↓1.9M R250M CH80.0% 10.7%/1M"
         );
     }
@@ -287,6 +306,36 @@ mod tests {
             reasoning_tokens: None,
         };
         // No details: gross ↓, no R, no CH, no share without a window.
-        assert_eq!(usage_line(&usage, 500, None), "↑20 ↓500");
+        assert_eq!(usage_line(&usage, 500, None, None), "↑20 ↓500");
+    }
+
+    #[test]
+    fn usage_line_estimates_cost_when_pricing_is_known() {
+        let usage = Usage {
+            prompt_tokens: 1_000_000,
+            completion_tokens: 100_000,
+            cached_tokens: Some(800_000),
+            reasoning_tokens: None,
+        };
+        let info = hi_core::catalog::ModelInfo {
+            name: None,
+            context_window: None,
+            max_output: None,
+            efforts: None,
+            default_effort: None,
+            reasoning_mandatory: false,
+            // $5/M prompt, $25/M completion, $0.50/M cache read.
+            prompt_rate: Some(5e-6),
+            completion_rate: Some(2.5e-5),
+            cache_read_rate: Some(5e-7),
+            cache_write_rate: None,
+            vision: None,
+            tools: true,
+        };
+        // Net prompt 200k*$5 + cached 800k*$0.50 + out 100k*$25
+        // = $1.00 + $0.40 + $2.50 = $3.90.
+        let line = usage_line(&usage, 0, None, Some(&info));
+        assert_eq!(line, "↑100k ↓200k CH80.0% ~$3.90");
+        // No pricing: no dollar segment (the whole-shape test pins that).
     }
 }

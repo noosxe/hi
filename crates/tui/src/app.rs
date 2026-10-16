@@ -1085,10 +1085,14 @@ impl App {
     /// the model they run against. #4/#6 register here later; three
     /// rows is the ceiling anyone plans to spend.
     pub fn status_rows(&self) -> Vec<(String, String)> {
-        let mut context_right = match self.thinking {
-            Some(level) => format!("{} · thinking:{}", self.status.label(), level.name()),
-            None => self.status.label(),
-        };
+        // AD-0044 ruling 3: the level is always visible — `auto` when
+        // unset, meaning the provider decides (no kwargs are sent).
+        let thinking_label = self
+            .thinking
+            .as_ref()
+            .map(|level| level.name())
+            .unwrap_or("auto");
+        let mut context_right = format!("{} · thinking:{}", self.status.label(), thinking_label);
         if self.auto_armed {
             context_right.push_str(" · auto: armed");
         }
@@ -1108,18 +1112,35 @@ impl App {
                 task_counts = format!("tasks: {}", parts.join(" · "));
             }
         }
-        let bill = usage_line(&self.usage, self.usage_last_prompt, self.context_window());
+        let bill = usage_line(
+            &self.usage,
+            self.usage_last_prompt,
+            self.context_window(),
+            self.pricing(),
+        );
         vec![(self.location.clone(), task_counts), (bill, context_right)]
     }
 
-    /// The configured context window for the live model, if its config
-    /// entry declares one — the denominator of the usage line's
-    /// context share. Discovered models have no entry and show no
-    /// share; nothing is guessed (AD-0026).
+    /// The context window for the live model — the denominator of the
+    /// usage line's context share. Tier chain (AD-0044): the config
+    /// entry's `contextWindow` wins; then the shipped catalog's vendor
+    /// metadata; then no share. Guessed means vendor-published, never
+    /// invented (AD-0026 revised).
     fn context_window(&self) -> Option<u64> {
-        let entry = self.config.providers.get(&self.status.provider)?;
-        let model = entry.models.iter().find(|m| m.id == self.status.model)?;
-        model.context_window.map(u64::from)
+        if let Some(entry) = self.config.providers.get(&self.status.provider)
+            && let Some(model) = entry.models.iter().find(|m| m.id == self.status.model)
+            && let Some(window) = model.context_window
+        {
+            return Some(u64::from(window));
+        }
+        hi_core::catalog::lookup(&self.status.model).map(|info| info.context_window)?
+    }
+
+    /// Vendor pricing for the live model, from the shipped catalog —
+    /// the bill's `~$` estimate. Config cannot set rates (pi-parity:
+    /// models.json carries no pricing), so no tier above this.
+    fn pricing(&self) -> Option<&'static hi_core::catalog::ModelInfo> {
+        hi_core::catalog::lookup(&self.status.model)
     }
 
     /// The board's row count — the height `layout` and the flush pass
@@ -1534,6 +1555,7 @@ impl App {
             "keybinds" => self
                 .messages
                 .push(Message::System(crate::keybinds::listing())),
+            "thinking" => self.command_thinking(args),
             "name" => self.command_name(args),
             "new" => self.command_new(args),
             other => self
@@ -1924,6 +1946,115 @@ impl App {
     /// rides the startup seam (`Session::start`), the walk to it the
     /// resume seam's reset (`adopt`); the model and thinking level
     /// carry because they are status, not session state (AD-0034).
+    /// `/thinking [level|auto]`: bare shows the ladder with per-model
+    /// marks (AD-0044 ruling 2); a level switches mid-session (rebuilds
+    /// the provider, ruling 2's persistence) and writes settings.json;
+    /// `auto` clears back to provider-decides. No picker in v1 — the
+    /// ladder listing is the marks surface.
+    fn command_thinking(&mut self, args: &str) {
+        let raw = args.trim().to_lowercase();
+        if raw.is_empty() {
+            self.messages.push(Message::System(Self::thinking_listing(
+                &self.config,
+                &self.status,
+                self.thinking,
+            )));
+            return;
+        }
+        let level = if raw == "auto" {
+            None
+        } else {
+            match hi_core::thinking::ThinkingLevel::parse(&raw) {
+                Some(level) => Some(level),
+                None => {
+                    self.messages.push(Message::System(format!(
+                        "unknown thinking level: {raw} — try /thinking for the ladder"
+                    )));
+                    return;
+                }
+            }
+        };
+        self.thinking = level;
+        self.rebuild_provider(
+            &self.status.provider.clone(),
+            &self.status.model.clone(),
+            None,
+        );
+        match hi_core::Settings::persist_thinking(level) {
+            Ok(()) => {
+                let label = level
+                    .as_ref()
+                    .map(|l| l.name())
+                    .unwrap_or("auto (provider decides)");
+                self.messages
+                    .push(Message::System(format!("thinking: {label} (saved)")));
+            }
+            Err(err) => self.messages.push(Message::System(format!(
+                "thinking level switched for this session, but not saved: {err}"
+            ))),
+        }
+    }
+
+    /// The `/thinking` ladder with per-model support marks: `✓` where
+    /// the level reaches the wire (a `thinkingLevelMap` entry, a
+    /// URL-family default, or vendor-published efforts), `–` where it
+    /// would send nothing. Honest marks only — no guessing (AD-0044).
+    fn thinking_listing(
+        config: &hi_core::config::ModelsConfig,
+        status: &Status,
+        current: Option<hi_core::thinking::ThinkingLevel>,
+    ) -> String {
+        let entry = config.providers.get(&status.provider);
+        let model = entry.and_then(|e| e.models.iter().find(|m| m.id == status.model));
+        let map = model.and_then(|m| m.thinking_level_map.as_ref());
+        let base_url = entry.map(|e| e.base_url.as_str()).unwrap_or("");
+        let vendor = hi_core::catalog::lookup(&status.model);
+        let mut lines = vec![format!(
+            "thinking for {} — current: {}",
+            status.model,
+            current
+                .as_ref()
+                .map(|l| l.name())
+                .unwrap_or("auto (provider decides)")
+        )];
+        for level in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
+            let mapped = map.is_some_and(|m| m.contains_key(level))
+                || hi_core::thinking::family_kwargs(
+                    base_url,
+                    hi_core::thinking::ThinkingLevel::parse(level).unwrap(),
+                )
+                .is_some()
+                || vendor
+                    .and_then(|v| v.efforts.as_ref())
+                    .is_some_and(|efforts| efforts.iter().any(|e| e == level));
+            let default_mark = if vendor
+                .and_then(|v| v.default_effort.as_deref())
+                .is_some_and(|d| d == level)
+            {
+                " (vendor default)"
+            } else {
+                ""
+            };
+            let current_mark = if current.as_ref().is_some_and(|l| l.name() == level) {
+                " ← current"
+            } else {
+                ""
+            };
+            lines.push(format!(
+                "  {:<8} {}{}{}",
+                level,
+                if mapped { "✓" } else { "–" },
+                default_mark,
+                current_mark
+            ));
+        }
+        if vendor.is_some_and(|v| v.reasoning_mandatory) {
+            lines.push("  note: this model cannot disable reasoning".to_string());
+        }
+        lines.push("  /thinking <level|auto> to switch (saved to settings.json)".to_string());
+        lines.join("\n")
+    }
+
     fn command_new(&mut self, args: &str) {
         if self.turn.is_some() {
             self.messages.push(Message::System(
@@ -2321,7 +2452,7 @@ mod tests {
         assert!(!rows[0].0.is_empty(), "location owns row 0's left");
         assert!(rows[0].1.is_empty(), "row 0's right waits for residents");
         assert!(rows[1].0.is_empty());
-        assert_eq!(rows[1].1, "(mock) mock");
+        assert_eq!(rows[1].1, "(mock) mock · thinking:auto");
     }
 
     #[test]
@@ -2337,7 +2468,10 @@ mod tests {
         let rows = app.status_rows();
         // Tasks count on the bottom row's right — under the model.
         assert!(rows[0].1.starts_with("tasks: 1 running"), "{:?}", rows[0]);
-        assert_eq!(rows[1].1, "(mock) mock", "the model stays right");
+        assert_eq!(
+            rows[1].1, "(mock) mock · thinking:auto",
+            "the model stays right"
+        );
         wait_task_finished(app.tasks.as_ref().unwrap(), id);
         // The arm appends after the model — transient noise rides
         // right (#72's visible feedback).
@@ -2345,7 +2479,7 @@ mod tests {
         app.auto_armed = true;
         let rows = app.status_rows();
         assert!(rows[0].1.is_empty());
-        assert_eq!(rows[1].1, "(mock) mock · auto: armed");
+        assert_eq!(rows[1].1, "(mock) mock · thinking:auto · auto: armed");
     }
 
     #[test]
@@ -2768,6 +2902,69 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn context_window_falls_back_to_the_catalog() {
+        // AD-0044 tier chain: no config entry → the shipped vendor
+        // table supplies the window (claude-opus-4.7 → 1M).
+        let mut app = test_app();
+        app.status.model = "claude-opus-4.7".into();
+        assert_eq!(app.context_window(), Some(1_000_000));
+        app.status.model = "totally-unknown-model".into();
+        assert_eq!(app.context_window(), None);
+    }
+
+    #[test]
+    fn thinking_command_switches_level_and_lists_marks() {
+        let mut app = test_app();
+        app.run_command("thinking", "high");
+        assert_eq!(app.thinking, Some(hi_core::thinking::ThinkingLevel::High));
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| matches!(m, Message::System(t) if t.contains("thinking: high (saved)"))),
+            "{:?}",
+            app.messages
+        );
+        // Bare /thinking lists the ladder with marks and the current.
+        app.run_command("thinking", "");
+        let listing = app
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::System(t) if t.contains("thinking for") => Some(t.clone()),
+                _ => None,
+            })
+            .next()
+            .unwrap();
+        assert!(listing.contains("current: high"), "{listing}");
+        assert!(listing.contains("xhigh"), "{listing}");
+        // Back to auto clears the level (provider decides again).
+        app.run_command("thinking", "auto");
+        assert_eq!(app.thinking, None);
+        app.run_command("thinking", "");
+        let listing = app
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::System(t) if t.contains("thinking for") => Some(t.clone()),
+                _ => None,
+            })
+            .next_back()
+            .unwrap();
+        assert!(
+            listing.contains("current: auto (provider decides)"),
+            "{listing}"
+        );
+        // Unknown levels are refused with guidance, not silently.
+        let before = app.messages.len();
+        app.run_command("thinking", "ultra");
+        assert_eq!(app.thinking, None, "a refused level changes nothing");
+        assert!(
+            matches!(app.messages.last(), Some(Message::System(t)) if t.contains("unknown thinking level"))
+        );
+        assert_eq!(app.messages.len(), before + 1);
     }
 
     #[test]

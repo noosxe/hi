@@ -1310,7 +1310,11 @@ mod tests {
         // on the bottom edge — row 0's right stays empty.
         assert!(row_text(19).contains("~"), "{:?}", row_text(19));
         assert!(!row_text(19).contains("(mock)"), "{:?}", row_text(19));
-        assert!(row_text(18).ends_with("(mock) mock"), "{:?}", row_text(18));
+        assert!(
+            row_text(18).ends_with("(mock) mock · thinking:auto"),
+            "{:?}",
+            row_text(18)
+        );
     }
 
     #[test]

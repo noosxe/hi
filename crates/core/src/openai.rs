@@ -81,6 +81,32 @@ impl std::fmt::Debug for OpenAiCompatProvider {
     }
 }
 
+/// Merge thinking kwargs into a chat-request body: the URL-family
+/// default first, then the model's `thinkingLevelMap` entry — config
+/// wins per AD-0044. A pure function so the tiering is testable
+/// without a provider whose URL must simultaneously be a mock server.
+fn merge_thinking_kwargs(
+    body: &mut serde_json::Map<String, serde_json::Value>,
+    level: ThinkingLevel,
+    map: Option<&std::collections::BTreeMap<String, serde_json::Value>>,
+    base_url: &str,
+) {
+    if let Some(family) = crate::thinking::family_kwargs(base_url, level)
+        && let Some(obj) = family.as_object()
+    {
+        for (key, value) in obj {
+            body.insert(key.clone(), value.clone());
+        }
+    }
+    if let Some(kwargs) = map.and_then(|m| m.get(level.name()))
+        && let Some(obj) = kwargs.as_object()
+    {
+        for (key, value) in obj {
+            body.insert(key.clone(), value.clone());
+        }
+    }
+}
+
 impl OpenAiCompatProvider {
     /// Build from raw parts. Intended for tests; real callers go
     /// through [`from_config`].
@@ -161,6 +187,7 @@ impl OpenAiCompatProvider {
         self
     }
     /// The current model's `thinkingLevelMap`, if it has one.
+    /// (Merged into requests by [`merge_thinking_kwargs`].)
     fn thinking_level_map(&self) -> Option<&std::collections::BTreeMap<String, serde_json::Value>> {
         self.configured_models
             .iter()
@@ -240,18 +267,20 @@ impl OpenAiCompatProvider {
         };
         let mut payload = serde_json::to_value(&chat_request)
             .map_err(|err| format!("cannot serialize request: {err}"))?;
-        // Merge the active thinking level's kwargs (from the model's
-        // `thinkingLevelMap`) into the top-level body. Models without
-        // a map, or levels without an entry, send nothing.
+        // Merge the active thinking level's kwargs into the top-level
+        // body. Two sources, config wins: the model's `thinkingLevelMap`
+        // entry, then the URL-family default (AD-0044) so unconfigured
+        // models still respond to /thinking. Nothing mapped anywhere ⇒
+        // the provider decides (what `thinking:auto` means).
         if let Some(level) = &self.thinking_level
-            && let Some(kwargs) = self
-                .thinking_level_map()
-                .and_then(|map| map.get(level.name()))
-            && let (Some(body), Some(kwargs)) = (payload.as_object_mut(), kwargs.as_object())
+            && let Some(body) = payload.as_object_mut()
         {
-            for (key, value) in kwargs {
-                body.insert(key.clone(), value.clone());
-            }
+            merge_thinking_kwargs(
+                body,
+                *level,
+                self.thinking_level_map(),
+                self.base_url.as_str(),
+            );
         }
         let url = self.endpoint("chat/completions");
         let mut request = self.authorized(self.agent.post(&url));
@@ -1233,6 +1262,56 @@ mod tests {
         let request = api.first_request();
         let compact: String = request.split_whitespace().collect();
         assert!(!compact.contains("\"thinking\""));
+    }
+
+    #[test]
+    fn merge_prefers_config_over_family_default() {
+        let mut body = serde_json::Map::new();
+        let map = [(
+            "high".to_string(),
+            serde_json::json!({"thinking": {"type": "interleaved"}}),
+        )]
+        .into_iter()
+        .collect();
+        merge_thinking_kwargs(
+            &mut body,
+            ThinkingLevel::High,
+            Some(&map),
+            "https://api.z.ai/api/paas/v4",
+        );
+        // The explicit map wins over the z.ai family guess.
+        assert_eq!(body["thinking"]["type"], "interleaved");
+    }
+
+    #[test]
+    fn merge_applies_family_default_when_unmapped() {
+        let mut body = serde_json::Map::new();
+        merge_thinking_kwargs(
+            &mut body,
+            ThinkingLevel::High,
+            None,
+            "https://api.z.ai/api/paas/v4",
+        );
+        assert_eq!(body["thinking"]["type"], "enabled");
+
+        let mut body = serde_json::Map::new();
+        merge_thinking_kwargs(
+            &mut body,
+            ThinkingLevel::Xhigh,
+            None,
+            "https://api.openai.com/v1",
+        );
+        assert_eq!(body["reasoning_effort"], "xhigh");
+
+        // Unknown hosts: untouched — nothing is guessed.
+        let mut body = serde_json::Map::new();
+        merge_thinking_kwargs(
+            &mut body,
+            ThinkingLevel::High,
+            None,
+            "http://127.0.0.1:8080/v1",
+        );
+        assert!(body.is_empty());
     }
 
     #[test]
