@@ -59,6 +59,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
             draw_tasks(frame, menu_area, app);
         } else if app.picker.is_some() {
             draw_picker(frame, menu_area, app);
+        } else if app.thinking_picker.is_some() {
+            draw_thinking_picker(frame, menu_area, app);
         } else if app.settings_board.is_some() {
             draw_settings(frame, menu_area, app);
         } else {
@@ -316,6 +318,29 @@ fn draw_picker(frame: &mut Frame, area: Rect, app: &App) {
     }
     rows.push(Line::from(Span::styled(
         "enter use · ctrl-s default · esc close",
+        THEME.fg(Fg::Dim),
+    )));
+    frame.render_widget(Paragraph::new(Text::from(rows)), area);
+}
+
+/// The `/thinking` ladder picker (AD-0044 addendum), drawn in the
+/// menu zone: the eight rows with their per-model marks, any vendor
+/// note muted beneath, and the key-hint footer.
+fn draw_thinking_picker(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(picker) = app.thinking_picker.as_ref() else {
+        return;
+    };
+    let (rows_raw, notes) = app.thinking_menu();
+    let items: Vec<(&str, &str)> = rows_raw.iter().map(|r| (r.as_str(), "")).collect();
+    let mut rows = select_list_rows(items, picker.selected, area.width as usize);
+    for note in &notes {
+        rows.push(Line::from(Span::styled(
+            format!("  {note}"),
+            THEME.fg(Fg::Muted),
+        )));
+    }
+    rows.push(Line::from(Span::styled(
+        "enter switch · esc close",
         THEME.fg(Fg::Dim),
     )));
     frame.render_widget(Paragraph::new(Text::from(rows)), area);

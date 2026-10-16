@@ -46,7 +46,9 @@ the keyboard), `tick: u8` (spinner frames), `completion: Option<Completion>`
 (`/` menu; `Some` = consumes navigation keys), `queued: Option<String>`,
 `system_prompt` + `thinking` (re-attached on provider rebuild),
 `turn: Option<Turn>`, `settings_board: Option<SettingsBoard>` (the
-`/settings` board — AD-0023), `tasks: Option<hi_core::tasks::TaskManager>` (drained
+`/settings` board — AD-0023), `thinking_picker: Option<ThinkingPicker>`
+(the `/thinking` ladder — AD-0044 addendum; same owns-the-keyboard
+contract), `tasks: Option<hi_core::tasks::TaskManager>` (drained
 per frame in `pump` — completions become transcript notes; the running
 count feeds the status row), `tasks_view: Option<TasksView>` (the `/tasks`
 pane: list, or one task's output watched live — AD-0021),
@@ -99,6 +101,15 @@ replay, and the picker row leads with it (see
 [picker.rs](#pickerrs--session-selection)); bare `/name` shows the current
 name;
 `/resume` opens the session picker (see [picker.rs](#pickerrs--session-selection));
+`/thinking` bare opens the ladder picker (AD-0044 addendum): the
+seven levels then `auto`, each row with its honest per-model mark
+(`✓` reaches the wire via map/family/vendor efforts, `–` sends
+nothing), preselected at the current state; Enter switches, rebuilds
+the provider, and persists (the one commit path,
+`apply_thinking_choice`); Esc closes. `/thinking <level|auto>` stays
+the direct argument path — no modal. `App.thinking_picker` owns the
+keyboard while open; rows come fresh from `thinking_menu()` each
+frame (marks move when the model moves).
 `/settings` opens the policy board (AD-0023) — a curated list of what
 the running session can flip (`task turns`, `images`), each row shown
 with its live `on|off` state. Enter toggles and **keeps the board

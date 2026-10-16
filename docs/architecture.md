@@ -155,7 +155,7 @@ Works today (see also README "What works today"):
 - `scripts/gen-catalog.py` regenerates the shipped vendor-metadata
   table (`crates/core/src/catalog.json`) from OpenRouter's public API
   (AD-0044)
-- 493 `#[test]` functions, no network needed (see [testing.md](testing.md))
+- 496 `#[test]` functions, no network needed (see [testing.md](testing.md))
 
 Deliberately not yet built:
 

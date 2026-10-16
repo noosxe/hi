@@ -1456,3 +1456,14 @@ the marks surface; a picker can come later); tiered `pricing.overrides`
 `anthropic/claude-opus-4.7`) is unique-or-nothing — the snapshot's
 bare names are collision-free today and the uniqueness guard keeps
 that load-bearing, not lucky.
+
+**AD-0044 addendum (2026-10-19): `/thinking` grew into the picker.**
+The original ruling kept the listing as the marks surface and
+deferred a picker. Reality settled it: selection-type commands here
+are modals (`/model`, `/resume`, `/settings`, `/tasks`), and the
+ladder is a selection. Bare `/thinking` now opens the ladder picker
+— same rows, same honest marks, preselected at the current state,
+Enter commits through the same `apply_thinking_choice` path the
+argument form uses. `/thinking <level|auto>` stays for direct
+switches. Nothing else in the ruling moves: marks stay honest, no
+autoswitch, persistence unchanged.
