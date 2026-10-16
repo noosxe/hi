@@ -31,6 +31,13 @@ use crate::tools::{ImageGate, ToolBundle};
 /// per run, and hitting the cap is a loud error, not a silent stop.
 pub const SUBAGENT_MAX_TOOL_ROUNDS: usize = 8;
 
+/// Soft budget marker (#119): when a run's cumulative input crosses
+/// this, the result line says so. Input tokens re-send every round, so
+/// long explorations grow quadratically — this makes the outlier
+/// visible at the moment the parent decides what to do next. A hard
+/// budget (abort mid-run) is deliberately out of scope.
+pub const SUBAGENT_HIGH_TOKEN_USE: u64 = 100_000;
+
 /// One nested run, requested by the caller. `provider` / `model` /
 /// `thinking` name what the subagent should run (`None` = inherit the
 /// stamped identity); `tools` picks its bundle (`None` = `all`,
@@ -156,6 +163,7 @@ impl SubagentRunner {
             max_rounds,
         );
         let mut text = String::new();
+        let mut narration = String::new();
         let mut usage = Usage::default();
         let mut rounds = 0usize;
         let mut failure = None;
@@ -165,7 +173,11 @@ impl SubagentRunner {
                 Event::ToolCall(_) => {
                     rounds += 1;
                     // The reply that matters is the one after the last
-                    // tool round; drop mid-conversation prose.
+                    // tool round; keep the pre-tool prose as the run's
+                    // narration so a cap failure can return it.
+                    if !text.trim().is_empty() {
+                        narration = text.clone();
+                    }
                     text.clear();
                 }
                 Event::Usage(u) => {
@@ -180,6 +192,27 @@ impl SubagentRunner {
             }
         }
         if let Some(e) = failure {
+            if e.contains(crate::agent::ROUND_CAP_MARKER) {
+                // Model-actionable, not opaque: name the cap, name the
+                // remedy, and hand back whatever the subagent had said.
+                let mut msg = format!(
+                    "subagent hit its tool-round cap: {e}. Retry with a \
+                     higher max_rounds, or split the task into smaller \
+                     subagent runs."
+                );
+                let partial = if !text.trim().is_empty() {
+                    text.trim()
+                } else {
+                    narration.trim()
+                };
+                if partial.is_empty() {
+                    msg.push_str(" (no partial output)");
+                } else {
+                    msg.push_str("\n\nPartial output before the cap:\n");
+                    msg.push_str(partial);
+                }
+                return Err(msg);
+            }
             return Err(e);
         }
         Ok(SubagentResult {
@@ -323,6 +356,62 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.contains("round"), "{err}");
+    }
+
+    #[test]
+    fn cap_error_names_the_remedy_and_keeps_narration() {
+        let dir = std::env::temp_dir().join(format!("hi-sub-cap2-{}", std::process::id()));
+        let narrate = sse_response(&[
+            "{\"choices\":[{\"delta\":{\"content\":\"checking the manifest\"}}]}",
+            "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"nope\",\"arguments\":\"{}\"}}]}}]}",
+            "[DONE]",
+        ]);
+        let again = sse_response(&[
+            "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_2\",\"function\":{\"name\":\"nope\",\"arguments\":\"{}\"}}]}}]}",
+            "[DONE]",
+        ]);
+        let api = FakeApi::start_sequence(vec![narrate, again]);
+        let runner = runner_with(&api.base_url, &dir);
+        runner.stamp("prov", "m");
+        let err = runner
+            .run(&SubagentSpec {
+                prompt: "go".into(),
+                provider: None,
+                model: None,
+                thinking: None,
+                tools: None,
+                max_tool_rounds: Some(2),
+            })
+            .unwrap_err();
+        // The original cap fact survives, the remedy is named, and the
+        // subagent's last narration is not discarded.
+        assert!(err.contains("did not settle within 2 rounds"), "{err}");
+        assert!(err.contains("Retry with a higher max_rounds"), "{err}");
+        assert!(err.contains("checking the manifest"), "{err}");
+    }
+
+    #[test]
+    fn cap_error_without_narration_still_names_the_remedy() {
+        let dir = std::env::temp_dir().join(format!("hi-sub-cap3-{}", std::process::id()));
+        let looping = sse_response(&[
+            "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_x\",\"function\":{\"name\":\"nope\",\"arguments\":\"{}\"}}]}}]}",
+            "[DONE]",
+        ]);
+        let api = FakeApi::start_sequence(vec![looping; 2]);
+        let runner = runner_with(&api.base_url, &dir);
+        runner.stamp("prov", "m");
+        let err = runner
+            .run(&SubagentSpec {
+                prompt: "go".into(),
+                provider: None,
+                model: None,
+                thinking: None,
+                tools: None,
+                max_tool_rounds: Some(2),
+            })
+            .unwrap_err();
+        assert!(err.contains("Retry with a higher max_rounds"), "{err}");
+        assert!(err.contains("no partial"), "{err}");
     }
 
     #[test]

@@ -32,6 +32,11 @@ use crate::tool::{ToolCall, ToolDecision, ToolGate, ToolRegistry, ToolResult};
 /// settle in single digits.
 pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 16;
 
+/// The round-cap failure fragment. Shared with the subagent runner
+/// (#4) so it can recognize its own loop's cap error and enrich it
+/// for the parent model; the human-facing sentence is built around it.
+pub const ROUND_CAP_MARKER: &str = "did not settle within";
+
 /// Run one full agent turn on a background thread; events come back
 /// through the returned `Receiver`.
 ///
@@ -166,7 +171,7 @@ fn run_agent_turn(
     // Round cap hit without a settled round: fail the turn loudly, on
     // the one finalization path.
     let _ = tx.send(Event::Error(format!(
-        "tool loop did not settle within {max_tool_rounds} rounds"
+        "tool loop {ROUND_CAP_MARKER} {max_tool_rounds} rounds"
     )));
     let _ = tx.send(Event::TurnEnd);
 }

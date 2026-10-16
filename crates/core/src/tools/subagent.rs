@@ -3,7 +3,7 @@
 //! history — it sees none of this conversation — and its final reply
 //! comes back as this tool's result.
 
-use crate::subagent::{SubagentRunner, SubagentSpec};
+use crate::subagent::{SUBAGENT_HIGH_TOKEN_USE, SubagentRunner, SubagentSpec};
 use crate::thinking::ThinkingLevel;
 use crate::tool::{Tool, ToolAnnotations};
 
@@ -28,7 +28,8 @@ impl Tool for SubagentTool {
         "Run a nested agent session with its own fresh history, provider/model, \
          thinking level, and toolset; it works autonomously and its final reply \
          comes back as this tool's result. The nested agent has no `subagent` \
-         tool, so it cannot recurse. Use it for self-contained exploration or \
+         tool, so it cannot recurse. If it hits its round cap the error says \
+         so and keeps its last narration. Use it for self-contained exploration or \
          bulk work that would flood this conversation — give it everything it \
          needs, because it sees none of this transcript."
     }
@@ -59,7 +60,7 @@ impl Tool for SubagentTool {
                 },
                 "max_rounds": {
                     "type": "number",
-                    "description": "Tool-round cap for the nested agent (default: 8)"
+                    "description": "Tool-round cap for the nested agent (default: 8 — right for focused, single-question runs; use 20-40 for repo-wide audits or broad exploration)"
                 }
             },
             "required": ["prompt"]
@@ -106,10 +107,15 @@ impl Tool for SubagentTool {
             max_tool_rounds: opt_usize(&args, "max_rounds")?,
         };
         let result = self.runner.run(&spec)?;
-        Ok(format!(
-            "{}\n\n(subagent: ↑{} ↓{} tokens, {} tool round(s))",
-            result.text, result.usage.prompt_tokens, result.usage.completion_tokens, result.rounds
-        ))
+        let mut line = format!(
+            "(subagent: ↑{} ↓{} tokens, {} tool round(s)",
+            result.usage.prompt_tokens, result.usage.completion_tokens, result.rounds
+        );
+        if result.usage.prompt_tokens >= SUBAGENT_HIGH_TOKEN_USE {
+            line.push_str(" — HIGH TOKEN USE");
+        }
+        line.push(')');
+        Ok(format!("{}\n\n{line}", result.text))
     }
 }
 
@@ -158,6 +164,31 @@ mod tests {
             .unwrap();
         assert!(out.starts_with("nested ok"), "{out}");
         assert!(out.contains("0 tool round(s)"), "{out}");
+    }
+
+    #[test]
+    fn high_token_use_is_flagged() {
+        let frame = sse_response(&[
+            "{\"choices\":[{\"delta\":{\"content\":\"big\"}}]}",
+            "{\"choices\":[],\"usage\":{\"prompt_tokens\":150000,\"completion_tokens\":10}}",
+            "[DONE]",
+        ]);
+        let api = FakeApi::start(frame);
+        let tool = SubagentTool::new(runner(&api.base_url));
+        tool.runner.stamp("prov", "m");
+        let out = tool.execute(r#"{"prompt":"x"}"#).unwrap();
+        assert!(out.contains("HIGH TOKEN USE"), "{out}");
+    }
+
+    #[test]
+    fn schema_documents_round_ranges() {
+        let tool = SubagentTool::new(runner("http://unused.invalid/v1"));
+        let schema = tool.parameters();
+        let desc = schema["properties"]["max_rounds"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(desc.contains("default: 8"), "{desc}");
+        assert!(desc.contains("20-40"), "{desc}");
     }
 
     #[test]
