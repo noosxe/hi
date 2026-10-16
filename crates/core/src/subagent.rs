@@ -71,6 +71,13 @@ pub struct SubagentResult {
     pub text: String,
     pub usage: Usage,
     pub rounds: usize,
+    /// The session file this run recorded to (#116), when the
+    /// `subagentTranscripts` opt-in is on and the file opened. `None`
+    /// when recording is off or the best-effort open failed. Surfaced
+    /// so the tool's result line can name the artifact (#125) — in the
+    /// field run the parent agent hunted for recordings and concluded
+    /// none happen, because nothing said so.
+    pub recorded: Option<std::path::PathBuf>,
 }
 
 /// The handle the `subagent` tool holds: config to resolve overrides
@@ -190,6 +197,9 @@ impl SubagentRunner {
         if let Some(session) = transcript.as_mut() {
             let _ = session.append(&[Message::User(spec.prompt.clone())]);
         }
+        // Name the artifact on the result (#125): capture the path
+        // while the handle exists, before the drain takes ownership.
+        let recorded = transcript.as_ref().map(|s| s.path().to_path_buf());
         // R3 by construction: `subagent: None` means the nested
         // registry has no `subagent` tool — there is no path to
         // recursion, so no depth counter exists. `tasks: None` keeps
@@ -306,6 +316,7 @@ impl SubagentRunner {
             text,
             usage,
             rounds,
+            recorded,
         })
     }
 }
@@ -345,6 +356,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(result.text, "final reply");
+        assert!(result.recorded.is_some(), "the run names its recording");
         // Exactly one session file, under the parent's project key.
         let mut entries: Vec<_> = std::fs::read_dir(&root).unwrap().collect();
         assert_eq!(entries.len(), 1, "one project dir");
@@ -352,6 +364,7 @@ mod tests {
         let files: Vec<_> = std::fs::read_dir(&project).unwrap().collect();
         assert_eq!(files.len(), 1, "one transcript file");
         let file_path = files.into_iter().next().unwrap().unwrap().path();
+        assert_eq!(result.recorded.as_deref(), Some(file_path.as_path()));
         let loaded = crate::session::load(&file_path).unwrap();
         assert_eq!(loaded.header.kind.as_deref(), Some("subagent"));
         assert_eq!(loaded.header.parent.as_deref(), Some("parent-9"));
@@ -367,6 +380,37 @@ mod tests {
     }
 
     #[test]
+    fn transcript_open_failure_stays_silent() {
+        // Best-effort contract: when the transcript file cannot even be
+        // created (root is a regular file here), the run must still
+        // succeed and the result names no recording.
+        let dir = std::env::temp_dir().join(format!("hi-sub-t3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.join("sessions");
+        std::fs::write(&root, b"not a directory").unwrap();
+        let frame = sse_response(&[
+            "{\"choices\":[{\"delta\":{\"content\":\"done\"}}]}",
+            "[DONE]",
+        ]);
+        let api = FakeApi::start(frame);
+        let runner = runner_with(&api.base_url, &dir, Some(&root));
+        runner.stamp("prov", "m");
+        let result = runner
+            .run(&SubagentSpec {
+                prompt: "go".into(),
+                provider: None,
+                model: None,
+                thinking: None,
+                tools: None,
+                max_tool_rounds: None,
+            })
+            .unwrap();
+        assert!(result.recorded.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn transcripts_off_record_nothing() {
         let dir = std::env::temp_dir().join(format!("hi-sub-t2-{}", std::process::id()));
         let root = dir.join("sessions");
@@ -378,7 +422,7 @@ mod tests {
         let api = FakeApi::start(frame);
         let runner = runner_with(&api.base_url, &dir, None);
         runner.stamp("prov", "m");
-        runner
+        let result = runner
             .run(&SubagentSpec {
                 prompt: "go".into(),
                 provider: None,
@@ -388,6 +432,7 @@ mod tests {
                 max_tool_rounds: None,
             })
             .unwrap();
+        assert!(result.recorded.is_none());
         assert!(!root.exists(), "no session dir is created");
         let _ = std::fs::remove_dir_all(&dir);
     }
