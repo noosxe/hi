@@ -114,7 +114,8 @@ A credential *source*, not necessarily a literal:
   true, every subagent run writes its own ordinary session file
   (`kind: "subagent"`, the parent session's id in the header) under
   this project's sessions directory — inspectable and resumable with
-  no special-casing, pruned by the same retention rules. Off by
+  no special-casing, pruned by the same retention rules; the tool's
+  result line names each recording (`recorded → <path>`). Off by
   default because a chatty parent turn can spawn many files. Startup
   policy only, not flippable from `/settings`.
 - `/settings` flips what the running session can flip — `taskTurns`,

@@ -1383,3 +1383,15 @@ the same retention rules; the parent transcript stays spawn-echo.
 Recording is best-effort — a full disk never fails a run. The runner
 restamps a parent slot wherever the identity is restamped (session
 open, `/resume`), so lineage follows the live session.
+
+**AD-0042 addendum (2026-10-19): #125, recordings say where they are.**
+First field use of recording (the hi-on-hi battery) validated the
+feature and exposed a discoverability gap: the parent agent hunted
+for the artifacts, guessed a wrong directory, and initially concluded
+no recordings happen — because the result line said nothing. Result
+lines now append `recorded → <path>` when a transcript was written;
+open failures stay silent (best-effort contract) and recording-off
+stays byte-identical. Field evidence also recorded here: cap
+under-provisioning cost ~148k where one well-sized run would spend
+~80k, and the parent session out-burned its subagents (260k vs 190k)
+— both fuel for #121's trimming design.

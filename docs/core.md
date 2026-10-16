@@ -156,11 +156,15 @@ run builds its own provider wired to its own registry; the front end
 restamps on every provider rebuild (`/model`, `/resume`), the
 telemetry-stamp pattern. `run` is blocking by ruling (the tool loop is
 sequential; parallelism is #5's) and returns a shaped `SubagentResult`
-{final text, the subagent's own usage, round count} — `Event::Error`
-becomes `Err`. The tool's result line flags runs whose cumulative input
-crosses `SUBAGENT_HIGH_TOKEN_USE` (100k prompt tokens) with
+{final text, the subagent's own usage, round count, and the recording
+path when one was written} — `Event::Error` becomes `Err`. The tool's
+result line flags runs whose cumulative input crosses
+`SUBAGENT_HIGH_TOKEN_USE` (100k prompt tokens) with
 `HIGH TOKEN USE` — input re-sends every round, so long explorations
-grow quadratically; soft marker only, hard budgets are out of scope. The `subagent` tool (`tools/subagent.rs`) is the model
+grow quadratically; soft marker only, hard budgets are out of scope —
+and names the transcript (`; recorded → <path>`, #125) whenever
+`subagentTranscripts` is on and the file opened, so the artifact is
+findable without hunting. The `subagent` tool (`tools/subagent.rs`) is the model
 surface: `{prompt, provider?, model?, thinking?, tools?, max_rounds?}`,
 result plus an up/down token line; in `coding`/`all` only.
 

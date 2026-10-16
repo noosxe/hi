@@ -114,6 +114,11 @@ impl Tool for SubagentTool {
         if result.usage.prompt_tokens >= SUBAGENT_HIGH_TOKEN_USE {
             line.push_str(" — HIGH TOKEN USE");
         }
+        if let Some(path) = &result.recorded {
+            // #125: the artifact is only useful if it can be found —
+            // name it on the line, after the markers, before the close.
+            line.push_str(&format!("; recorded → {}", path.display()));
+        }
         line.push(')');
         Ok(format!("{}\n\n{line}", result.text))
     }
@@ -136,6 +141,17 @@ mod tests {
         let raw = format!(r#"{{"providers":{{"prov":{{"baseUrl":"{base_url}"}}}}}}"#);
         let config: ModelsConfig = serde_json::from_str(&raw).unwrap();
         SubagentRunner::new(config, std::env::temp_dir(), false, None)
+    }
+
+    fn runner_rec(base_url: &str, root: &std::path::Path) -> SubagentRunner {
+        let raw = format!(r#"{{"providers":{{"prov":{{"baseUrl":"{base_url}"}}}}}}"#);
+        let config: ModelsConfig = serde_json::from_str(&raw).unwrap();
+        SubagentRunner::new(
+            config,
+            std::env::temp_dir(),
+            false,
+            Some(root.to_path_buf()),
+        )
     }
 
     #[test]
@@ -178,6 +194,40 @@ mod tests {
         tool.runner.stamp("prov", "m");
         let out = tool.execute(r#"{"prompt":"x"}"#).unwrap();
         assert!(out.contains("HIGH TOKEN USE"), "{out}");
+    }
+
+    #[test]
+    fn recorded_path_is_named_in_the_result_line() {
+        // #125: with recording on, the result line names the artifact —
+        // the parent agent in the field run hunted for recordings and
+        // initially concluded none happen, because nothing said so.
+        let dir = std::env::temp_dir().join(format!("hi-subtool-r1-{}", std::process::id()));
+        let root = dir.join("sessions");
+        let _ = std::fs::remove_dir_all(&dir);
+        let api = FakeApi::start(reply("nested ok"));
+        let tool = SubagentTool::new(runner_rec(&api.base_url, &root));
+        tool.runner.stamp("prov", "m");
+        let out = tool.execute(r#"{"prompt":"x"}"#).unwrap();
+        let named = out
+            .split("; recorded → ")
+            .nth(1)
+            .and_then(|rest| rest.split(')').next())
+            .unwrap_or("");
+        assert!(!named.is_empty(), "path is named: {out}");
+        assert!(
+            std::path::Path::new(named).exists(),
+            "named file exists: {named}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn no_recorded_note_when_off() {
+        let api = FakeApi::start(reply("ok"));
+        let tool = SubagentTool::new(runner(&api.base_url));
+        tool.runner.stamp("prov", "m");
+        let out = tool.execute(r#"{"prompt":"x"}"#).unwrap();
+        assert!(!out.contains("recorded"), "{out}");
     }
 
     #[test]
