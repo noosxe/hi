@@ -267,6 +267,7 @@ fn dispatch(cli: Cli) -> ExitCode {
     let (usage, usage_last_prompt) = (opened.usage, opened.usage_last_prompt);
     if let Some(session) = session.as_ref() {
         stamp_session_cache_key(&mut target, session);
+        apply_header_thinking(&mut target, session);
     }
     let init = SessionInit {
         system_prompt: target.system_prompt,
@@ -492,6 +493,17 @@ fn resolve_target(
 /// session exists — so the stamp rebuilds it once; nothing shares the
 /// `Arc` yet, so no live thread sees the swap. Provider rebuilds in
 /// the TUI (`/model`, `/resume`) re-apply both stamps themselves.
+/// AD-0045 ruling 1: the session's recorded thinking level outranks
+/// the settings default on resume; no record keeps the current.
+fn apply_header_thinking(target: &mut Target, session: &Session) {
+    if let Some(level) = session
+        .thinking()
+        .and_then(hi_core::thinking::ThinkingLevel::parse)
+    {
+        target.thinking = Some(level);
+    }
+}
+
 fn stamp_session_cache_key(target: &mut Target, session: &Session) {
     let Some(entry) = target.config.providers.get(&target.status.provider) else {
         return; // mock or unknown provider — nothing on the wire to stamp
@@ -584,6 +596,9 @@ fn print_mode(cli: &Cli, json: bool) -> ExitCode {
     let _ = (opened.usage, opened.usage_last_prompt);
 
     if let (Some(target), Some(session)) = (target.as_mut(), session.as_ref()) {
+        // The recorded level first: the stamp below rebuilds the
+        // provider and must see it (AD-0045).
+        apply_header_thinking(target, session);
         stamp_session_cache_key(target, session);
     }
     let max_tool_rounds = target

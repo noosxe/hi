@@ -207,6 +207,14 @@ too, so the cli ships neither serde nor an HTTP client (AD-0004).
 
 ## session.rs — transcripts that survive restarts
 
+The header records the thinking level at open (`thinking`), the
+session's identity per AD-0045: `Session::set_thinking` restamps the
+live header in place on a mid-session `/thinking` (line-one rewrite,
+transcript untouched, append handle reopened), and `Session::thinking`
+is what every resume path reads to put the session back at its
+recorded level — the header outranks the settings default; no record
+keeps the current value.
+
 One JSONL file per session under the data dir (`config::data_dir()` +
 `sessions/`), in a cwd-keyed project directory (pi-style encoding). Only
 finalized messages — and one `usage` record per round (the bill, #85) —

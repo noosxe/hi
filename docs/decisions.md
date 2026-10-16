@@ -1467,3 +1467,26 @@ Enter commits through the same `apply_thinking_choice` path the
 argument form uses. `/thinking <level|auto>` stays for direct
 switches. Nothing else in the ruling moves: marks stay honest, no
 autoswitch, persistence unchanged.
+
+**AD-0045 (2026-10-19): thinking is part of session identity.**
+Resuming a session recorded at `high` under settings moved to `low`
+came back at `low` — the header field written at open had no
+readers. Three rulings, taken as posted:
+
+1. **Restore on resume**: the session header's level outranks the
+   settings default on every resume path (TUI `/resume` via
+   `adopt`, headless via `apply_header_thinking` before the provider
+   rebuild). A header without a level — old files, auto — keeps the
+   current value; auto is never forced.
+2. **Restamp on switch**: the live header follows the session.
+   `/thinking` calls `Session::set_thinking`, which rewrites line
+   one in place (transcript untouched, append handle reopened). An
+   IO failure is reported and never rolls the switch back.
+3. **Settings stay the default for new sessions**; no migration —
+   old files just behave per ruling 1.
+
+Out of scope, filed: restamping the header's `provider`/`model`
+when `/model` switches mid-session (the same staleness, different
+field — needs the picker's commit path, not this change). The wire
+test pins the ruling end to end: session at `high`, settings moved
+to `low`, `--continue` sends `reasoning_effort: high`.
