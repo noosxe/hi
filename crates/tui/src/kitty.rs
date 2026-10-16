@@ -204,7 +204,10 @@ pub const MAX_HEIGHT_CELLS: u16 = 24;
 /// The full pipeline for one attached image: decode, sniff, convert to
 /// PNG, fit, encode. `None` anywhere falls back to the text note — a
 /// corrupt attachment renders as words, never as nothing.
-pub fn render(image: &ImageBlock, max_cols: u16) -> Option<(String, u16)> {
+/// The full pipeline with the cell size injected — the seam tests
+/// pin geometry against (#129: `render` otherwise reads the live
+/// terminal, and a test on it is green only where no display exists).
+pub fn render_with(image: &ImageBlock, max_cols: u16, cell: (f64, f64)) -> Option<(String, u16)> {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&image.data)
@@ -217,16 +220,16 @@ pub fn render(image: &ImageBlock, max_cols: u16) -> Option<(String, u16)> {
         Cow::Borrowed(_) => image.data.clone(),
         Cow::Owned(owned) => base64::engine::general_purpose::STANDARD.encode(owned),
     };
-    let size = fit(
-        dims,
-        max_cols.min(MAX_WIDTH_CELLS),
-        MAX_HEIGHT_CELLS,
-        cell_pixels(),
-    );
+    let size = fit(dims, max_cols.min(MAX_WIDTH_CELLS), MAX_HEIGHT_CELLS, cell);
     Some((
         encode_kitty(&base64, size.columns, size.rows, next_image_id()),
         size.rows,
     ))
+}
+
+/// The pipeline the UI runs: real cell size from the terminal.
+pub fn render(image: &ImageBlock, max_cols: u16) -> Option<(String, u16)> {
+    render_with(image, max_cols, cell_pixels())
 }
 
 /// Distinct-ish 32-bit image IDs (the protocol range is [1, 2^32)):
@@ -420,12 +423,27 @@ mod tests {
             data: TINY_PNG_B64.to_string(),
             mime_type: "image/png".into(),
         };
-        let (sequence, rows) = render(&image, 80).expect("valid PNG renders");
-        // The 1×1 px fixture upscales to the 48×24 cell budget (9×18 px
-        // cells); C=1 keeps the cursor where ratatui put it.
+        // Cell size is injected (#129): the assertion must not depend
+        // on the terminal the test happens to run under. 9×18 px
+        // cells, the pi fallback, put the 1×1 px fixture at the 48×24
+        // cell budget; C=1 keeps the cursor where ratatui put it.
+        let (sequence, rows) = render_with(&image, 80, (9.0, 18.0)).expect("valid PNG renders");
         assert!(sequence.starts_with("\x1b_Ga=T,f=100,q=2,C=1,c=48,r=24,i="));
         assert!(sequence.ends_with(format!("{TINY_PNG_B64}\x1b\\").as_str()));
         assert_eq!(rows, 24);
+    }
+
+    #[test]
+    fn render_with_honors_a_narrower_budget() {
+        let image = ImageBlock {
+            data: TINY_PNG_B64.to_string(),
+            mime_type: "image/png".into(),
+        };
+        // 360×360 px of budget (40 cols × 9 px, 20 rows... aspect
+        // wins: 40×20 cells of 9×18 px fit the square exactly).
+        let (sequence, rows) = render_with(&image, 40, (9.0, 18.0)).expect("valid PNG renders");
+        assert!(sequence.starts_with("\x1b_Ga=T,f=100,q=2,C=1,c=40,r=20,i="));
+        assert_eq!(rows, 20);
     }
 
     #[test]
