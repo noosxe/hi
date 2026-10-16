@@ -196,6 +196,8 @@ fn dispatch(cli: Cli) -> ExitCode {
                 images_setting: true,
                 tasks: None,
                 task_turns: false,
+                // The mock ignores config — built-in default cap.
+                max_tool_rounds: hi_core::DEFAULT_MAX_TOOL_ROUNDS,
                 subagent: hi_core::subagent::SubagentRunner::new(
                     ModelsConfig::default(),
                     std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
@@ -273,6 +275,7 @@ fn dispatch(cli: Cli) -> ExitCode {
         session,
         usage,
         usage_last_prompt,
+        max_tool_rounds: target.max_tool_rounds,
         images: target.images,
         images_setting: target.images_setting,
         tasks: target.tasks,
@@ -305,6 +308,10 @@ struct Target {
     /// rebuilds (the session cache-key stamp, the TUI's /model and
     /// /resume switches) never drop it.
     telemetry: bool,
+    /// The main-loop tool-round cap: the `settings.maxToolRounds`
+    /// override or the built-in default. Resolved once here so the TUI
+    /// and the headless paths agree.
+    max_tool_rounds: usize,
     /// The shared image gate (inside the registry's `read`), plus the
     /// settings master switch — handed to SessionInit so the TUI's
     /// /model switch re-resolves the policy (AD-0012).
@@ -416,6 +423,9 @@ fn resolve_target(
         thinking,
         tools,
         telemetry: settings.telemetry_enabled(),
+        max_tool_rounds: settings
+            .max_tool_rounds
+            .unwrap_or(hi_core::DEFAULT_MAX_TOOL_ROUNDS),
         images,
         images_setting,
         tasks,
@@ -520,6 +530,10 @@ fn print_mode(cli: &Cli, json: bool) -> ExitCode {
     if let (Some(target), Some(session)) = (target.as_mut(), session.as_ref()) {
         stamp_session_cache_key(target, session);
     }
+    let max_tool_rounds = target
+        .as_ref()
+        .map(|t| t.max_tool_rounds)
+        .unwrap_or(hi_core::DEFAULT_MAX_TOOL_ROUNDS);
     let provider: Arc<dyn Provider> = match target {
         Some(target) => target.provider,
         // The mock path: no wire, no stamp.
@@ -533,10 +547,19 @@ fn print_mode(cli: &Cli, json: bool) -> ExitCode {
             &mut history,
             &prompt,
             session,
+            max_tool_rounds,
             &mut |record| println!("{}", record.to_line()),
         )
     } else {
-        headless::run(provider, tools, None, &mut history, &prompt, session)
+        headless::run(
+            provider,
+            tools,
+            None,
+            &mut history,
+            &prompt,
+            session,
+            max_tool_rounds,
+        )
     };
     match turn {
         Ok(text) => {

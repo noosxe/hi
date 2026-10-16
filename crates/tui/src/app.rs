@@ -5,8 +5,8 @@ use std::time::Instant;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use hi_core::{
-    DEFAULT_MAX_TOOL_ROUNDS, Event, Message, ModelsConfig, OpenAiCompatProvider, Provider, Session,
-    Settings, ThinkingLevel, ToolRegistry, spawn_agent_turn,
+    Event, Message, ModelsConfig, OpenAiCompatProvider, Provider, Session, Settings, ThinkingLevel,
+    ToolRegistry, spawn_agent_turn,
 };
 
 use crate::catalog::Catalog;
@@ -119,6 +119,7 @@ pub(crate) fn test_app() -> App {
         images_setting: true,
         tasks: None,
         task_turns: false,
+        max_tool_rounds: hi_core::DEFAULT_MAX_TOOL_ROUNDS,
         subagent: hi_core::subagent::SubagentRunner::new(
             Default::default(),
             std::env::temp_dir(),
@@ -273,6 +274,9 @@ pub struct App {
     /// The open `/tasks` pane (AD-0021) — list or one task's output.
     /// `Some` = owns the keyboard, like the pickers.
     pub tasks_view: Option<TasksView>,
+    /// The main-loop tool-round cap, resolved at startup
+    /// (`settings.maxToolRounds` override or the built-in default).
+    pub max_tool_rounds: usize,
     /// The `settings.taskTurns` opt-in (#72, AD-0022): a finished
     /// task may start a turn. Resolved once at startup; the app owns
     /// the trigger itself.
@@ -412,11 +416,13 @@ impl App {
             tasks,
             task_turns,
             subagent,
+            max_tool_rounds,
         } = init;
         // The ring replays from the transcript it rode in on (#87) —
         // a resume or fork hands its prompts back to ↑.
         let history = seed_history(&messages);
         Self {
+            max_tool_rounds,
             quit: false,
             input: String::new(),
             cursor: 0,
@@ -852,7 +858,7 @@ impl App {
             Arc::clone(&self.tools),
             None, // gate: permission UX arrives with the extension host
             &self.messages,
-            DEFAULT_MAX_TOOL_ROUNDS,
+            self.max_tool_rounds,
         );
         self.turn = Some(Turn {
             text: String::new(),
@@ -2390,6 +2396,7 @@ mod tests {
             images_setting: true,
             tasks: None,
             task_turns: false,
+            max_tool_rounds: hi_core::DEFAULT_MAX_TOOL_ROUNDS,
             subagent: hi_core::subagent::SubagentRunner::new(
                 Default::default(),
                 std::env::temp_dir(),
@@ -2424,6 +2431,7 @@ mod tests {
             images_setting: true,
             tasks: None,
             task_turns: false,
+            max_tool_rounds: hi_core::DEFAULT_MAX_TOOL_ROUNDS,
             subagent: hi_core::subagent::SubagentRunner::new(
                 Default::default(),
                 std::env::temp_dir(),

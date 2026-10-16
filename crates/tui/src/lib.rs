@@ -69,6 +69,9 @@ pub struct SessionInit {
     /// The `settings.images` master switch, resolved at startup;
     /// re-resolution on a switch must honor it.
     pub images_setting: bool,
+    /// Main-loop tool-round cap, resolved at startup: the
+    /// `settings.maxToolRounds` override or the built-in default.
+    pub max_tool_rounds: usize,
     /// The background-task manager shared with the registry's `task_*`
     /// tools. The app drains its completion channel per frame and shows
     /// the running count in the status row (`None` = no task tools).

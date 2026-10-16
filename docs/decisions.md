@@ -1350,3 +1350,18 @@ keeps the belt. And a soft `HIGH TOKEN USE` marker at
 `SUBAGENT_HIGH_TOKEN_USE` (100k cumulative input) makes cost outliers
 visible; hard mid-run budgets stay out of scope — input re-sends every
 round, so the real lever is round count, which the caller already sets.
+
+**AD-0041 (2026-10-19): the main-loop round cap becomes configurable,
+off by default.** Ecosystem check (pi: no counter anywhere — the
+watching human is the bound; OpenAI Agents SDK: `max_turns` on by
+default with a remedy-bearing handler; Claude Agent SDK: `max_turns`
+opt-in + `max_budget_usd`; smolagents: `max_steps` default 20; SWE-agent
+limits configurable, none in the shipped default) says caps are the
+norm for anything that runs unattended, and hi can be left unattended —
+the existing loud 16 cap stays the default. `settings.maxToolRounds`
+(absent = 16, must be ≥ 1, rejected at startup otherwise) raises or
+lowers it, resolved once in `resolve_target` so TUI and headless agree.
+The subagent's own cap is NOT this knob — it stays the tool call's
+`max_rounds` (default 8): a parent turning the main cap up should not
+silently uncap nested runs. Startup policy only, not `/settings`-flippable
+(same rule as `sessionRetention`).
