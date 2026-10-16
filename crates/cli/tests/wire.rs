@@ -436,6 +436,82 @@ fn thinking_kwargs_follow_the_models_level_map() {
 }
 
 #[test]
+fn continue_restores_the_sessions_recorded_model() {
+    // AD-0046: the header's provider/model outrank the startup
+    // selection when still available.
+    let env = Env::new("model-resume");
+    let api = FakeApi::start([reply_script(), reply_script()].concat());
+    let config = json!({
+        "providers": {
+            "fake": {
+                "baseUrl": api.url(),
+                "apiKey": "test-key",
+                "models": [{"id": "fake-mini"}, {"id": "fake-big"}],
+            },
+        },
+    });
+    std::fs::write(env.config_dir().join("models.json"), config.to_string()).unwrap();
+    let project = env.project("model-resume-proj");
+    // Session one runs on fake-big: the header records it.
+    let (code, _, stderr) = run(
+        &project,
+        &env,
+        &["-p", "--provider", "fake", "--model", "fake-big", "first"],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(api.requests()[0].body["model"], json!("fake-big"));
+    // --continue with the default pointing elsewhere must put the
+    // session back on its recorded model.
+    env.write_settings_json(json!({"defaultModel": "fake/fake-mini"}));
+    let (code, _, stderr) = run(&project, &env, &["-p", "--continue", "second"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        api.requests()[1].body["model"],
+        json!("fake-big"),
+        "the recorded model must outrank the startup selection on resume"
+    );
+}
+
+#[test]
+fn continue_falls_back_with_a_warning_when_the_recorded_model_is_gone() {
+    let env = Env::new("model-gone");
+    let api = FakeApi::start([reply_script(), reply_script()].concat());
+    let config = json!({
+        "providers": {
+            "fake": {
+                "baseUrl": api.url(),
+                "apiKey": "test-key",
+                "models": [{"id": "fake-mini"}, {"id": "fake-big"}],
+            },
+        },
+    });
+    std::fs::write(env.config_dir().join("models.json"), config.to_string()).unwrap();
+    let project = env.project("model-gone-proj");
+    let (code, _, stderr) = run(
+        &project,
+        &env,
+        &["-p", "--provider", "fake", "--model", "fake-big", "first"],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    // The recorded model disappears from the config; the default
+    // selection stands and the run is warned.
+    let smaller = json!({
+        "providers": {
+            "fake": {"baseUrl": api.url(), "apiKey": "test-key", "models": [{"id": "fake-mini"}]},
+        },
+    });
+    std::fs::write(env.config_dir().join("models.json"), smaller.to_string()).unwrap();
+    env.write_settings_json(json!({"defaultModel": "fake/fake-mini"}));
+    let (code, _, stderr) = run(&project, &env, &["-p", "--continue", "second"]);
+    assert_eq!(code, 0);
+    assert!(
+        stderr.contains("fake-big") && stderr.contains("not available"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(api.requests()[1].body["model"], json!("fake-mini"));
+}
+
+#[test]
 fn continue_restores_the_sessions_recorded_thinking_level() {
     // AD-0045 ruling 1: the session header's level outranks the
     // settings default on resume — a session recorded at high stays
