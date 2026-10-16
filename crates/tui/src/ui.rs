@@ -61,6 +61,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
             draw_picker(frame, menu_area, app);
         } else if app.thinking_picker.is_some() {
             draw_thinking_picker(frame, menu_area, app);
+        } else if app.context_panel.is_some() {
+            draw_context_panel(frame, menu_area, app);
         } else if app.settings_board.is_some() {
             draw_settings(frame, menu_area, app);
         } else {
@@ -344,6 +346,32 @@ fn draw_thinking_picker(frame: &mut Frame, area: Rect, app: &App) {
         THEME.fg(Fg::Dim),
     )));
     frame.render_widget(Paragraph::new(Text::from(rows)), area);
+}
+
+/// The `/context` report (AD-0047), drawn in the menu zone: the
+/// request bucketed by class, fresh every frame — read-only, so no
+/// selection state and any key closes.
+fn draw_context_panel(frame: &mut Frame, area: Rect, app: &App) {
+    let rows: Vec<Line> = app
+        .context_panel_rows()
+        .into_iter()
+        .enumerate()
+        .map(|(i, row)| {
+            if i == 0 {
+                Line::from(Span::styled(row, THEME.fg(Fg::Accent)))
+            } else if row.trim_start().starts_with("free") {
+                Line::from(Span::styled(row, THEME.fg(Fg::Muted)))
+            } else {
+                Line::from(row)
+            }
+        })
+        .collect();
+    let mut lines = rows;
+    lines.push(Line::from(Span::styled(
+        "estimates: wire bytes over four \u{b7} any key closes",
+        THEME.fg(Fg::Dim),
+    )));
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 /// The `/settings` board (AD-0023), drawn in the menu zone: the
@@ -1252,10 +1280,10 @@ mod tests {
             .find(|&y| row_text(y).contains("pick a model"))
             .expect("completion description column");
         assert!(input_row < menu_row, "menu renders under the input");
-        // The selection starts at the first item, whatever sits above
-        // the others — the marker rides that row.
+        // The selection starts at the first item — `context` sorts
+        // first — and the marker rides that row.
         let selected_row = (0..20u16)
-            .find(|&y| row_text(y).contains("quit the session"))
+            .find(|&y| row_text(y).contains("show what occupies"))
             .expect("first completion row");
         assert!(row_text(selected_row).contains("→ "), "selected row marker");
         assert!(

@@ -12,6 +12,10 @@ pub struct Command {
 /// order, so it stays stable.
 pub const COMMANDS: &[Command] = &[
     Command {
+        name: "context",
+        description: "show what occupies the model's context, by type",
+    },
+    Command {
         name: "exit",
         description: "quit the session",
     },

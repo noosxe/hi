@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod catalog;
 pub mod config;
+pub mod context_report;
 pub mod event;
 pub mod headless;
 pub mod image_util;

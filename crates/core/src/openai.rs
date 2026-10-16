@@ -548,7 +548,7 @@ struct StreamOptions {
 /// every role hi sends — `skip_serializing_if` keeps each role's JSON
 /// exactly the shape its protocol role prescribes.
 #[derive(Serialize)]
-struct WireMessage<'a> {
+pub(crate) struct WireMessage<'a> {
     role: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<WireContent<'a>>,
@@ -586,7 +586,7 @@ struct WireImageUrl<'a> {
 }
 
 impl<'a> WireMessage<'a> {
-    fn text(role: &'static str, content: &'a str) -> Self {
+    pub(crate) fn text(role: &'static str, content: &'a str) -> Self {
         Self {
             role,
             content: Some(WireContent::Text(Cow::Borrowed(content))),
@@ -694,7 +694,7 @@ impl<'a> AssistantGroup<'a> {
 ///   (see `AssistantGroup`).
 /// - Each `ToolResult` follows as its own `role: "tool"` message,
 ///   pointing at its call via `tool_call_id`.
-fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
+pub(crate) fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
     let mut out: Vec<WireMessage<'_>> = Vec::new();
     let mut group = AssistantGroup {
         text: None,

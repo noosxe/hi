@@ -88,13 +88,17 @@ Behaviors (each pinned by a test in `app.rs`):
 
 ```rust
 pub struct Command { pub name: &'static str, pub description: &'static str }
-pub const COMMANDS: &[Command]  // sorted: exit, model, name, quit, resume, settings, tasks, tools
+pub const COMMANDS: &[Command]  // sorted: context, exit, keybinds, model, name, new, quit, resume, settings, thinking, tasks, tools
 pub fn matching(typed: &str) -> Vec<&'static Command>   // case-insensitive prefix
 pub fn find_exact(name: &str) -> Option<&'static Command>
 ```
 
 Adding a command = one entry in `COMMANDS` **plus** one arm in
-`App::run_command`. The completion menu inherits both order and descriptions.
+`App::run_command`. `/context` opens the context report (AD-0047):
+the outgoing request bucketed by class and anchored to the
+provider's last bill, drawn as a read-only menu-slot panel — rows
+recompute fresh each frame (`App::context_panel_rows`), any key
+closes, and a known window adds a free-space row. The completion menu inherits both order and descriptions.
 `/exit` and `/quit` (alias) stop the session; `/model` opens the picker;
 `/name <title>` names the session — the record appends, last-wins on
 replay, and the picker row leads with it (see

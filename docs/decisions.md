@@ -1515,3 +1515,28 @@ same three rulings in its key:
 
 AD-0045's helper grew into `apply_session_identity` (thinking +
 provider/model); its wire tests pin both branches end to end.
+
+**AD-0047 (2026-10-19): `/context` — the request bucketed by class.**
+Providers report round totals only (`Usage.prompt_tokens`), never a
+per-message breakdown, so any by-type view is an estimate. Four
+rulings:
+
+1. **Classes mirror the wire, not the transcript**: system prompt,
+   tool schemas, user, assistant, tool calls, tool results, images.
+   The transcript's `Error`/`System` notes are absent by
+   construction — `wire_messages` never sends them, so they cost
+   the context nothing.
+2. **The estimator re-serializes the actual outgoing request** (the
+   same `wire_messages` shapes `stream` sends) and bills wire bytes
+   over four per class. Deterministic, dependency-free, honest to
+   the tokenizer's drift.
+3. **Anchored, not raw**: class estimates scale by largest remainder
+   to sum exactly to the last real `prompt_tokens`; the header
+   names its provenance ("anchored to the provider's bill" vs
+   "estimated (bytes over four)"). The exact number stays the
+   provider's; only the split is ours.
+4. **Core computes, the TUI renders**: `context_report` in hi-core
+   (it owns the wire shapes); `/context` opens a read-only
+   menu-slot panel — rows recompute fresh each frame, any key
+   closes. A known window (config entry or catalog, the AD-0044
+   chain) adds a free-space row.
