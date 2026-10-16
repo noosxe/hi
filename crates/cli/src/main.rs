@@ -202,6 +202,7 @@ fn dispatch(cli: Cli) -> ExitCode {
                     ModelsConfig::default(),
                     std::env::current_dir().unwrap_or_else(|_| std::env::temp_dir()),
                     false,
+                    None,
                 ),
             },
             // The mock never touches the wire — nothing to attribute.
@@ -386,6 +387,13 @@ fn resolve_target(
         config.clone(),
         cwd.clone(),
         settings.telemetry_enabled(),
+        // The `settings.subagentTranscripts` opt-in (#116): record each
+        // run as its own session file under the project's directory.
+        if settings.subagent_transcripts {
+            hi_core::session::sessions_dir()
+        } else {
+            None
+        },
     );
     let tools =
         Arc::new(bundle.registry(&cwd, images.clone(), tasks.clone(), Some(subagent.clone())));
@@ -446,6 +454,9 @@ fn stamp_session_cache_key(target: &mut Target, session: &Session) {
     target
         .subagent
         .stamp(target.status.provider.clone(), target.status.model.clone());
+    target
+        .subagent
+        .stamp_session(Some(session.id().to_string()));
     target.provider = Arc::new(
         OpenAiCompatProvider::from_config(entry, target.status.model.clone())
             .with_system_prompt(target.system_prompt.clone())

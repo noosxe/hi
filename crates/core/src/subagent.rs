@@ -22,9 +22,19 @@ use crate::event::{Event, Usage};
 use crate::message::Message;
 use crate::openai::OpenAiCompatProvider;
 use crate::selection;
+use crate::session::Session;
 use crate::system_prompt;
 use crate::thinking::ThinkingLevel;
 use crate::tools::{ImageGate, ToolBundle};
+
+/// Best-effort transcript flush (#116): append whatever the mirror
+/// collected to the run's session file. Errors are swallowed — chat
+/// never depends on the disk.
+fn flush_transcript(transcript: &mut Option<Session>, buf: &mut [Message]) {
+    if let Some(session) = transcript.as_mut().filter(|_| !buf.is_empty()) {
+        let _ = session.append(buf);
+    }
+}
 
 /// The default round cap for a subagent: half the main loop's belt.
 /// A safety belt, not a feature — the caller can lower or raise it
@@ -78,16 +88,31 @@ pub struct SubagentRunner {
     /// gate is `None` for the same reason).
     gate: Option<Arc<ToolGate>>,
     current: Arc<Mutex<Option<(String, String)>>>,
+    /// The session-id parent slot, restamped alongside the identity on
+    /// session open and `/resume` — the transcript header's lineage
+    /// (#116).
+    parent: Arc<Mutex<Option<String>>>,
+    /// When set (the `settings.subagentTranscripts` opt-in), every run
+    /// records its own ordinary session file under this sessions root.
+    /// `None` records nothing — the default.
+    transcripts: Option<PathBuf>,
 }
 
 impl SubagentRunner {
-    pub fn new(config: ModelsConfig, cwd: PathBuf, telemetry: bool) -> Self {
+    pub fn new(
+        config: ModelsConfig,
+        cwd: PathBuf,
+        telemetry: bool,
+        transcripts: Option<PathBuf>,
+    ) -> Self {
         Self {
             config: Arc::new(config),
             cwd: Arc::new(cwd),
             telemetry,
             gate: None,
             current: Arc::new(Mutex::new(None)),
+            parent: Arc::new(Mutex::new(None)),
+            transcripts,
         }
     }
 
@@ -100,6 +125,17 @@ impl SubagentRunner {
     /// The stamped identity, for introspection and tests.
     pub fn current(&self) -> Option<(String, String)> {
         self.current.lock().unwrap().clone()
+    }
+
+    /// Record the current parent session id — called wherever the
+    /// identity is restamped and a session is open (startup open,
+    /// `/resume`). The transcript header's lineage.
+    pub fn stamp_session(&self, parent: Option<String>) {
+        *self.parent.lock().unwrap() = parent;
+    }
+
+    fn stamped_parent(&self) -> Option<String> {
+        self.parent.lock().unwrap().clone()
     }
 
     /// Run one subagent to completion. Blocking by ruling: the tool
@@ -134,6 +170,26 @@ impl SubagentRunner {
             .providers
             .get(&provider_name)
             .ok_or_else(|| format!("provider `{provider_name}` is not in the config"))?;
+        // Transcript recording (#116, opt-in): an ordinary session file
+        // under the parent project, marked kind "subagent" with the
+        // stamped parent id. Best-effort like every session write — a
+        // full disk never fails the run. The first message is the
+        // prompt; the drain below mirrors the loop's own working
+        // history event by event.
+        let mut transcript = self.transcripts.as_ref().and_then(|root| {
+            Session::start_subagent_in(
+                root,
+                &self.cwd,
+                &provider_name,
+                &model,
+                spec.thinking.map(|t| t.name()),
+                self.stamped_parent().as_deref(),
+            )
+            .ok()
+        });
+        if let Some(session) = transcript.as_mut() {
+            let _ = session.append(&[Message::User(spec.prompt.clone())]);
+        }
         // R3 by construction: `subagent: None` means the nested
         // registry has no `subagent` tool — there is no path to
         // recursion, so no depth counter exists. `tasks: None` keeps
@@ -167,10 +223,16 @@ impl SubagentRunner {
         let mut usage = Usage::default();
         let mut rounds = 0usize;
         let mut failure = None;
+        // The transcript mirror: the same reconstruction rule the loop
+        // documents for consumers — accumulate tokens, flush them as an
+        // Assistant message at each ToolCall, record ToolResults in
+        // order. `load()` of the file reproduces the run's working
+        // history exactly.
+        let mut tbuf: Vec<Message> = Vec::new();
         for event in rx {
             match event {
                 Event::Token(t) => text.push_str(&t),
-                Event::ToolCall(_) => {
+                Event::ToolCall(c) => {
                     rounds += 1;
                     // The reply that matters is the one after the last
                     // tool round; keep the pre-tool prose as the run's
@@ -178,15 +240,40 @@ impl SubagentRunner {
                     if !text.trim().is_empty() {
                         narration = text.clone();
                     }
+                    if transcript.is_some() {
+                        if !text.is_empty() {
+                            tbuf.push(Message::Assistant(text.clone()));
+                        }
+                        tbuf.push(Message::ToolCall(c.clone()));
+                    }
                     text.clear();
+                }
+                Event::ToolResult(r) => {
+                    if transcript.is_some() {
+                        tbuf.push(Message::ToolResult(r));
+                    }
                 }
                 Event::Usage(u) => {
                     usage.prompt_tokens += u.prompt_tokens;
                     usage.completion_tokens += u.completion_tokens;
+                    if let Some(session) = transcript.as_mut() {
+                        let _ = session.append_usage(&u);
+                    }
                 }
                 Event::Error(e) => {
+                    // Record the rounds that completed; the pre-call
+                    // prose is already in the buffer as Assistant
+                    // messages, so nothing is lost to the cap.
+                    flush_transcript(&mut transcript, &mut tbuf);
                     failure = Some(e);
                     break; // dropping the receiver stops the loop at its next send
+                }
+                Event::TurnEnd => {
+                    // The settled reply is the buffer's last message.
+                    if !text.is_empty() {
+                        tbuf.push(Message::Assistant(text.clone()));
+                    }
+                    flush_transcript(&mut transcript, &mut tbuf);
                 }
                 _ => {}
             }
@@ -228,10 +315,96 @@ mod tests {
     use super::*;
     use crate::test_support::{FakeApi, sse_response};
 
-    fn runner_with(base_url: &str, cwd: &std::path::Path) -> SubagentRunner {
+    #[test]
+    fn transcripts_record_when_enabled() {
+        let dir = std::env::temp_dir().join(format!("hi-sub-t1-{}", std::process::id()));
+        let root = dir.join("sessions");
+        let _ = std::fs::remove_dir_all(&dir);
+        let narrate = sse_response(&[
+            "{\"choices\":[{\"delta\":{\"content\":\"checking\"}}]}",
+            "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"nope\",\"arguments\":\"{}\"}}]}}]}",
+            "[DONE]",
+        ]);
+        let settle = sse_response(&[
+            "{\"choices\":[{\"delta\":{\"content\":\"final reply\"}}]}",
+            "{\"choices\":[],\"usage\":{\"prompt_tokens\":90,\"completion_tokens\":7}}",
+            "[DONE]",
+        ]);
+        let api = FakeApi::start_sequence(vec![narrate, settle]);
+        let runner = runner_with(&api.base_url, &dir, Some(&root));
+        runner.stamp("prov", "m");
+        runner.stamp_session(Some("parent-9".into()));
+        let result = runner
+            .run(&SubagentSpec {
+                prompt: "dig".into(),
+                provider: None,
+                model: None,
+                thinking: None,
+                tools: None,
+                max_tool_rounds: None,
+            })
+            .unwrap();
+        assert_eq!(result.text, "final reply");
+        // Exactly one session file, under the parent's project key.
+        let mut entries: Vec<_> = std::fs::read_dir(&root).unwrap().collect();
+        assert_eq!(entries.len(), 1, "one project dir");
+        let project = entries.pop().unwrap().unwrap().path();
+        let files: Vec<_> = std::fs::read_dir(&project).unwrap().collect();
+        assert_eq!(files.len(), 1, "one transcript file");
+        let file_path = files.into_iter().next().unwrap().unwrap().path();
+        let loaded = crate::session::load(&file_path).unwrap();
+        assert_eq!(loaded.header.kind.as_deref(), Some("subagent"));
+        assert_eq!(loaded.header.parent.as_deref(), Some("parent-9"));
+        // The transcript mirrors the loop's working history.
+        assert_eq!(loaded.messages[0], Message::User("dig".into()));
+        assert_eq!(loaded.messages[1], Message::Assistant("checking".into()));
+        assert!(matches!(loaded.messages[2], Message::ToolCall(_)));
+        assert!(matches!(loaded.messages[3], Message::ToolResult(_)));
+        assert_eq!(loaded.messages[4], Message::Assistant("final reply".into()));
+        assert_eq!(loaded.messages.len(), 5);
+        assert_eq!(loaded.usage.prompt_tokens, 90);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn transcripts_off_record_nothing() {
+        let dir = std::env::temp_dir().join(format!("hi-sub-t2-{}", std::process::id()));
+        let root = dir.join("sessions");
+        let _ = std::fs::remove_dir_all(&dir);
+        let frame = sse_response(&[
+            "{\"choices\":[{\"delta\":{\"content\":\"done\"}}]}",
+            "[DONE]",
+        ]);
+        let api = FakeApi::start(frame);
+        let runner = runner_with(&api.base_url, &dir, None);
+        runner.stamp("prov", "m");
+        runner
+            .run(&SubagentSpec {
+                prompt: "go".into(),
+                provider: None,
+                model: None,
+                thinking: None,
+                tools: None,
+                max_tool_rounds: None,
+            })
+            .unwrap();
+        assert!(!root.exists(), "no session dir is created");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn runner_with(
+        base_url: &str,
+        cwd: &std::path::Path,
+        transcripts: Option<&std::path::Path>,
+    ) -> SubagentRunner {
         let raw = format!(r#"{{"providers":{{"prov":{{"baseUrl":"{base_url}"}}}}}}"#);
         let config: ModelsConfig = serde_json::from_str(&raw).unwrap();
-        SubagentRunner::new(config, cwd.to_path_buf(), false)
+        SubagentRunner::new(
+            config,
+            cwd.to_path_buf(),
+            false,
+            transcripts.map(|p| p.to_path_buf()),
+        )
     }
 
     /// A settled one-frame SSE reply carrying `text` as the content.
@@ -246,7 +419,7 @@ mod tests {
     fn run_inherits_the_stamped_identity() {
         let dir = std::env::temp_dir().join(format!("hi-sub-{}", std::process::id()));
         let api = FakeApi::start(reply("inherited reply"));
-        let runner = runner_with(&api.base_url, &dir);
+        let runner = runner_with(&api.base_url, &dir, None);
         runner.stamp("prov", "m");
         let result = runner
             .run(&SubagentSpec {
@@ -267,7 +440,7 @@ mod tests {
     #[test]
     fn run_requires_a_stamped_identity() {
         let dir = std::env::temp_dir().join(format!("hi-sub-unstamped-{}", std::process::id()));
-        let runner = runner_with("http://unused.invalid/v1", &dir);
+        let runner = runner_with("http://unused.invalid/v1", &dir, None);
         let err = runner
             .run(&SubagentSpec {
                 prompt: "x".into(),
@@ -291,7 +464,7 @@ mod tests {
             inherited.base_url, override_api.base_url
         );
         let config: ModelsConfig = serde_json::from_str(&raw).unwrap();
-        let runner = SubagentRunner::new(config, dir, false);
+        let runner = SubagentRunner::new(config, dir, false, None);
         runner.stamp("main", "m");
         let result = runner
             .run(&SubagentSpec {
@@ -318,7 +491,7 @@ mod tests {
             "[DONE]",
         ]);
         let api = FakeApi::start_sequence(vec![tool_call, settle]);
-        let runner = runner_with(&api.base_url, &dir);
+        let runner = runner_with(&api.base_url, &dir, None);
         runner.stamp("prov", "m");
         let result = runner
             .run(&SubagentSpec {
@@ -343,7 +516,7 @@ mod tests {
             "[DONE]",
         ]);
         let api = FakeApi::start_sequence(vec![looping; 4]);
-        let runner = runner_with(&api.base_url, &dir);
+        let runner = runner_with(&api.base_url, &dir, None);
         runner.stamp("prov", "m");
         let err = runner
             .run(&SubagentSpec {
@@ -371,7 +544,7 @@ mod tests {
             "[DONE]",
         ]);
         let api = FakeApi::start_sequence(vec![narrate, again]);
-        let runner = runner_with(&api.base_url, &dir);
+        let runner = runner_with(&api.base_url, &dir, None);
         runner.stamp("prov", "m");
         let err = runner
             .run(&SubagentSpec {
@@ -398,7 +571,7 @@ mod tests {
             "[DONE]",
         ]);
         let api = FakeApi::start_sequence(vec![looping; 2]);
-        let runner = runner_with(&api.base_url, &dir);
+        let runner = runner_with(&api.base_url, &dir, None);
         runner.stamp("prov", "m");
         let err = runner
             .run(&SubagentSpec {
@@ -418,7 +591,7 @@ mod tests {
     fn caller_history_never_leaks() {
         let dir = std::env::temp_dir().join(format!("hi-sub-leak-{}", std::process::id()));
         let api = FakeApi::start(reply("ok"));
-        let runner = runner_with(&api.base_url, &dir);
+        let runner = runner_with(&api.base_url, &dir, None);
         runner.stamp("prov", "m");
         runner
             .run(&SubagentSpec {
@@ -448,7 +621,7 @@ mod tests {
             "[DONE]",
         ]);
         let api = FakeApi::start_sequence(vec![tool_call, settle]);
-        let runner = runner_with(&api.base_url, &dir);
+        let runner = runner_with(&api.base_url, &dir, None);
         runner.stamp("prov", "m");
         let result = runner
             .run(&SubagentSpec {
@@ -470,7 +643,7 @@ mod tests {
     fn event_error_becomes_err() {
         let dir = std::env::temp_dir().join(format!("hi-sub-err-{}", std::process::id()));
         let api = FakeApi::start("this is not sse at all");
-        let runner = runner_with(&api.base_url, &dir);
+        let runner = runner_with(&api.base_url, &dir, None);
         runner.stamp("prov", "m");
         let err = runner
             .run(&SubagentSpec {

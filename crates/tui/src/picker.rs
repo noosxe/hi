@@ -273,6 +273,8 @@ mod tests {
                 thinking: None,
                 name: name.map(str::to_string),
                 forked_from: None,
+                kind: None,
+                parent: None,
             },
             modified: SystemTime::UNIX_EPOCH + Duration::from_secs(modified_secs),
         }

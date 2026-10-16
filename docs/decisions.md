@@ -1365,3 +1365,21 @@ The subagent's own cap is NOT this knob — it stays the tool call's
 `max_rounds` (default 8): a parent turning the main cap up should not
 silently uncap nested runs. Startup policy only, not `/settings`-flippable
 (same rule as `sessionRetention`).
+
+**AD-0042 (2026-10-19): optional subagent transcript persistence (#116).**
+Deferred by AD-0040, ruled in-thread after field use made token
+post-mortems (the 280k question) a real need. Rulings: opt-in via
+`settings.subagentTranscripts`, false by default — a chatty parent
+turn can spawn many files, and sessions are opt-in history, not
+runtime state. Granularity is full per-round recording: the runner
+mirrors the loop's own working history event by event (the same
+reconstruction rule consumers already follow), one `usage` line per
+round, so `load()` reproduces exactly what the subagent saw and
+`LoadedSession.usage` is the post-mortem total for free. No
+special-casing anywhere: a recorded run is an ordinary session file
+(`kind: "subagent"`, parent id in the header — serde-default both
+ways), inspectable and resumable via the existing surfaces, pruned by
+the same retention rules; the parent transcript stays spawn-echo.
+Recording is best-effort — a full disk never fails a run. The runner
+restamps a parent slot wherever the identity is restamped (session
+open, `/resume`), so lineage follows the live session.

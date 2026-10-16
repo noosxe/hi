@@ -284,7 +284,8 @@ mod tests {
     #[test]
     fn subagent_tool_rides_coding_and_all_only_with_a_runner() {
         let cwd = std::env::temp_dir();
-        let runner = crate::subagent::SubagentRunner::new(Default::default(), cwd.clone(), false);
+        let runner =
+            crate::subagent::SubagentRunner::new(Default::default(), cwd.clone(), false, None);
         let names =
             |bundle: ToolBundle, sub: Option<crate::subagent::SubagentRunner>| -> Vec<String> {
                 bundle
