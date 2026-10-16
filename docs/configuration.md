@@ -85,6 +85,7 @@ A credential *source*, not necessarily a literal:
   "taskTurns": false               // opt-in: finished background tasks may start a turn
   "sessionRetention": 30           // opt-in: prune session files older than N days at startup
   "maxToolRounds": 40              // opt-in: main-loop tool-round cap; default 16, must be >= 1
+  "subagentTranscripts": true     // opt-in: record each subagent run as its own session file
 }
 ```
 
@@ -109,6 +110,13 @@ A credential *source*, not necessarily a literal:
   error). Resolved once at startup, so `/settings` does not flip it;
   the `subagent` tool's `max_rounds` argument is a separate, per-call
   knob and is unaffected.
+- `subagentTranscripts` (#116) is opt-in and false by default: when
+  true, every subagent run writes its own ordinary session file
+  (`kind: "subagent"`, the parent session's id in the header) under
+  this project's sessions directory — inspectable and resumable with
+  no special-casing, pruned by the same retention rules. Off by
+  default because a chatty parent turn can spawn many files. Startup
+  policy only, not flippable from `/settings`.
 - `/settings` flips what the running session can flip — `taskTurns`,
   `images` — without touching this file; Ctrl-S on the board writes
   one field back here (AD-0023). The file stays the startup source of

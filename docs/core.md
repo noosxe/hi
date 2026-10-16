@@ -195,6 +195,11 @@ prune (pi never deletes sessions either).
 
 - `Session::start` / `Session::resume(path)` — create or reopen; the file
   handle stays open in append mode for the session's life.
+  `Session::start_subagent_in` (#116) opens the same kind of file
+  marked `kind: "subagent"` with the parent session's id in the
+  header — serde-default + skipped-when-absent, so old binaries read
+  new files and vice versa. A fork of a subagent transcript is an
+  ordinary session: the lineage rides `forkedFrom`, `kind` resets.
 - `Session::append(&[Message])` — one JSONL line per message, flushed.
   `Session::append_usage(&Usage)` — the round's bill, same contract.
   Replay merges the records (`LoadedSession.usage`) and takes the last
@@ -203,7 +208,14 @@ prune (pi never deletes sessions either).
   **appended, never rewritten**; replay takes the last, an empty record
   clears, and the effective name lands on `LoadedSession.header.name`
   (and in the summaries the picker lists). A fork inherits the
-  transcript, never the economics.
+  transcript, never the economics. With the `subagentTranscripts`
+  opt-in (#116) the runner additionally records each run as its own
+  session file: the prompt first, then a mirror of the loop's working
+  history — tokens flush as an `Assistant` message at each `ToolCall`,
+  `ToolResult`s follow in order, one `usage` line per round — so
+  `load()` of the file reproduces exactly what the subagent saw.
+  Best-effort like every session write; recording never fails a run,
+  and the parent transcript stays spawn-echo either way.
 - `session::latest(cwd)` — newest readable session for a project
   (`--continue`); `session::load(path)` — full parse.
 - `SessionHeader` is the flat first line (`camelCase`, `version` field for

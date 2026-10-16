@@ -124,6 +124,7 @@ pub(crate) fn test_app() -> App {
             Default::default(),
             std::env::temp_dir(),
             false,
+            None,
         ),
     })
 }
@@ -1049,6 +1050,9 @@ impl App {
         // The subagent runner follows the switch: inherited runs use
         // whatever identity is current, never a stale one.
         self.subagent.stamp(provider.to_string(), model.to_string());
+        // The transcript lineage follows the live session (#116).
+        self.subagent
+            .stamp_session(self.session.as_ref().map(|s| s.id().to_string()));
     }
 
     /// Switch this session to `provider/model`. Safe even mid-turn:
@@ -2401,6 +2405,7 @@ mod tests {
                 Default::default(),
                 std::env::temp_dir(),
                 false,
+                None,
             ),
         };
         let app = app_with(init);
@@ -2436,6 +2441,7 @@ mod tests {
                 Default::default(),
                 std::env::temp_dir(),
                 false,
+                None,
             ),
         };
         let app = app_with(init);

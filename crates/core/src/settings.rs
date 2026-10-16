@@ -63,6 +63,14 @@ pub struct Settings {
     /// not flippable from `/settings`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tool_rounds: Option<usize>,
+    /// Opt-in subagent transcript recording (#116): when true, every
+    /// subagent run writes its own ordinary session file (`kind:
+    /// "subagent"`, parent id in the header) under this project's
+    /// sessions directory. Absent/false records nothing — the default,
+    /// because a chatty parent turn can spawn many files. Startup
+    /// policy only, not flippable from `/settings`.
+    #[serde(default)]
+    pub subagent_transcripts: bool,
 }
 
 /// The effective telemetry choice: `HI_TELEMETRY` wins when set (pi's
@@ -245,6 +253,14 @@ mod tests {
     }
 
     #[test]
+    fn subagent_transcripts_default_off_camel_case() {
+        let settings: Settings = serde_json::from_str(r#"{"subagentTranscripts": true}"#).unwrap();
+        assert!(settings.subagent_transcripts);
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(!settings.subagent_transcripts);
+    }
+
+    #[test]
     fn empty_object_means_no_default() {
         let settings: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(settings.default_model, None);
@@ -271,6 +287,7 @@ mod tests {
             task_turns: None,
             session_retention: None,
             max_tool_rounds: None,
+            subagent_transcripts: false,
         };
         existing.save_to(&path).unwrap();
 
@@ -301,6 +318,7 @@ mod tests {
             task_turns: None,
             session_retention: None,
             max_tool_rounds: None,
+            subagent_transcripts: false,
         };
         existing.save_to(&path).unwrap();
 
@@ -389,6 +407,7 @@ mod tests {
             task_turns: None,
             session_retention: None,
             max_tool_rounds: None,
+            subagent_transcripts: false,
         };
         original.save_to(&path).unwrap();
         let loaded = Settings::load_from(&path).unwrap();

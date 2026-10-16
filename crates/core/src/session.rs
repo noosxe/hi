@@ -63,6 +63,16 @@ pub struct SessionHeader {
     /// timestamp of a forked session are its own; this is the lineage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from: Option<String>,
+    /// What produced the session (`None` = an ordinary interactive
+    /// session). Only subagents record today (#116); serde-default and
+    /// skipped when absent, so old binaries read new files and vice
+    /// versa.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// For subagent sessions: the parent session's id. Informational
+    /// lineage, same rule as `forked_from`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
 }
 
 fn default_version() -> u32 {
@@ -80,6 +90,31 @@ pub struct LoadedSession {
     pub usage: Usage,
     pub usage_last_prompt: u64,
     pub path: PathBuf,
+}
+
+/// The shared file-creation tail of `start_in` and
+/// `start_subagent_in`: one project directory, one fresh file, the
+/// header line first.
+fn create(
+    root: &Path,
+    cwd: &Path,
+    created_at: u64,
+    header: SessionHeader,
+) -> Result<Session, String> {
+    let dir = root.join(project_key(cwd));
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
+    let path = dir.join(format!("{created_at}_{}.jsonl", header.id));
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .append(true)
+        .open(&path)
+        .map_err(|err| format!("cannot create {}: {err}", path.display()))?;
+    writeln!(file, "{}", header_line(&header)?)
+        .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
+    file.flush()
+        .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
+    Ok(Session { file, path, header })
 }
 
 /// An open session file, ready to append finalized messages.
@@ -129,21 +164,40 @@ impl Session {
             thinking: thinking.map(str::to_string),
             name: name.map(str::to_string),
             forked_from: None,
+            kind: None,
+            parent: None,
         };
-        let dir = root.join(project_key(cwd));
-        std::fs::create_dir_all(&dir)
-            .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
-        let path = dir.join(format!("{created_at}_{}.jsonl", header.id));
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .append(true)
-            .open(&path)
-            .map_err(|err| format!("cannot create {}: {err}", path.display()))?;
-        writeln!(file, "{}", header_line(&header)?)
-            .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
-        file.flush()
-            .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
-        Ok(Session { file, path, header })
+        create(root, cwd, created_at, header)
+    }
+
+    /// Open a subagent transcript (#116): an ordinary session file
+    /// under the parent project's directory, marked `kind: "subagent"`
+    /// with the parent session's id in the header. Same on-disk
+    /// contract as every session — inspectable, resumable, pruned by
+    /// the same retention rules.
+    pub fn start_subagent_in(
+        root: &Path,
+        cwd: &Path,
+        provider: &str,
+        model: &str,
+        thinking: Option<&str>,
+        parent: Option<&str>,
+    ) -> Result<Session, String> {
+        let created_at = epoch_millis();
+        let header = SessionHeader {
+            version: 1,
+            id: uuid::Uuid::new_v4().to_string(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            created_at,
+            provider: provider.to_string(),
+            model: model.to_string(),
+            thinking: thinking.map(str::to_string),
+            name: None,
+            forked_from: None,
+            kind: Some("subagent".to_string()),
+            parent: parent.map(str::to_string),
+        };
+        create(root, cwd, created_at, header)
     }
 
     /// Reopen an existing session file for appending — the `--continue`
@@ -191,25 +245,14 @@ impl Session {
             thinking: loaded.header.thinking.clone(),
             name: name.map(str::to_string).or(loaded.header.name.clone()),
             forked_from: Some(source.to_string_lossy().into_owned()),
+            // A fork is an ordinary session: a human picked it up. The
+            // subagent lineage rides `forkedFrom`, not `kind`.
+            kind: None,
+            parent: None,
         };
-        let dir = root.join(project_key(cwd));
-        std::fs::create_dir_all(&dir)
-            .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
-        let path = dir.join(format!("{created_at}_{}.jsonl", header.id));
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .append(true)
-            .open(&path)
-            .map_err(|err| format!("cannot create {}: {err}", path.display()))?;
-        writeln!(file, "{}", header_line(&header)?)
-            .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
-        for message in &loaded.messages {
-            writeln!(file, "{}", message_line(message)?)
-                .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
-        }
-        file.flush()
-            .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
-        Ok(Session { file, path, header })
+        let mut session = create(root, cwd, created_at, header)?;
+        session.append(&loaded.messages)?;
+        Ok(session)
     }
 
     /// The file this session writes to.
@@ -716,6 +759,31 @@ mod tests {
             "--Users-x-Projects-hi--"
         );
         assert_eq!(project_key(Path::new("/tmp")), "--tmp--");
+    }
+
+    #[test]
+    fn subagent_sessions_carry_kind_and_parent() {
+        let root = std::env::temp_dir().join(format!("hi-sess-sub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let session = Session::start_subagent_in(
+            &root,
+            Path::new("/p"),
+            "prov",
+            "mod",
+            None,
+            Some("parent-1"),
+        )
+        .unwrap();
+        assert_eq!(session.header().kind.as_deref(), Some("subagent"));
+        assert_eq!(session.header().parent.as_deref(), Some("parent-1"));
+        let loaded = load(session.path()).unwrap();
+        assert_eq!(loaded.header.kind.as_deref(), Some("subagent"));
+        assert_eq!(loaded.header.parent.as_deref(), Some("parent-1"));
+        // Ordinary sessions stay unmarked.
+        let plain = Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        assert_eq!(plain.header().kind, None);
+        assert_eq!(plain.header().parent, None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

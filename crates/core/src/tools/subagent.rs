@@ -135,7 +135,7 @@ mod tests {
     fn runner(base_url: &str) -> SubagentRunner {
         let raw = format!(r#"{{"providers":{{"prov":{{"baseUrl":"{base_url}"}}}}}}"#);
         let config: ModelsConfig = serde_json::from_str(&raw).unwrap();
-        SubagentRunner::new(config, std::env::temp_dir(), false)
+        SubagentRunner::new(config, std::env::temp_dir(), false, None)
     }
 
     #[test]
