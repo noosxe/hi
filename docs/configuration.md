@@ -145,7 +145,10 @@ A credential *source*, not necessarily a literal:
   `/thinking <level|auto>` switches directly. The session file
   records the level: switches restamp it, and resuming puts the
   session back at its recorded level (settings stay the default for
-  new sessions);
+  new sessions). The session's model is preserved the same way: a
+  `/model` switch restamps the header, resume restores it, and a
+  model that no longer exists falls back to your selection with a
+  warning;
   `thinking:auto` = send nothing, provider decides. The status row
   always shows the state (`(provider) model · thinking:high` or
   `thinking:auto`).

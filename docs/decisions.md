@@ -1490,3 +1490,28 @@ when `/model` switches mid-session (the same staleness, different
 field — needs the picker's commit path, not this change). The wire
 test pins the ruling end to end: session at `high`, settings moved
 to `low`, `--continue` sends `reasoning_effort: high`.
+
+**AD-0046 (2026-10-19): the model is part of session identity too.**
+The pattern AD-0045 established for thinking extends to the model,
+same three rulings in its key:
+
+1. **Restore on resume**: the header's `provider`/`model` outrank
+   the startup selection when still available
+   (`selection::model_available`: the provider entry exists, and a
+   configured model list contains the id — an entry without a list
+   discovers, so any id is fair game). A vanished model falls back
+   to the selection with a warning: a system message in the TUI, a
+   stderr line headless. Never a refusal — a session's transcript
+   stays readable.
+2. **Restamp on switch**: `/model` calls `Session::set_model` on the
+   live header, same line-one rewrite as the thinking restamp; the
+   next resume restores the model the session *ended* on.
+3. **Boot order stays**: discovery and selection run first
+   (`resolve_target`), restoration is a post-open correction through
+   the same seam that already rebuilds the provider for the
+   cache-key stamp (`apply_session_identity`, called before the
+   rebuild so the provider sees the restored identity). Restoration
+   never does discovery — it only picks among what discovery found.
+
+AD-0045's helper grew into `apply_session_identity` (thinking +
+provider/model); its wire tests pin both branches end to end.

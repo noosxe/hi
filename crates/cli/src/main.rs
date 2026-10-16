@@ -266,8 +266,9 @@ fn dispatch(cli: Cli) -> ExitCode {
     let (messages, session) = (opened.messages, opened.session);
     let (usage, usage_last_prompt) = (opened.usage, opened.usage_last_prompt);
     if let Some(session) = session.as_ref() {
+        // Identity first: the stamp's provider rebuild must see it.
+        apply_session_identity(&mut target, session);
         stamp_session_cache_key(&mut target, session);
-        apply_header_thinking(&mut target, session);
     }
     let init = SessionInit {
         system_prompt: target.system_prompt,
@@ -493,14 +494,29 @@ fn resolve_target(
 /// session exists — so the stamp rebuilds it once; nothing shares the
 /// `Arc` yet, so no live thread sees the swap. Provider rebuilds in
 /// the TUI (`/model`, `/resume`) re-apply both stamps themselves.
-/// AD-0045 ruling 1: the session's recorded thinking level outranks
-/// the settings default on resume; no record keeps the current.
-fn apply_header_thinking(target: &mut Target, session: &Session) {
+/// AD-0045 + AD-0046: the session's recorded identity outranks the
+/// startup selection on resume — the thinking level, and the
+/// provider/model when still available. A vanished model falls back
+/// to the selection with a stderr warning. Runs before the provider
+/// rebuild so the rebuilt provider sees the restored identity.
+fn apply_session_identity(target: &mut Target, session: &Session) {
     if let Some(level) = session
         .thinking()
         .and_then(hi_core::thinking::ThinkingLevel::parse)
     {
         target.thinking = Some(level);
+    }
+    let (recorded_provider, recorded_model) = (session.provider(), session.model());
+    if recorded_provider != target.status.provider || recorded_model != target.status.model {
+        if hi_core::selection::model_available(&target.config, recorded_provider, recorded_model) {
+            target.status.provider = recorded_provider.to_string();
+            target.status.model = recorded_model.to_string();
+        } else {
+            eprintln!(
+                "hi: session recorded model {recorded_provider}/{recorded_model} — not available; using {}",
+                target.status.model
+            );
+        }
     }
 }
 
@@ -596,9 +612,9 @@ fn print_mode(cli: &Cli, json: bool) -> ExitCode {
     let _ = (opened.usage, opened.usage_last_prompt);
 
     if let (Some(target), Some(session)) = (target.as_mut(), session.as_ref()) {
-        // The recorded level first: the stamp below rebuilds the
-        // provider and must see it (AD-0045).
-        apply_header_thinking(target, session);
+        // The recorded identity first: the stamp below rebuilds the
+        // provider and must see it (AD-0045, AD-0046).
+        apply_session_identity(target, session);
         stamp_session_cache_key(target, session);
     }
     let max_tool_rounds = target

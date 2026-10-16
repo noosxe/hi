@@ -14,14 +14,14 @@ cargo run            # hi --mock needs no config
 
 CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI). Third-party actions are SHA-pinned with a `# vX.Y.Z` comment; `dtolnay/rust-toolchain@stable` stays a moving branch ref on purpose — the compiler channel is pinned by `rust-toolchain.toml` (#24, AD-0037). Dependabot (`.github/dependabot.yml`) opens one grouped PR per ecosystem weekly (`cargo`, `github-actions`), ignoring Rust major bumps.
 
-Current count: **502 `#[test]` functions** (the README's count gets refreshed in passing;
+Current count: **509 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 88
-core: openai 25, session 26, settings 21, subagent 13, tasks 16, selection 14, read 13,
+core: openai 25, session 27, settings 21, subagent 13, tasks 16, selection 15, read 13,
 agent 11, walk 11, headless 11, catalog 5, grep 8, image_util 7, truncate 7, edit 6,
 config 6, system_prompt 6, tasks-tool 6, bash 6, mod 6, image_resize 6, subagent-tool 9,
-find 4, write 3, ls 3, thinking 3, mock 2, event 1, tool 1. tui: app 94,
+find 4, write 3, ls 3, thinking 3, mock 2, event 1, tool 1. tui: app 97,
 ui 31, status 12, markdown 19, kitty 11, wrap 12, editor 9, picker 7, scroll 7,
-commands 4, clipboard 3, keybinds 3, theme 3, catalog 2. cli: 10 unit + 6 wire + 3 auto-print + 3 json-mode + 7 pty integration
+commands 4, clipboard 3, keybinds 3, theme 3, catalog 2. cli: 10 unit + 8 wire + 3 auto-print + 3 json-mode + 7 pty integration
 (`tests/tui_pty.rs` — the real binary in a pseudo-terminal, its byte stream
 rendered by the avt emulator (asciinema's), and every wait a predicate over
 rendered frames — typed keys must echo in the composer, a settled turn must

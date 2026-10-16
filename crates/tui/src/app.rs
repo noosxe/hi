@@ -1087,6 +1087,14 @@ impl App {
             model: model.to_string(),
             tool_count: self.status.tool_count,
         };
+        // AD-0046: the live header follows the switch, so the next
+        // resume restores the model the session ended on. Same
+        // best-effort surface as the thinking restamp.
+        if let Some(session) = self.session.as_mut()
+            && let Err(err) = session.set_model(provider, model)
+        {
+            self.messages.push(Message::Error(err));
+        }
     }
 
     /// Height of the open menu, borders included: pickers are 4-5
@@ -1969,6 +1977,30 @@ impl App {
             .and_then(hi_core::thinking::ThinkingLevel::parse)
         {
             self.thinking = Some(level);
+        }
+        // AD-0046: the recorded model outranks the startup selection
+        // when it is still available; a vanished model falls back to
+        // the selection with a warning. This runs after the boot
+        // chain has discovered and selected a model — restoration is
+        // a post-open correction, never the discovery itself.
+        let (recorded_provider, recorded_model) = (
+            loaded.header.provider.as_str(),
+            loaded.header.model.as_str(),
+        );
+        if recorded_provider != self.status.provider || recorded_model != self.status.model {
+            if hi_core::selection::model_available(&self.config, recorded_provider, recorded_model)
+            {
+                self.status = Status {
+                    provider: recorded_provider.to_string(),
+                    model: recorded_model.to_string(),
+                    tool_count: self.status.tool_count,
+                };
+            } else {
+                self.messages.push(Message::System(format!(
+                    "session recorded model {recorded_provider}/{recorded_model} — not available; using {}",
+                    self.status.model
+                )));
+            }
         }
         let (provider, model) = (self.status.provider.clone(), self.status.model.clone());
         self.rebuild_provider(&provider, &model, Some(cache_key));
@@ -4150,6 +4182,79 @@ mod tests {
         app.run_command("thinking", "auto");
         let loaded = hi_core::session::load(&path).unwrap();
         assert_eq!(loaded.header.thinking, None);
+    }
+
+    #[test]
+    fn resume_restores_the_recorded_model() {
+        // AD-0046: the header's provider/model outrank the startup
+        // selection when they are still available.
+        let root = std::env::temp_dir().join(format!("hi-model-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cwd = std::env::current_dir().unwrap();
+        let mut session =
+            hi_core::Session::start_in(&root, &cwd, "mock", "mock-2", None, None).unwrap();
+        session
+            .append(&[Message::User("recorded on mock-2".into())])
+            .unwrap();
+        let mut app = test_app();
+        // Make mock-2 selectable: a config entry plus the catalog row.
+        let mut config = hi_core::config::ModelsConfig::default();
+        let provider = hi_core::config::ProviderConfig {
+            base_url: "http://localhost:1/v1".into(),
+            api_key: None,
+            models: vec![hi_core::config::ModelConfig {
+                id: "mock-2".into(),
+                name: None,
+                reasoning: true,
+                vision: true,
+                context_window: None,
+                max_tokens: None,
+                thinking_level_map: None,
+            }],
+        };
+        config.providers.insert("mock".into(), provider);
+        app.config = config;
+        app.switch_session(session.path());
+        assert_eq!(app.status.provider, "mock");
+        assert_eq!(app.status.model, "mock-2");
+    }
+
+    #[test]
+    fn resume_falls_back_with_a_warning_when_the_recorded_model_is_gone() {
+        let root = std::env::temp_dir().join(format!("hi-model-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cwd = std::env::current_dir().unwrap();
+        let session =
+            hi_core::Session::start_in(&root, &cwd, "mock", "ghost-model", None, None).unwrap();
+        let mut app = test_app();
+        app.session_root = Some(root);
+        app.switch_session(session.path());
+        // The selection stands and the user is told why.
+        assert_eq!(app.status.model, "mock");
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| matches!(m, Message::System(t) if t.contains("ghost-model") && t.contains("not available"))),
+            "{:?}",
+            app.messages
+        );
+    }
+
+    #[test]
+    fn model_switch_restamps_the_live_session_identity() {
+        // AD-0046: a mid-session /model switch rewrites the header's
+        // provider/model, so the next resume restores the model the
+        // session ended on.
+        let root = std::env::temp_dir().join(format!("hi-model-restamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = test_app();
+        app.session_root = Some(root);
+        app.run_command("new", "");
+        app.apply_model_choice("mock/mock-2".into());
+        let path = app.session.as_ref().unwrap().path().to_path_buf();
+        let loaded = hi_core::session::load(&path).unwrap();
+        assert_eq!(loaded.header.provider, "mock");
+        assert_eq!(loaded.header.model, "mock-2");
     }
 
     #[test]

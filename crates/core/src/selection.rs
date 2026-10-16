@@ -29,6 +29,17 @@ pub struct Selected {
 }
 
 /// Resolve provider/model from optional CLI flags against a config.
+/// Is `provider/model` selectable right now? The restore rule
+/// (AD-0046): the provider entry must exist, and a configured model
+/// list must contain the id — an entry with no `models` discovers,
+/// so any id on it is fair game.
+pub fn model_available(config: &crate::config::ModelsConfig, provider: &str, model: &str) -> bool {
+    match config.providers.get(provider) {
+        None => false,
+        Some(entry) => entry.models.is_empty() || entry.models.iter().any(|m| m.id == model),
+    }
+}
+
 pub fn resolve(
     config: &ModelsConfig,
     provider: Option<&str>,
@@ -404,5 +415,34 @@ mod tests {
                 model: "a-model".into()
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::model_available;
+    use crate::config::ModelsConfig;
+
+    fn models_config(models: &[&str]) -> ModelsConfig {
+        let listed: Vec<String> = models
+            .iter()
+            .map(|id| format!("{{\"id\":\"{id}\"}}"))
+            .collect();
+        let raw = format!(
+            r#"{{"providers":{{"fake":{{"baseUrl":"http://x/v1","models":[{}]}}}}}}"#,
+            listed.join(",")
+        );
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[test]
+    fn model_available_follows_the_configured_list() {
+        let config = models_config(&["a", "b"]);
+        assert!(model_available(&config, "fake", "a"));
+        assert!(!model_available(&config, "fake", "ghost"));
+        assert!(!model_available(&config, "nope", "a"));
+        // A discovery provider (no models list) accepts any id.
+        let discovering = models_config(&[]);
+        assert!(model_available(&discovering, "fake", "anything"));
     }
 }

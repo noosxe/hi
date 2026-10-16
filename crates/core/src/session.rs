@@ -222,6 +222,17 @@ impl Session {
         self.header.thinking.as_deref()
     }
 
+    /// The recorded provider — the model-restore half of AD-0046
+    /// reads this pair.
+    pub fn provider(&self) -> &str {
+        &self.header.provider
+    }
+
+    /// The recorded model (AD-0046).
+    pub fn model(&self) -> &str {
+        &self.header.model
+    }
+
     /// Restamp the live header's `thinking` (AD-0045): the session
     /// file's first line is rewritten in place so the record tracks
     /// the level actually in use, and a later resume can restore it.
@@ -229,11 +240,17 @@ impl Session {
     /// handle is reopened against the rewritten file.
     pub fn set_thinking(&mut self, thinking: Option<&str>) -> Result<(), String> {
         self.header.thinking = thinking.map(str::to_string);
+        self.rewrite_header_line()
+    }
+
+    /// Rewrite line one from the live header: read, replace, write,
+    /// reopen the append handle. The header is always line one
+    /// (`create` wrote it); an empty file means something external
+    /// truncated it — fail loudly.
+    fn rewrite_header_line(&mut self) -> Result<(), String> {
         let body = std::fs::read_to_string(&self.path)
             .map_err(|err| format!("cannot read {}: {err}", self.path.display()))?;
         let mut lines = body.splitn(2, '\n');
-        // The header is always line one (`create` wrote it); an empty
-        // file means something external truncated it — fail loudly.
         if lines.next().is_none() || body.is_empty() || body.starts_with('\n') {
             return Err(format!("{} has no header line", self.path.display()));
         }
@@ -249,6 +266,16 @@ impl Session {
             .open(&self.path)
             .map_err(|err| format!("cannot reopen {}: {err}", self.path.display()))?;
         Ok(())
+    }
+
+    /// Restamp the live header's `provider`/`model` (AD-0046): the
+    /// session file's first line is rewritten so the identity fields
+    /// track a mid-session `/model` switch, and a later resume can
+    /// restore the model the session actually ended on.
+    pub fn set_model(&mut self, provider: &str, model: &str) -> Result<(), String> {
+        self.header.provider = provider.to_string();
+        self.header.model = model.to_string();
+        self.rewrite_header_line()
     }
 
     /// Copy an existing session into a fresh file for `cwd` — the
@@ -886,6 +913,33 @@ mod tests {
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.header.thinking, None);
         assert_eq!(loaded.messages.len(), 2);
+    }
+
+    #[test]
+    fn set_model_restamps_provider_and_model_together() {
+        let root = temp_root("restamp-model");
+        let mut session =
+            Session::start_in(&root, Path::new("/p"), "zai", "glm-5.3", Some("high"), None)
+                .unwrap();
+        session
+            .append(&[Message::User("before the switch".into())])
+            .unwrap();
+        let path = session.path().to_path_buf();
+
+        // AD-0046: a mid-session /model switch restamps the identity
+        // fields so resume restores the model the session ended on.
+        session.set_model("openai", "gpt-6.2").unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.header.provider, "openai");
+        assert_eq!(loaded.header.model, "gpt-6.2");
+        assert_eq!(loaded.header.thinking.as_deref(), Some("high"));
+        assert_eq!(
+            loaded.messages,
+            vec![Message::User("before the switch".into())]
+        );
+        // The file keeps accepting records.
+        session.append(&[Message::User("after".into())]).unwrap();
+        assert_eq!(load(&path).unwrap().messages.len(), 2);
     }
 
     #[test]

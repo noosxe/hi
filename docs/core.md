@@ -207,13 +207,15 @@ too, so the cli ships neither serde nor an HTTP client (AD-0004).
 
 ## session.rs — transcripts that survive restarts
 
-The header records the thinking level at open (`thinking`), the
-session's identity per AD-0045: `Session::set_thinking` restamps the
-live header in place on a mid-session `/thinking` (line-one rewrite,
-transcript untouched, append handle reopened), and `Session::thinking`
-is what every resume path reads to put the session back at its
-recorded level — the header outranks the settings default; no record
-keeps the current value.
+The header records the session's identity — thinking level and
+`provider`/`model` (AD-0045, AD-0046). `Session::set_thinking` and
+`Session::set_model` restamp the live header in place on mid-session
+switches (the shared line-one rewrite, transcript untouched, append
+handle reopened); the `thinking()`/`provider()`/`model()` accessors
+are what every resume path reads to put the session back where it
+was — the header outranks the startup selection; a missing level
+keeps the current value, a vanished model falls back with a warning
+(`selection::model_available` is the availability rule).
 
 One JSONL file per session under the data dir (`config::data_dir()` +
 `sessions/`), in a cwd-keyed project directory (pi-style encoding). Only
