@@ -292,7 +292,12 @@ transcript:
   (crossterm's `window_size()` when the OS reports real pixels, pi's
   9×18 fallback), capped at 80 columns × 24 rows, aspect-preserved
   with pi's distortion chooser. Small images upscale to the budget,
-  like pi.
+  like pi. The OS query lives in `cell_pixels()`, read once by the
+  `render()` wrapper; the pipeline itself is `render_with(image,
+  max_cols, cell)` with the cell size injected — tests pin geometry
+  against fixed dimensions, so assertions hold in any terminal
+  (#129: a test on the OS-querying path was green only where no
+  display exists).
 - **Fallback**: an image that fails any step (undecodable base64,
   corrupt bytes) renders as its text note — `· image: <mime>, <size>`
   — the same note every terminal shows when no image protocol is
