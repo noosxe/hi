@@ -1395,3 +1395,15 @@ stays byte-identical. Field evidence also recorded here: cap
 under-provisioning cost ~148k where one well-sized run would spend
 ~80k, and the parent session out-burned its subagents (260k vs 190k)
 — both fuel for #121's trimming design.
+
+**AD-0043 (2026-10-19): `subagents` master switch.** The nested-agent
+tool ships as a default capability: `settings.subagents`, absent =
+on (sibling of `images`, opposite default of `taskTurns`). Rulings:
+(1) camelCase `subagents`, default on; (2) off removes the tool from
+the registry entirely — absent beats erroring, since a schema entry
+that can only be rejected wastes context and invites retries; (3)
+startup policy only, no `/settings` toggle — the registry is built
+once in `resolve_target` and the TUI never rebuilds it, so no
+SessionInit plumbing exists or is needed (unlike `images`, whose
+AD-0012 per-message consent semantics earn a runtime switch).
+Composes by omission: off also means no recordings (nothing runs).

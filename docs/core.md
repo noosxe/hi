@@ -164,7 +164,10 @@ result line flags runs whose cumulative input crosses
 grow quadratically; soft marker only, hard budgets are out of scope —
 and names the transcript (`; recorded → <path>`, #125) whenever
 `subagentTranscripts` is on and the file opened, so the artifact is
-findable without hunting. The `subagent` tool (`tools/subagent.rs`) is the model
+findable without hunting. The `settings.subagents` master switch
+(AD-0043) gates the tool at registry-build time — off means absent,
+not erroring — and is startup policy. The `subagent` tool
+(`tools/subagent.rs`) is the model
 surface: `{prompt, provider?, model?, thinking?, tools?, max_rounds?}`,
 result plus an up/down token line; in `coding`/`all` only.
 

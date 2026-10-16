@@ -86,6 +86,7 @@ A credential *source*, not necessarily a literal:
   "sessionRetention": 30           // opt-in: prune session files older than N days at startup
   "maxToolRounds": 40              // opt-in: main-loop tool-round cap; default 16, must be >= 1
   "subagentTranscripts": true     // opt-in: record each subagent run as its own session file
+  "subagents": true               // master switch for the subagent tool; default on
 }
 ```
 
@@ -118,6 +119,11 @@ A credential *source*, not necessarily a literal:
   result line names each recording (`recorded → <path>`). Off by
   default because a chatty parent turn can spawn many files. Startup
   policy only, not flippable from `/settings`.
+- `subagents` (AD-0043) is the nested-agent tool's master switch,
+  default on. `false` removes the tool from the registry entirely —
+  the model never sees it, so there is no schema entry and no call to
+  reject. Startup policy only; moot keys compose (off also means no
+  transcripts, since nothing runs).
 - `/settings` flips what the running session can flip — `taskTurns`,
   `images` — without touching this file; Ctrl-S on the board writes
   one field back here (AD-0023). The file stays the startup source of

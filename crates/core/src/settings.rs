@@ -46,6 +46,10 @@ pub struct Settings {
     /// complete without a keystroke. Defaults to off — in v1 only the
     /// human spends turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The `subagents` master switch (AD-0043): off removes the
+    /// nested-agent tool from the registry — absent beats erroring.
+    /// Startup policy only, not `/settings`-flippable.
+    pub subagents: Option<bool>,
     pub task_turns: Option<bool>,
     /// Opt-in session retention (#23): delete session files older than
     /// this many days at startup, before any session opens. Absent
@@ -137,6 +141,14 @@ impl Settings {
     /// Auto-triggering is off unless switched on — like telemetry,
     /// because a turn costs the user's tokens and the default session
     /// must behave exactly as before (#72).
+    /// Ruling #1/#2 (AD-0043): the `subagents` master switch —
+    /// `false` removes the `subagent` tool from the registry entirely,
+    /// so the model never sees it. Absent means on: subagents ship as
+    /// a default capability, not an opt-in.
+    pub fn subagents_enabled(&self) -> bool {
+        self.subagents.unwrap_or(true)
+    }
+
     pub fn task_turns_enabled(&self) -> bool {
         self.task_turns.unwrap_or(false)
     }
@@ -217,6 +229,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn subagents_default_on_camel_case() {
+        // Absent = on (the default capability); camelCase `subagents`
+        // set false removes the tool at resolve time.
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert!(s.subagents_enabled());
+        let s: Settings = serde_json::from_str(r#"{"subagents": false}"#).unwrap();
+        assert!(!s.subagents_enabled());
+        let s: Settings = serde_json::from_str(r#"{"subagents": true}"#).unwrap();
+        assert!(s.subagents_enabled());
+    }
+
+    #[test]
     fn parses_camel_case_and_tolerates_unknown_fields() {
         let raw = r#"{"defaultModel": "zai/glm-5.3", "futureThing": {"a": 1}}"#;
         let settings: Settings = serde_json::from_str(raw).unwrap();
@@ -284,6 +308,7 @@ mod tests {
             default_tools: Some("all".into()),
             telemetry: Some(true),
             images: Some(false),
+            subagents: None,
             task_turns: None,
             session_retention: None,
             max_tool_rounds: None,
@@ -315,6 +340,7 @@ mod tests {
             default_tools: Some("all".into()),
             telemetry: Some(true),
             images: Some(false),
+            subagents: None,
             task_turns: None,
             session_retention: None,
             max_tool_rounds: None,
@@ -404,6 +430,7 @@ mod tests {
             default_tools: Some("read-only".into()),
             telemetry: None,
             images: None,
+            subagents: None,
             task_turns: None,
             session_retention: None,
             max_tool_rounds: None,
