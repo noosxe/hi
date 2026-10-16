@@ -1337,3 +1337,16 @@ implementation. The rulings:
   recording subagent runs as their own session files is a filed
   follow-up. Cancellation needs no new primitive — the abandoned
   subagent self-stops at its own next send (turn-lifecycle.md).
+
+**AD-0040 addendum (2026-10-18, field feedback):** the first hi-on-hi
+audit sharpened three edges without amending a ruling. Cap failures are
+now model-actionable — the runner recognizes its own loop's
+`ROUND_CAP_MARKER` and answers with the cap fact, a retry hint, and the
+subagent's last narration (the main loop's human-facing message is
+untouched). The default cap stays 8: schema guidance now documents the
+ranges (20–40 for repo-wide audits) so the model raises it itself —
+field evidence that an audit wanted 30 is real, but guidance-raises-it
+keeps the belt. And a soft `HIGH TOKEN USE` marker at
+`SUBAGENT_HIGH_TOKEN_USE` (100k cumulative input) makes cost outliers
+visible; hard mid-run budgets stay out of scope — input re-sends every
+round, so the real lever is round count, which the caller already sets.

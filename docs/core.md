@@ -144,14 +144,20 @@ the single `User` message — the parent transcript never leaks in), the
 toolset comes from a bundle registry built with `subagent: None` (recursion
 impossible by construction; `tasks: None` too — background-task ownership
 stays with the main session), and the round cap defaults to
-`SUBAGENT_MAX_TOOL_ROUNDS` (8), hit as a loud error. Identity is a stamped
+`SUBAGENT_MAX_TOOL_ROUNDS` (8); hitting it is a model-actionable error —
+the cap fact, a retry hint, and the run's last narration (partial
+output) — while the main loop's human-facing message stays untouched
+(`agent::ROUND_CAP_MARKER` is the shared fragment). Identity is a stamped
 *name pair* (provider, model), never the parent's provider `Arc` — every
 run builds its own provider wired to its own registry; the front end
 restamps on every provider rebuild (`/model`, `/resume`), the
 telemetry-stamp pattern. `run` is blocking by ruling (the tool loop is
 sequential; parallelism is #5's) and returns a shaped `SubagentResult`
 {final text, the subagent's own usage, round count} — `Event::Error`
-becomes `Err`. The `subagent` tool (`tools/subagent.rs`) is the model
+becomes `Err`. The tool's result line flags runs whose cumulative input
+crosses `SUBAGENT_HIGH_TOKEN_USE` (100k prompt tokens) with
+`HIGH TOKEN USE` — input re-sends every round, so long explorations
+grow quadratically; soft marker only, hard budgets are out of scope. The `subagent` tool (`tools/subagent.rs`) is the model
 surface: `{prompt, provider?, model?, thinking?, tools?, max_rounds?}`,
 result plus an up/down token line; in `coding`/`all` only.
 
