@@ -209,8 +209,8 @@ pub struct App {
     /// Session-cumulative token economics (AD-0026), merged from
     /// every `Event::Usage`. `usage_last_prompt` is the latest round's
     /// prompt size — the context fact the share needs.
-    usage: Usage,
-    usage_last_prompt: u64,
+    pub(crate) usage: Usage,
+    pub(crate) usage_last_prompt: u64,
     /// Left side of the status bar, computed once at startup:
     /// `~/Projects/hi (main)`.
     pub location: String,
@@ -1247,6 +1247,10 @@ impl App {
             // muted vendor-note rows.
             let notes = self.thinking_menu().1.len() as u16;
             5 + 1 + 1 + notes
+        } else if self.context_panel.is_some() {
+            // The report shows every row — it is read-only, no
+            // SelectList window — plus the key-hint footer.
+            self.context_panel_rows().len() as u16 + 1
         } else if self.settings_board.is_some() {
             // The board is small and fixed: every row visible, plus
             // the key-hint footer.
@@ -3811,6 +3815,10 @@ mod tests {
         app.completion = None;
         app.open_picker(); // empty catalog: "no models" row + hint row
         assert_eq!(app.menu_height(), 2);
+        // The /context panel: every row visible, plus the footer.
+        app.picker = None;
+        app.run_command("context", "");
+        assert_eq!(app.menu_height(), app.context_panel_rows().len() as u16 + 1);
     }
 
     #[test]
