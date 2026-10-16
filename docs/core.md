@@ -433,6 +433,18 @@ default_model: Option<&str>) -> Result<Selected, String>` where
 `list_for(config, provider)` powers `--list-models`; errors name the causes
 (HTTP status, unrecognized JSON shape).
 
+## context_report.rs — the request, bucketed (AD-0047)
+
+`context_report(ContextInput, prompt_tokens) -> ContextReport`
+re-serializes the actual outgoing request — the system wire message,
+`tools.definitions()`, and `openai::wire_messages` output — and bills
+each class bytes over four: system prompt, tool schemas, user,
+assistant (content split from its `tool_calls` array), tool results,
+image carriers. Transcript notes never appear (the wire drops them).
+`ContextReport::anchored()` scales the classes by largest remainder
+to sum exactly to the provider's last `prompt_tokens` when one
+exists — the split is ours, the total is the provider's.
+
 ## settings.rs — `settings.json`
 
 `Settings { default_model, thinking, default_tools, telemetry, images }` — all

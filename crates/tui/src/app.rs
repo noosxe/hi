@@ -228,6 +228,8 @@ pub struct App {
     /// The open `/thinking` ladder picker, if any — same menu-slot
     /// contract as the settings board.
     pub thinking_picker: Option<ThinkingPicker>,
+    /// The open `/context` report, if any — same menu slot, read-only.
+    pub context_panel: Option<ContextPanel>,
     /// Render tick — advances once per frame to animate the
     /// activity spinner.
     pub tick: u8,
@@ -385,6 +387,11 @@ pub struct ThinkingPicker {
     pub selected: usize,
 }
 
+/// The `/context` report (AD-0047): the wire request bucketed by
+/// class as a read-only modal — rows computed fresh each frame, any
+/// key closes (nothing to select).
+pub struct ContextPanel;
+
 /// The `/tasks` pane's view (AD-0021): the list, or one task's
 /// output watched live. The pane lives in the menu slot under the
 /// input; draw reads the manager fresh every frame — the frame clock
@@ -457,6 +464,7 @@ impl App {
             picker: None,
             settings_board: None,
             thinking_picker: None,
+            context_panel: None,
             completion: None,
             tick: 0,
             queued: None,
@@ -555,6 +563,11 @@ impl App {
         // menu (AD-0044 addendum).
         if self.thinking_picker.is_some() {
             self.handle_thinking_picker_key(key);
+            return;
+        }
+        // The `/context` report is read-only: any key dismisses it.
+        if self.context_panel.is_some() {
+            self.context_panel = None;
             return;
         }
         // The session picker likewise: it takes over everything above
@@ -1146,6 +1159,51 @@ impl App {
         vec![(self.location.clone(), task_counts), (bill, context_right)]
     }
 
+    /// The `/context` panel's rows (AD-0047): the wire request
+    /// bucketed by class, anchored to the provider's last bill when
+    /// one exists, plus the free remainder of a known window.
+    pub(crate) fn context_panel_rows(&self) -> Vec<String> {
+        let report = hi_core::context_report::context_report(
+            hi_core::context_report::ContextInput {
+                system_prompt: self.system_prompt.as_deref(),
+                tools: &self.tools,
+                history: &self.messages,
+            },
+            (self.usage_last_prompt > 0).then_some(self.usage_last_prompt),
+        );
+        let anchored = report.anchored();
+        let total: u64 = anchored.iter().map(|(_, t)| t).sum();
+        let provenance = if report.prompt_tokens.is_some() {
+            "anchored to the provider's bill"
+        } else {
+            "estimated (bytes over four)"
+        };
+        let mut rows = vec![format!(
+            "context \u{2014} {total} tokens \u{2014} {provenance}"
+        )];
+        for (class, tokens) in &anchored {
+            let pct = (tokens * 100).checked_div(total).unwrap_or(0);
+            let bar = "\u{2593}".repeat(((pct / 4) as usize).clamp(1, 25));
+            rows.push(format!(
+                "  {:<13} {:>7}  {:>3}%  {bar}",
+                class.label(),
+                tokens,
+                pct
+            ));
+        }
+        if let Some(window) = self.context_window()
+            && window > total
+        {
+            let free = window - total;
+            let pct = free * 100 / window;
+            rows.push(format!(
+                "  {:<13} {:>7}  {:>3}%  free before the window's edge",
+                "free", free, pct
+            ));
+        }
+        rows
+    }
+
     /// The context window for the live model — the denominator of the
     /// usage line's context share. Tier chain (AD-0044): the config
     /// entry's `contextWindow` wins; then the shipped catalog's vendor
@@ -1585,6 +1643,7 @@ impl App {
             "keybinds" => self
                 .messages
                 .push(Message::System(crate::keybinds::listing())),
+            "context" => self.context_panel = Some(ContextPanel),
             "thinking" => self.command_thinking(args),
             "name" => self.command_name(args),
             "new" => self.command_new(args),
@@ -3041,6 +3100,56 @@ mod tests {
         assert_eq!(app.context_window(), Some(1_000_000));
         app.status.model = "totally-unknown-model".into();
         assert_eq!(app.context_window(), None);
+    }
+
+    #[test]
+    fn context_command_opens_the_report_panel() {
+        let mut app = test_app();
+        app.run_command("context", "");
+        assert!(app.context_panel.is_some(), "bare /context opens the panel");
+        // Esc closes the read-only panel — and so does any other key:
+        // there is nothing to select.
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.context_panel.is_none());
+        app.run_command("context", "");
+        app.handle_key(key(KeyCode::Char('x')));
+        assert!(app.context_panel.is_none());
+    }
+
+    #[test]
+    fn context_panel_rows_anchor_to_the_providers_bill() {
+        let mut app = test_app();
+        app.messages = vec![
+            Message::User("hello there".into()),
+            Message::Assistant("hi".into()),
+        ];
+        app.usage_last_prompt = 1_000;
+        let rows = app.context_panel_rows();
+        let joined = rows.join("\n");
+        assert!(
+            rows[0].contains("1000"),
+            "the header carries the exact bill: {joined}"
+        );
+        assert!(joined.contains("user"), "{joined}");
+        assert!(joined.contains("assistant"), "{joined}");
+        // No bill yet — the raw estimate stands alone.
+        app.usage_last_prompt = 0;
+        let rows = app.context_panel_rows();
+        assert!(rows[0].contains("estimated"), "{:?}", rows[0]);
+    }
+
+    #[test]
+    fn context_panel_shows_free_space_when_the_window_is_known() {
+        let mut app = test_app();
+        app.messages = vec![Message::User("hello".into())];
+        app.usage_last_prompt = 100;
+        app.status.model = "claude-opus-4.7".into();
+        let rows = app.context_panel_rows();
+        let joined = rows.join("\n");
+        assert!(
+            joined.contains("free") && joined.contains("999900"),
+            "window minus the anchored total: {joined}"
+        );
     }
 
     #[test]
