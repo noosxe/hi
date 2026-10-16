@@ -1251,6 +1251,41 @@ mod tests {
     }
 
     #[test]
+    fn the_context_panel_renders_in_the_menu_zone() {
+        use crate::app::test_app;
+        let mut app = test_app();
+        app.messages = vec![
+            Message::User("hello there".into()),
+            Message::Assistant("hi".into()),
+        ];
+        app.usage_last_prompt = 500;
+        app.run_command("context", "");
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend_mut().buffer().clone();
+        let row_text = |y: u16| {
+            (0..60u16)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        let rows: Vec<String> = (0..20u16).map(row_text).collect();
+        // The panel is on screen: the anchored header and a class row.
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("context \u{2014} 500 tokens")),
+            "header anchors to the bill: {rows:?}"
+        );
+        assert!(rows.iter().any(|r| r.contains("assistant")));
+        // And the status row yielded for it (menus outrank status).
+        assert!(
+            !rows.iter().any(|r| r.contains("mock/mock")),
+            "status yields while the panel is open: {rows:?}"
+        );
+    }
+
+    #[test]
     fn menus_render_under_the_input_and_status_yields() {
         use crate::app::test_app;
         let mut app = test_app();
