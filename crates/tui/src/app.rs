@@ -225,6 +225,9 @@ pub struct App {
     /// The open `/settings` board (AD-0023), if any. `Some` means it
     /// owns the keyboard.
     pub settings_board: Option<SettingsBoard>,
+    /// The open `/thinking` ladder picker, if any — same menu-slot
+    /// contract as the settings board.
+    pub thinking_picker: Option<ThinkingPicker>,
     /// Render tick — advances once per frame to animate the
     /// activity spinner.
     pub tick: u8,
@@ -375,6 +378,13 @@ pub struct SettingsBoard {
     pub selected: usize,
 }
 
+/// The `/thinking` picker (AD-0044 addendum): the ladder as a modal,
+/// rows computed fresh each frame from model + metadata — Enter
+/// switches (and persists), Esc closes.
+pub struct ThinkingPicker {
+    pub selected: usize,
+}
+
 /// The `/tasks` pane's view (AD-0021): the list, or one task's
 /// output watched live. The pane lives in the menu slot under the
 /// input; draw reads the manager fresh every frame — the frame clock
@@ -446,6 +456,7 @@ impl App {
             session,
             picker: None,
             settings_board: None,
+            thinking_picker: None,
             completion: None,
             tick: 0,
             queued: None,
@@ -538,6 +549,12 @@ impl App {
         // (AD-0023).
         if self.settings_board.is_some() {
             self.handle_settings_key(key);
+            return;
+        }
+        // The `/thinking` ladder picker owns the keyboard like every
+        // menu (AD-0044 addendum).
+        if self.thinking_picker.is_some() {
+            self.handle_thinking_picker_key(key);
             return;
         }
         // The session picker likewise: it takes over everything above
@@ -1159,6 +1176,11 @@ impl App {
                 let visible = (picker.items.len() as u16).min(5);
                 visible + u16::from(picker.items.len() > 5) + 1
             }
+        } else if self.thinking_picker.is_some() {
+            // Same SelectList geometry as the model picker, plus any
+            // muted vendor-note rows.
+            let notes = self.thinking_menu().1.len() as u16;
+            5 + 1 + 1 + notes
         } else if self.settings_board.is_some() {
             // The board is small and fixed: every row visible, plus
             // the key-hint footer.
@@ -1954,11 +1976,17 @@ impl App {
     fn command_thinking(&mut self, args: &str) {
         let raw = args.trim().to_lowercase();
         if raw.is_empty() {
-            self.messages.push(Message::System(Self::thinking_listing(
-                &self.config,
-                &self.status,
-                self.thinking,
-            )));
+            // Bare /thinking is the picker: the ladder with per-model
+            // marks, preselected at the current state (AD-0044
+            // addendum — the listing grew up into a modal).
+            let selected = match self.thinking.as_ref().map(|l| l.name()) {
+                Some(name) => Self::THINKING_CHOICES
+                    .iter()
+                    .position(|c| c.as_ref().is_some_and(|l| l.name() == name))
+                    .unwrap_or(Self::THINKING_CHOICES.len() - 1),
+                None => Self::THINKING_CHOICES.len() - 1,
+            };
+            self.thinking_picker = Some(ThinkingPicker { selected });
             return;
         }
         let level = if raw == "auto" {
@@ -1974,6 +2002,29 @@ impl App {
                 }
             }
         };
+        self.apply_thinking_choice(level);
+    }
+
+    /// Row order of the thinking picker: the seven ladder levels,
+    /// then auto (send nothing, provider decides).
+    const THINKING_CHOICES: [Option<hi_core::thinking::ThinkingLevel>; 8] = {
+        use hi_core::thinking::ThinkingLevel as T;
+        [
+            Some(T::Off),
+            Some(T::Minimal),
+            Some(T::Low),
+            Some(T::Medium),
+            Some(T::High),
+            Some(T::Xhigh),
+            Some(T::Max),
+            None,
+        ]
+    };
+
+    /// Switch the level, rebuild the provider, persist. The one
+    /// commit path — the picker's Enter and the direct
+    /// `/thinking <level>` argument both land here.
+    fn apply_thinking_choice(&mut self, level: Option<hi_core::thinking::ThinkingLevel>) {
         self.thinking = level;
         self.rebuild_provider(
             &self.status.provider.clone(),
@@ -1995,64 +2046,88 @@ impl App {
         }
     }
 
-    /// The `/thinking` ladder with per-model support marks: `✓` where
-    /// the level reaches the wire (a `thinkingLevelMap` entry, a
-    /// URL-family default, or vendor-published efforts), `–` where it
-    /// would send nothing. Honest marks only — no guessing (AD-0044).
-    fn thinking_listing(
-        config: &hi_core::config::ModelsConfig,
-        status: &Status,
-        current: Option<hi_core::thinking::ThinkingLevel>,
-    ) -> String {
+    /// Keyboard owner while the thinking picker is open.
+    fn handle_thinking_picker_key(&mut self, key: KeyEvent) {
+        let Some(picker) = self.thinking_picker.as_mut() else {
+            return;
+        };
+        let last = Self::THINKING_CHOICES.len() - 1;
+        match key.code {
+            KeyCode::Esc => self.thinking_picker = None,
+            KeyCode::Up => {
+                picker.selected = if picker.selected == 0 {
+                    last
+                } else {
+                    picker.selected - 1
+                };
+            }
+            KeyCode::Down => {
+                picker.selected = (picker.selected + 1) % (last + 1);
+            }
+            KeyCode::Enter => {
+                let choice = Self::THINKING_CHOICES
+                    .get(picker.selected)
+                    .cloned()
+                    .flatten();
+                self.thinking_picker = None;
+                self.apply_thinking_choice(choice);
+            }
+            _ => {}
+        }
+    }
+
+    /// The picker's ladder rows plus any vendor note lines (drawn
+    /// muted, not selectable). Marks fresh each frame: `✓` where the
+    /// level reaches the wire (a `thinkingLevelMap` entry, a
+    /// URL-family default, or vendor-published efforts; auto always),
+    /// `–` where it would send nothing. Honest marks only — no
+    /// guessing (AD-0044).
+    pub(crate) fn thinking_menu(&self) -> (Vec<String>, Vec<String>) {
+        let config = &self.config;
+        let status = &self.status;
+        let current = self.thinking;
         let entry = config.providers.get(&status.provider);
         let model = entry.and_then(|e| e.models.iter().find(|m| m.id == status.model));
         let map = model.and_then(|m| m.thinking_level_map.as_ref());
         let base_url = entry.map(|e| e.base_url.as_str()).unwrap_or("");
         let vendor = hi_core::catalog::lookup(&status.model);
-        let mut lines = vec![format!(
-            "thinking for {} — current: {}",
-            status.model,
-            current
-                .as_ref()
-                .map(|l| l.name())
-                .unwrap_or("auto (provider decides)")
-        )];
-        for level in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
-            let mapped = map.is_some_and(|m| m.contains_key(level))
-                || hi_core::thinking::family_kwargs(
-                    base_url,
-                    hi_core::thinking::ThinkingLevel::parse(level).unwrap(),
-                )
-                .is_some()
-                || vendor
-                    .and_then(|v| v.efforts.as_ref())
-                    .is_some_and(|efforts| efforts.iter().any(|e| e == level));
-            let default_mark = if vendor
-                .and_then(|v| v.default_effort.as_deref())
-                .is_some_and(|d| d == level)
-            {
+        let mut rows = Vec::new();
+        for choice in Self::THINKING_CHOICES {
+            let (label, mark) = match choice {
+                Some(level) => {
+                    let mapped = map.is_some_and(|m| m.contains_key(level.name()))
+                        || hi_core::thinking::family_kwargs(base_url, level).is_some()
+                        || vendor
+                            .and_then(|v| v.efforts.as_ref())
+                            .is_some_and(|efforts| efforts.iter().any(|e| e == level.name()));
+                    (
+                        level.name().to_string(),
+                        if mapped { "\u{2713}" } else { "\u{2013}" },
+                    )
+                }
+                None => ("auto".to_string(), "\u{2713}"),
+            };
+            let default_mark = if choice.as_ref().is_some_and(|level| {
+                vendor
+                    .and_then(|v| v.default_effort.as_deref())
+                    .is_some_and(|d| d == level.name())
+            }) {
                 " (vendor default)"
             } else {
                 ""
             };
-            let current_mark = if current.as_ref().is_some_and(|l| l.name() == level) {
-                " ← current"
+            let current_mark = if choice.as_ref() == current.as_ref() {
+                " \u{2190} current"
             } else {
                 ""
             };
-            lines.push(format!(
-                "  {:<8} {}{}{}",
-                level,
-                if mapped { "✓" } else { "–" },
-                default_mark,
-                current_mark
-            ));
+            rows.push(format!("  {label:<8} {mark}{default_mark}{current_mark}"));
         }
+        let mut notes = Vec::new();
         if vendor.is_some_and(|v| v.reasoning_mandatory) {
-            lines.push("  note: this model cannot disable reasoning".to_string());
+            notes.push("this model cannot disable reasoning".to_string());
         }
-        lines.push("  /thinking <level|auto> to switch (saved to settings.json)".to_string());
-        lines.join("\n")
+        (rows, notes)
     }
 
     fn command_new(&mut self, args: &str) {
@@ -2916,9 +2991,11 @@ mod tests {
     }
 
     #[test]
-    fn thinking_command_switches_level_and_lists_marks() {
+    fn thinking_command_switches_level_directly() {
         let mut app = test_app();
+        // The argument form never opens a modal — power path.
         app.run_command("thinking", "high");
+        assert!(app.thinking_picker.is_none());
         assert_eq!(app.thinking, Some(hi_core::thinking::ThinkingLevel::High));
         assert!(
             app.messages
@@ -2927,36 +3004,9 @@ mod tests {
             "{:?}",
             app.messages
         );
-        // Bare /thinking lists the ladder with marks and the current.
-        app.run_command("thinking", "");
-        let listing = app
-            .messages
-            .iter()
-            .filter_map(|m| match m {
-                Message::System(t) if t.contains("thinking for") => Some(t.clone()),
-                _ => None,
-            })
-            .next()
-            .unwrap();
-        assert!(listing.contains("current: high"), "{listing}");
-        assert!(listing.contains("xhigh"), "{listing}");
         // Back to auto clears the level (provider decides again).
         app.run_command("thinking", "auto");
         assert_eq!(app.thinking, None);
-        app.run_command("thinking", "");
-        let listing = app
-            .messages
-            .iter()
-            .filter_map(|m| match m {
-                Message::System(t) if t.contains("thinking for") => Some(t.clone()),
-                _ => None,
-            })
-            .next_back()
-            .unwrap();
-        assert!(
-            listing.contains("current: auto (provider decides)"),
-            "{listing}"
-        );
         // Unknown levels are refused with guidance, not silently.
         let before = app.messages.len();
         app.run_command("thinking", "ultra");
@@ -2965,6 +3015,73 @@ mod tests {
             matches!(app.messages.last(), Some(Message::System(t)) if t.contains("unknown thinking level"))
         );
         assert_eq!(app.messages.len(), before + 1);
+        assert!(app.thinking_picker.is_none());
+    }
+
+    #[test]
+    fn thinking_bare_opens_the_ladder_picker() {
+        let mut app = test_app();
+        app.run_command("thinking", "");
+        assert!(
+            app.thinking_picker.is_some(),
+            "bare /thinking opens the picker"
+        );
+        // Eight rows: the seven levels, then auto.
+        let rows = app.thinking_menu().0;
+        assert_eq!(rows.len(), 8);
+        assert!(rows[0].trim().starts_with("off"), "{rows:?}");
+        assert!(rows[7].trim().starts_with("auto"), "{rows:?}");
+        assert!(
+            rows.iter().any(|r| r.contains("\u{2190} current")),
+            "{rows:?}"
+        );
+        // Esc closes without changing anything.
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.thinking_picker.is_none());
+        assert_eq!(app.thinking, None);
+    }
+
+    #[test]
+    fn thinking_picker_preselects_the_current_level() {
+        let mut app = test_app();
+        app.thinking = Some(hi_core::thinking::ThinkingLevel::High);
+        app.run_command("thinking", "");
+        assert_eq!(app.thinking_picker.as_ref().unwrap().selected, 4);
+        app.thinking = None;
+        app.run_command("thinking", "");
+        assert_eq!(app.thinking_picker.as_ref().unwrap().selected, 7);
+    }
+
+    #[test]
+    fn thinking_picker_enter_switches_wraps_and_persists() {
+        let mut app = test_app();
+        app.run_command("thinking", "");
+        // Wrap up from auto (preselected: nothing set) lands on max.
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.thinking_picker.as_ref().unwrap().selected, 6);
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.thinking_picker.is_none());
+        assert_eq!(app.thinking, Some(hi_core::thinking::ThinkingLevel::Max));
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| matches!(m, Message::System(t) if t.contains("thinking: max (saved)"))),
+            "{:?}",
+            app.messages
+        );
+        // Reopen: down from max wraps to auto; Enter clears.
+        app.run_command("thinking", "");
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.thinking_picker.as_ref().unwrap().selected, 7);
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.thinking, None);
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| matches!(m, Message::System(t) if t.contains("thinking: auto"))),
+            "{:?}",
+            app.messages
+        );
     }
 
     #[test]

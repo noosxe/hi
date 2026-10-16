@@ -140,8 +140,9 @@ A credential *source*, not necessarily a literal:
   `thinkingLevelMap` (config wins) or — when unmapped — a URL-family
   default (`api.z.ai` → `thinking.type` binary, `api.openai.com` →
   `reasoning_effort`, `openrouter.ai` → `reasoning.effort`); unknown
-  hosts send nothing. `/thinking` lists the ladder with per-model
-  marks and switches mid-session (persisted here);
+  hosts send nothing. `/thinking` opens the ladder picker with per-model
+  marks (Enter switches mid-session and persists here);
+  `/thinking <level|auto>` switches directly;
   `thinking:auto` = send nothing, provider decides. The status row
   always shows the state (`(provider) model · thinking:high` or
   `thinking:auto`).
