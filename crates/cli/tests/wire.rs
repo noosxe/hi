@@ -436,6 +436,59 @@ fn thinking_kwargs_follow_the_models_level_map() {
 }
 
 #[test]
+fn continue_restores_the_sessions_recorded_thinking_level() {
+    // AD-0045 ruling 1: the session header's level outranks the
+    // settings default on resume — a session recorded at high stays
+    // at high even after settings moved on.
+    let env = Env::new("think-resume");
+    let api = FakeApi::start([reply_script(), reply_script()].concat());
+    env.write_models_json(
+        api.url(),
+        json!({
+            "id": "fake-mini",
+            "thinkingLevelMap": {
+                "high": {"reasoning_effort": "high"},
+                "low": {"reasoning_effort": "low"},
+            },
+        }),
+    );
+    let project = env.project("think-resume-proj");
+
+    // Session one runs at high: the header records it.
+    env.write_settings_json(json!({"thinking": "high"}));
+    let (code, _, stderr) = run(
+        &project,
+        &env,
+        &["-p", "--provider", "fake", "--model", "fake-mini", "first"],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(api.requests()[0].body["reasoning_effort"], json!("high"));
+
+    // Settings move to low; --continue must put the session back at
+    // its recorded high, not the new default.
+    env.write_settings_json(json!({"thinking": "low"}));
+    let (code, _, stderr) = run(
+        &project,
+        &env,
+        &[
+            "--continue",
+            "-p",
+            "--provider",
+            "fake",
+            "--model",
+            "fake-mini",
+            "second",
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        api.requests()[1].body["reasoning_effort"],
+        json!("high"),
+        "the recorded level must outrank the settings default on resume"
+    );
+}
+
+#[test]
 fn continue_appends_and_no_session_writes_nothing() {
     let env = Env::new("sessions");
     let project = env.project("sessions-proj");

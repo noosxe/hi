@@ -1958,6 +1958,18 @@ impl App {
         // prompt-cache key before any further turn is spawned.
         let cache_key = session.id().to_string();
         self.session = Some(session);
+        // AD-0045 ruling 1: the session's recorded level outranks the
+        // settings default — resume puts you back where the session
+        // was. No record (old files, auto) keeps the current value;
+        // auto is not forced.
+        if let Some(level) = loaded
+            .header
+            .thinking
+            .as_deref()
+            .and_then(hi_core::thinking::ThinkingLevel::parse)
+        {
+            self.thinking = Some(level);
+        }
         let (provider, model) = (self.status.provider.clone(), self.status.model.clone());
         self.rebuild_provider(&provider, &model, Some(cache_key));
         self.scroll.refold();
@@ -2043,6 +2055,15 @@ impl App {
             Err(err) => self.messages.push(Message::System(format!(
                 "thinking level switched for this session, but not saved: {err}"
             ))),
+        }
+        // AD-0045 ruling 2: the live header follows the switch, so
+        // the next resume of this session restores the last level.
+        // Best-effort surface: an IO failure is reported but never
+        // rolls the switch back.
+        if let Some(session) = self.session.as_mut()
+            && let Err(err) = session.set_thinking(level.as_ref().map(|l| l.name()))
+        {
+            self.messages.push(Message::Error(err));
         }
     }
 
@@ -4076,6 +4097,59 @@ mod tests {
         assert!(picker.renaming.is_none());
         let loaded = hi_core::session::load(&picker.summaries[0].path).unwrap();
         assert_eq!(loaded.header.name, None);
+    }
+
+    #[test]
+    fn resume_restores_the_recorded_thinking_level() {
+        // AD-0045 ruling 1: the session's recorded level outranks the
+        // settings default — resume puts you back where the session
+        // was, exactly.
+        let root = std::env::temp_dir().join(format!("hi-think-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cwd = std::env::current_dir().unwrap();
+        let mut session =
+            hi_core::Session::start_in(&root, &cwd, "mock", "mock", Some("high"), None).unwrap();
+        session
+            .append(&[Message::User("recorded at high".into())])
+            .unwrap();
+        let mut app = test_app();
+        app.session_root = Some(root);
+        app.thinking = Some(hi_core::thinking::ThinkingLevel::Low);
+        app.switch_session(session.path());
+        assert_eq!(app.thinking, Some(hi_core::thinking::ThinkingLevel::High));
+    }
+
+    #[test]
+    fn resume_without_a_recorded_level_keeps_the_current_one() {
+        // No record (old files, auto) = no override: the settings
+        // value stands, auto is not forced.
+        let root = std::env::temp_dir().join(format!("hi-think-resume2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cwd = std::env::current_dir().unwrap();
+        let session = hi_core::Session::start_in(&root, &cwd, "mock", "mock", None, None).unwrap();
+        let mut app = test_app();
+        app.session_root = Some(root);
+        app.thinking = Some(hi_core::thinking::ThinkingLevel::Medium);
+        app.switch_session(session.path());
+        assert_eq!(app.thinking, Some(hi_core::thinking::ThinkingLevel::Medium));
+    }
+
+    #[test]
+    fn thinking_switch_restamps_the_live_session_header() {
+        // AD-0045 ruling 2: the live header follows the switch, so
+        // the next resume of this session restores the last level.
+        let root = std::env::temp_dir().join(format!("hi-think-restamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = test_app();
+        app.session_root = Some(root);
+        app.run_command("new", "");
+        app.run_command("thinking", "high");
+        let path = app.session.as_ref().unwrap().path().to_path_buf();
+        let loaded = hi_core::session::load(&path).unwrap();
+        assert_eq!(loaded.header.thinking.as_deref(), Some("high"));
+        app.run_command("thinking", "auto");
+        let loaded = hi_core::session::load(&path).unwrap();
+        assert_eq!(loaded.header.thinking, None);
     }
 
     #[test]

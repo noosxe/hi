@@ -216,6 +216,41 @@ impl Session {
         })
     }
 
+    /// The session's recorded thinking level, if any — the resume
+    /// restore reads this (AD-0045 ruling 1).
+    pub fn thinking(&self) -> Option<&str> {
+        self.header.thinking.as_deref()
+    }
+
+    /// Restamp the live header's `thinking` (AD-0045): the session
+    /// file's first line is rewritten in place so the record tracks
+    /// the level actually in use, and a later resume can restore it.
+    /// The transcript below the header is untouched; the append
+    /// handle is reopened against the rewritten file.
+    pub fn set_thinking(&mut self, thinking: Option<&str>) -> Result<(), String> {
+        self.header.thinking = thinking.map(str::to_string);
+        let body = std::fs::read_to_string(&self.path)
+            .map_err(|err| format!("cannot read {}: {err}", self.path.display()))?;
+        let mut lines = body.splitn(2, '\n');
+        // The header is always line one (`create` wrote it); an empty
+        // file means something external truncated it — fail loudly.
+        if lines.next().is_none() || body.is_empty() || body.starts_with('\n') {
+            return Err(format!("{} has no header line", self.path.display()));
+        }
+        let rest = lines.next().unwrap_or("");
+        let mut out = String::with_capacity(body.len() + 16);
+        out.push_str(&header_line(&self.header)?);
+        out.push('\n');
+        out.push_str(rest);
+        std::fs::write(&self.path, out)
+            .map_err(|err| format!("cannot write {}: {err}", self.path.display()))?;
+        self.file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&self.path)
+            .map_err(|err| format!("cannot reopen {}: {err}", self.path.display()))?;
+        Ok(())
+    }
+
     /// Copy an existing session into a fresh file for `cwd` — the
     /// `--fork` path. The source is only ever read: the copy gets a new
     /// id and timestamp, the forking directory in its header, a
@@ -821,6 +856,50 @@ mod tests {
                 .to_string_lossy()
                 .ends_with(".jsonl")
         );
+    }
+
+    #[test]
+    fn set_thinking_rewrites_the_header_in_place() {
+        let root = temp_root("restamp");
+        let mut session =
+            Session::start_in(&root, Path::new("/p"), "zai", "glm-5.3", Some("high"), None)
+                .unwrap();
+        session.append(&[Message::User("turn one".into())]).unwrap();
+        let path = session.path().to_path_buf();
+
+        // AD-0045: a mid-session switch restamps the live header so
+        // the record tracks reality.
+        session.set_thinking(Some("low")).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.header.thinking.as_deref(), Some("low"));
+        // The transcript survives the rewrite.
+        assert_eq!(loaded.messages, vec![Message::User("turn one".into())]);
+
+        // And the session keeps accepting records.
+        session.append(&[Message::User("turn two".into())]).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.messages.len(), 2);
+        assert_eq!(loaded.header.thinking.as_deref(), Some("low"));
+
+        // Back to auto clears the field.
+        session.set_thinking(None).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.header.thinking, None);
+        assert_eq!(loaded.messages.len(), 2);
+    }
+
+    #[test]
+    fn set_thinking_works_on_headers_without_the_field() {
+        // An old binary's session: the header predates `thinking`
+        // (serde default None). Restamping must not require it.
+        let root = temp_root("restamp-old");
+        let session =
+            Session::start_in(&root, Path::new("/p"), "zai", "glm-5.3", None, None).unwrap();
+        let path = session.path().to_path_buf();
+        let mut reopened = Session::resume(&path).unwrap();
+        reopened.set_thinking(Some("max")).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.header.thinking.as_deref(), Some("max"));
     }
 
     #[test]

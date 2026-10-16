@@ -107,7 +107,9 @@ seven levels then `auto`, each row with its honest per-model mark
 nothing), preselected at the current state; Enter switches, rebuilds
 the provider, and persists (the one commit path,
 `apply_thinking_choice`); Esc closes. `/thinking <level|auto>` stays
-the direct argument path — no modal. `App.thinking_picker` owns the
+the direct argument path — no modal. the switch restamps the live
+session header (`Session::set_thinking`, AD-0045) so resume
+restores the last level. `App.thinking_picker` owns the
 keyboard while open; rows come fresh from `thinking_menu()` each
 frame (marks move when the model moves).
 `/settings` opens the policy board (AD-0023) — a curated list of what

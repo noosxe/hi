@@ -142,7 +142,10 @@ A credential *source*, not necessarily a literal:
   `reasoning_effort`, `openrouter.ai` → `reasoning.effort`); unknown
   hosts send nothing. `/thinking` opens the ladder picker with per-model
   marks (Enter switches mid-session and persists here);
-  `/thinking <level|auto>` switches directly;
+  `/thinking <level|auto>` switches directly. The session file
+  records the level: switches restamp it, and resuming puts the
+  session back at its recorded level (settings stay the default for
+  new sessions);
   `thinking:auto` = send nothing, provider decides. The status row
   always shows the state (`(provider) model · thinking:high` or
   `thinking:auto`).
