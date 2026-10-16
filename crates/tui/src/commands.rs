@@ -44,6 +44,10 @@ pub const COMMANDS: &[Command] = &[
         description: "toggle session policy for this session (ctrl-s saves)",
     },
     Command {
+        name: "thinking",
+        description: "show or set the thinking effort (/thinking high, auto = provider decides)",
+    },
+    Command {
         name: "tasks",
         description: "list background tasks; /tasks <id> shows one live",
     },

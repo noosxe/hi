@@ -4,6 +4,7 @@
 //! The one rule for this crate: it never touches the terminal. That
 //! keeps the harness usable headless (tests, CLI, daemons) later.
 pub mod agent;
+pub mod catalog;
 pub mod config;
 pub mod event;
 pub mod headless;

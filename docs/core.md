@@ -2,7 +2,10 @@
 
 Files this doc describes: everything under `crates/core/src/` — `lib.rs`,
 `message.rs`, `event.rs`, `tool.rs`, `agent.rs`, `subagent.rs`, `session.rs`, `headless.rs`, `tools/`, `provider.rs`, `openai.rs`, `mock.rs`, `config.rs`,
-`selection.rs`, `settings.rs`, `thinking.rs`, `system_prompt.rs`,
+`selection.rs`, `settings.rs`, `thinking.rs` (the seven-rung ladder plus URL-family default kwargs
+— z.ai's binary `thinking.type`, OpenAI's `reasoning_effort`,
+OpenRouter's `reasoning.effort`; config maps override, unknown hosts
+send nothing), `system_prompt.rs`,
 `test_support.rs`.
 
 Public surface re-exported from `crates/core/src/lib.rs`: `NAME`, `Event`,
@@ -187,6 +190,20 @@ the front end drains per frame; dropping the last handle kills every
 running group. Threads, not tokio — the choice #6's Luau bridge
 inherits. No default timeout: long-lived work is the point; a cap of
 16 running tasks refuses beyond that with a readable error.
+
+## catalog.rs — the shipped metadata table
+
+Tier 3 of the metadata chain (AD-0044): `catalog.json` — an
+OpenRouter `/api/v1/models` snapshot trimmed to what hi acts on
+(window, max output, efforts, default effort, per-token rates,
+vision, tools) and regenerated per release by
+`scripts/gen-catalog.py`. `catalog::lookup` matches provider-local
+ids against vendor slugs — exact first, then a *unique* bare-name
+suffix; ambiguous or missing is `None`, honest ignorance. The tier
+chain is config field → live OpenRouter row (`fetch_live_rows`,
+only when the provider is OpenRouter, 3s cap, silent on failure)
+→ this snapshot → nothing. Tier 2's parse (`parse_live`) lives here
+too, so the cli ships neither serde nor an HTTP client (AD-0004).
 
 ## session.rs — transcripts that survive restarts
 

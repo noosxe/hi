@@ -331,12 +331,35 @@ struct Target {
     subagent: hi_core::subagent::SubagentRunner,
 }
 
+/// Fill the selected model's missing context/output fields from the
+/// live fetch. The fetch is injected so the merge is testable without
+/// the network; the real one lives in hi-core (the cli ships neither
+/// serde nor an HTTP client, AD-0004). Gaps only — explicit config wins.
+fn enrich_from_live(
+    provider: &mut hi_core::config::ProviderConfig,
+    model_id: &str,
+    fetch: impl FnOnce() -> Option<Vec<hi_core::catalog::LiveRow>>,
+) {
+    let Some(row) = fetch().and_then(|rows| rows.into_iter().find(|r| r.id == model_id)) else {
+        return;
+    };
+    let Some(model) = provider.models.iter_mut().find(|m| m.id == model_id) else {
+        return;
+    };
+    if model.context_window.is_none() {
+        model.context_window = Some(u32::try_from(row.context_window).unwrap_or(u32::MAX));
+    }
+    if model.max_tokens.is_none() {
+        model.max_tokens = row.max_output.and_then(|v| u32::try_from(v).ok());
+    }
+}
+
 fn resolve_target(
     provider_flag: Option<&str>,
     model_flag: Option<&str>,
     tools_flag: Option<&str>,
 ) -> Result<Target, String> {
-    let config = ModelsConfig::load()
+    let mut config = ModelsConfig::load()
         .map_err(|err| format!("{err}\n  create one (see the README) or run with --mock"))?;
     let settings = Settings::load()?;
     // Opt-in session retention (#23) — before any session opens, so a
@@ -362,6 +385,19 @@ fn resolve_target(
         model_flag,
         settings.default_model.as_deref(),
     )?;
+    // Tier-2 metadata (AD-0044): when the selected provider *is*
+    // OpenRouter, a best-effort live refresh tops up context/output
+    // for the selected model — fresher than the shipped snapshot,
+    // silent when the network or the shape fails. Config fields the
+    // user set still win (enrich fills gaps only).
+    if let Some(provider) = config.providers.get_mut(&selected.provider)
+        && provider.base_url.contains("openrouter.ai")
+    {
+        let model = selected.model.clone();
+        enrich_from_live(provider, &model, || {
+            hi_core::catalog::fetch_live_rows(std::time::Duration::from_secs(3))
+        });
+    }
     let entry = &config.providers[&selected.provider];
     let bundle = match tools_flag {
         Some(value) => ToolBundle::parse(value)?,

@@ -152,7 +152,10 @@ Works today (see also README "What works today"):
 - Background task manager (#5): `task_run`/`task_status`/`task_output`/
   `task_cancel` — long-lived work outlives the turn, groups die at exit
   (see [decisions.md](decisions.md), AD-0019)
-- 480 `#[test]` functions, no network needed (see [testing.md](testing.md))
+- `scripts/gen-catalog.py` regenerates the shipped vendor-metadata
+  table (`crates/core/src/catalog.json`) from OpenRouter's public API
+  (AD-0044)
+- 493 `#[test]` functions, no network needed (see [testing.md](testing.md))
 
 Deliberately not yet built:
 
