@@ -54,6 +54,15 @@ pub struct Settings {
     /// it is not flippable from `/settings`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_retention: Option<u64>,
+    /// Main-loop tool-round cap, resolved once at startup: absent means
+    /// the built-in default (`agent::DEFAULT_MAX_TOOL_ROUNDS`, 16);
+    /// when present it must be at least 1 (zero fails every turn).
+    /// The subagent's own cap is a different knob — the `subagent`
+    /// tool's `max_rounds` argument, defaulting to
+    /// `subagent::SUBAGENT_MAX_TOOL_ROUNDS` (8). Startup policy only,
+    /// not flippable from `/settings`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_rounds: Option<usize>,
 }
 
 /// The effective telemetry choice: `HI_TELEMETRY` wins when set (pi's
@@ -84,8 +93,17 @@ impl Settings {
     /// The path-independent half of `load`, so tests can use temp files.
     fn load_from(path: &Path) -> Result<Self, String> {
         match std::fs::read_to_string(path) {
-            Ok(raw) => serde_json::from_str(&raw)
-                .map_err(|err| format!("cannot parse {}: {err}", path.display())),
+            Ok(raw) => {
+                let settings: Settings = serde_json::from_str(&raw)
+                    .map_err(|err| format!("cannot parse {}: {err}", path.display()))?;
+                if settings.max_tool_rounds == Some(0) {
+                    return Err(format!(
+                        "cannot parse {}: maxToolRounds must be at least 1",
+                        path.display()
+                    ));
+                }
+                Ok(settings)
+            }
             // A missing settings file is the normal first-run state.
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(err) => Err(format!("cannot read {}: {err}", path.display())),
@@ -207,6 +225,26 @@ mod tests {
     }
 
     #[test]
+    fn max_tool_rounds_is_opt_in_camel_case() {
+        let raw = r#"{"maxToolRounds": 40}"#;
+        let settings: Settings = serde_json::from_str(raw).unwrap();
+        assert_eq!(settings.max_tool_rounds, Some(40));
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.max_tool_rounds, None);
+    }
+
+    #[test]
+    fn max_tool_rounds_zero_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("hi-settings-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"maxToolRounds": 0}"#).unwrap();
+        let err = Settings::load_from(&path).unwrap_err();
+        assert!(err.contains("maxToolRounds must be at least 1"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn empty_object_means_no_default() {
         let settings: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(settings.default_model, None);
@@ -232,6 +270,7 @@ mod tests {
             images: Some(false),
             task_turns: None,
             session_retention: None,
+            max_tool_rounds: None,
         };
         existing.save_to(&path).unwrap();
 
@@ -261,6 +300,7 @@ mod tests {
             images: Some(false),
             task_turns: None,
             session_retention: None,
+            max_tool_rounds: None,
         };
         existing.save_to(&path).unwrap();
 
@@ -348,6 +388,7 @@ mod tests {
             images: None,
             task_turns: None,
             session_retention: None,
+            max_tool_rounds: None,
         };
         original.save_to(&path).unwrap();
         let loaded = Settings::load_from(&path).unwrap();

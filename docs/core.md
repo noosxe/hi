@@ -66,7 +66,10 @@ structured payloads instead).
 ## agent.rs — the multi-turn loop
 
 `spawn_agent_turn(provider, registry, gate, history, max_tool_rounds) -> Receiver<Event>`
-(default rounds: `DEFAULT_MAX_TOOL_ROUNDS`). Runs rounds of `spawn_turn` + tool execution until
+(default rounds: `DEFAULT_MAX_TOOL_ROUNDS`, 16; callers pass the
+`settings.maxToolRounds` override or the default — resolved once in
+`resolve_target`, carried on `Target`/`SessionInit`, so the TUI and the
+headless paths agree). Runs rounds of `spawn_turn` + tool execution until
 the model settles; the consumer sees ONE `TurnStart`/ONE `TurnEnd` per user message — the loop
 swallows per-round framing and emits the final `TurnEnd` itself. Every proposed call yields
 exactly one result (deny / unknown tool / bad JSON are error *results*, never `Event::Error`).

@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use crate::agent::{DEFAULT_MAX_TOOL_ROUNDS, spawn_agent_turn};
+use crate::agent::spawn_agent_turn;
 use crate::event::{Event, Usage};
 use crate::message::Message;
 use crate::provider::Provider;
@@ -52,6 +52,7 @@ pub fn run(
     history: &mut Vec<Message>,
     prompt: &str,
     session: Option<Session>,
+    max_tool_rounds: usize,
 ) -> Result<String, String> {
     run_with(
         provider,
@@ -60,6 +61,7 @@ pub fn run(
         history,
         prompt,
         session,
+        max_tool_rounds,
         &mut |_| {},
     )
 }
@@ -111,6 +113,9 @@ impl JsonRecord {
 /// `Failed` with the reason after the partial output and the error
 /// line. The session-file contract is unchanged: appends stay
 /// best-effort, the bill still rides the file.
+/// One headless turn. The parameter count mirrors the shape of the
+/// thing: the full tool-loop surface plus the record sink.
+#[allow(clippy::too_many_arguments)]
 pub fn run_with(
     provider: Arc<dyn Provider>,
     registry: Arc<ToolRegistry>,
@@ -118,6 +123,7 @@ pub fn run_with(
     history: &mut Vec<Message>,
     prompt: &str,
     mut session: Option<Session>,
+    max_tool_rounds: usize,
     sink: &mut dyn FnMut(&JsonRecord),
 ) -> Result<String, String> {
     if let Some(session) = session.as_ref() {
@@ -130,7 +136,7 @@ pub fn run_with(
     sink(&JsonRecord::Message {
         message: Message::User(prompt.to_string()),
     });
-    let rx = spawn_agent_turn(provider, registry, gate, history, DEFAULT_MAX_TOOL_ROUNDS);
+    let rx = spawn_agent_turn(provider, registry, gate, history, max_tool_rounds);
 
     // Mirrors the TUI pump's reconstruction rules (app.rs): tokens
     // accumulate; narration before a tool call is its own assistant
@@ -224,6 +230,7 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+    use crate::agent::DEFAULT_MAX_TOOL_ROUNDS;
     use crate::test_support::{EchoTool, ScriptedProvider};
     use crate::tool::{ToolCall, ToolResult};
 
@@ -284,6 +291,7 @@ mod tests {
             &mut history,
             "hi",
             None,
+            DEFAULT_MAX_TOOL_ROUNDS,
         )
         .unwrap();
 
@@ -308,7 +316,16 @@ mod tests {
         ]));
         let mut history = Vec::new();
 
-        let reply = run(provider, registry(), None, &mut history, "go", None).unwrap();
+        let reply = run(
+            provider,
+            registry(),
+            None,
+            &mut history,
+            "go",
+            None,
+            DEFAULT_MAX_TOOL_ROUNDS,
+        )
+        .unwrap();
 
         assert_eq!(reply, "done");
         assert_eq!(
@@ -339,6 +356,7 @@ mod tests {
             &mut history,
             "hi",
             None,
+            DEFAULT_MAX_TOOL_ROUNDS,
         )
         .unwrap_err();
 
@@ -372,6 +390,7 @@ mod tests {
             &mut history,
             "question",
             Some(session),
+            DEFAULT_MAX_TOOL_ROUNDS,
         )
         .unwrap();
 
@@ -407,6 +426,7 @@ mod tests {
             &mut history,
             "question",
             Some(session),
+            DEFAULT_MAX_TOOL_ROUNDS,
         )
         .unwrap();
 
@@ -415,6 +435,35 @@ mod tests {
         assert_eq!(loaded.usage.cached_tokens, Some(700));
         assert_eq!(loaded.usage_last_prompt, 1000);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn configured_round_cap_is_honored() {
+        let round = || {
+            vec![
+                Event::TurnStart,
+                Event::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: "echo".into(),
+                    arguments: "{}".into(),
+                }),
+                Event::TurnEnd,
+            ]
+        };
+        let provider = Arc::new(ScriptedProvider::new(vec![round(), round()]));
+        let mut history = Vec::new();
+        let err = run_with(
+            provider,
+            Arc::new(ToolRegistry::new()),
+            None,
+            &mut history,
+            "hi",
+            None,
+            2,
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert!(err.contains("did not settle within 2 rounds"), "{err}");
     }
 
     // ── --mode json (#18, AD-0038) ────────────────────────────────
@@ -426,6 +475,7 @@ mod tests {
         history: &mut Vec<Message>,
         prompt: &str,
         session: Option<Session>,
+        max_tool_rounds: usize,
     ) -> (Result<String, String>, Vec<JsonRecord>) {
         let mut records = Vec::new();
         let result = run_with(
@@ -435,6 +485,7 @@ mod tests {
             history,
             prompt,
             session,
+            max_tool_rounds,
             &mut |record| records.push(record.clone()),
         );
         (result, records)
@@ -462,7 +513,14 @@ mod tests {
         ]));
         let mut history = Vec::new();
 
-        let (reply, records) = json_run(provider, registry(), &mut history, "go", None);
+        let (reply, records) = json_run(
+            provider,
+            registry(),
+            &mut history,
+            "go",
+            None,
+            DEFAULT_MAX_TOOL_ROUNDS,
+        );
 
         assert_eq!(reply.unwrap(), "done");
         let kinds: Vec<&str> = records.iter().map(kind).collect();
@@ -518,7 +576,14 @@ mod tests {
         ]]));
         let mut history = Vec::new();
 
-        let (result, records) = json_run(provider, registry(), &mut history, "hi", None);
+        let (result, records) = json_run(
+            provider,
+            registry(),
+            &mut history,
+            "hi",
+            None,
+            DEFAULT_MAX_TOOL_ROUNDS,
+        );
 
         assert_eq!(result.unwrap_err(), "boom");
         let kinds: Vec<&str> = records.iter().map(kind).collect();
@@ -564,6 +629,7 @@ mod tests {
             &mut history,
             "question",
             Some(session),
+            DEFAULT_MAX_TOOL_ROUNDS,
         );
 
         assert_eq!(records.first().unwrap(), &JsonRecord::Session { header });
@@ -586,7 +652,14 @@ mod tests {
         ]]));
         let mut history = Vec::new();
 
-        let (_, records) = json_run(provider, registry(), &mut history, "q", None);
+        let (_, records) = json_run(
+            provider,
+            registry(),
+            &mut history,
+            "q",
+            None,
+            DEFAULT_MAX_TOOL_ROUNDS,
+        );
 
         let kinds: Vec<&str> = records.iter().map(kind).collect();
         assert_eq!(kinds, vec!["message", "token", "usage", "message", "done"]);
