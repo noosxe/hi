@@ -39,6 +39,8 @@ rework.
 nix develop          # Rust toolchain + cargo (or any Rust 1.85+, edition 2024)
 cargo run            # builds the `hi` binary; `hi --mock` needs no config
 cargo test           # 527 tests; no network needed
+nix run .            # run the app straight from the flake — no devshell needed
+nix profile install github:noosxe/hi   # or install the binary (flake = the package)
 ```
 
 
