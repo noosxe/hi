@@ -250,15 +250,20 @@ entirely to an open menu)
 - Transcript is NOT drawn here — finalized messages go to scrollback via
   `block_rows` + `rows_into` (pi-style role blocks, no text labels; see the
   markdown.rs and theme.rs sections below). The insert height is the
-  wrapped row count — never one row per message. Spacing is each block's
-  own padding, not a separator: every block carries one blank row above
-  and below its content (pi's `paddingY`) and one blank column on its
-  left and right (paddingX — content wraps at width−2; the fill of a
-  filled block still runs the full width behind it), so two blank rows
-  separate any
-  adjacent content rows — tinted with the fill for blocks that have a
-  background (user, tool), plain for blocks that don't (assistant, system,
-  error). While a tool runs, the
+  wrapped row count — never one row per message. Spacing is the **seam model** (AD-0051): the scroll inserts exactly
+  **one blank row between any two adjacent blocks** — always, whatever
+  their kinds — and that seam is part of the lower block, so it
+  flushes, scrolls, and survives resizes with it. Blocks themselves
+  split the rest: a block with a background (user, tool) keeps one
+  tinted fill row above and below its content (pi's `paddingY` — two
+  backgrounds must never touch, which is exactly what the seam
+  prevents), while a plain block (assistant, system, error, thinking)
+  carries **no padding rows** — it starts and ends on text rows. Both
+  inset one blank column on each side (paddingX — content wraps at
+  width−2; the fill of a filled block still runs the full width behind
+  it). An assistant message derives **one display block per content
+  block**, so thinking and the reply are separated by the same seam as
+  any other neighbors. While a tool runs, the
   streaming area shows its **live pending block** (pending fill); when the
   result lands, one merged block (bold tool name + collapsed args over the
   output preview) prints to scrollback with a success- or error-tinted
@@ -267,8 +272,9 @@ entirely to an open menu)
 - `draw_stream` shows the in-flight `turn.text` as **markdown, undimmed**
   (pi parity; it re-wraps per frame), or a turn error in the error
   color. The live reply carries the **same block padding and wrap
-  width its flushed self will get** (AD-0024: live == flushed) — the
-  completion is visually a no-op, not a reflow jump.
+  width its flushed self will get** (AD-0024: live == flushed) — each
+  live unit leads with the same seam row its flushed block carries, so
+  the completion is visually a no-op, not a reflow jump.
 - Other pieces: `draw_picker`, `draw_completion`, `draw_status`,
   `welcome_into`.
 

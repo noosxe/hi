@@ -503,11 +503,14 @@ fn draw_stream(frame: &mut Frame, area: Rect, app: &App) {
     // occupies the live region and lands in history complete), then
     // the turn's streaming markdown, undimmed.
     let mut rows = app.scroll.window_rows();
+    // Live units lead with the same seam row their flushed block will
+    // carry, so completing a turn is visually a no-op (AD-0024).
     if let Some(exec) = pending_tool(&app.messages) {
+        rows.push(Line::raw(""));
         rows.extend(block_rows(&TranscriptBlock::Tool(exec), area.width));
     } else if let Some(turn) = app.turn.as_ref() {
         // The live reply renders with the exact padding and wrap width
-        // its flushed self will get (AD-0024): the same pad_plain and
+        // its flushed self will get (AD-0024): the same inset and
         // the same `width - 2` the assistant block uses — completing a
         // turn is visually a no-op, not a reflow jump.
         let inner = area.width.saturating_sub(2).max(1);
@@ -515,12 +518,15 @@ fn draw_stream(frame: &mut Frame, area: Rect, app: &App) {
         // plain, prose as markdown — completing a turn stays a
         // visual no-op.
         for block in &turn.blocks {
+            // One seam per live sub-block — thinking and reply stream
+            // with the same one-blank-row gap their flushed blocks get.
+            rows.push(Line::raw(""));
             match block {
                 hi_core::message::AssistantBlock::Text(text) => {
-                    rows.extend(pad_plain(markdown_rows(text, inner, Style::new())));
+                    rows.extend(inset_plain(markdown_rows(text, inner, Style::new())));
                 }
                 hi_core::message::AssistantBlock::Thinking { thinking, .. } => {
-                    rows.extend(pad_plain(wrap_plain(
+                    rows.extend(inset_plain(wrap_plain(
                         thinking,
                         inner as usize,
                         THEME.fg(Fg::Dim),
@@ -529,7 +535,7 @@ fn draw_stream(frame: &mut Frame, area: Rect, app: &App) {
             }
         }
         if let Some(err) = &turn.error {
-            rows.extend(pad_plain(markdown_rows(err, inner, THEME.fg(Fg::Error))));
+            rows.extend(inset_plain(markdown_rows(err, inner, THEME.fg(Fg::Error))));
         }
     }
     // The newest rows win, and they hug the input: a short
@@ -614,6 +620,18 @@ pub fn derive_blocks(messages: &[Message]) -> (Vec<TranscriptBlock>, Option<Tool
                     }));
                 }
             }
+            Message::Assistant(content) => {
+                // One display block per content block (AD-0051):
+                // thinking and the reply are separate blocks, so the
+                // scroll's seam rules — one blank row between any two
+                // blocks — apply between them exactly as between any
+                // other neighbors.
+                for block in content {
+                    blocks.push(TranscriptBlock::Message(Message::Assistant(vec![
+                        block.clone(),
+                    ])));
+                }
+            }
             other => blocks.push(TranscriptBlock::Message(other.clone())),
         }
     }
@@ -668,8 +686,10 @@ pub fn block_segments(
 ) -> Vec<Segment> {
     let width = width.max(1) as usize;
     // paddingX: every block's content is inset one column on each side
-    // (ruled: mirror the paddingY rows — fill-tinted for filled blocks,
-    // whose fill still runs the full width; plain for transparent ones).
+    // (fill-tinted for filled blocks, whose fill still runs the full
+    // width; plain for transparent ones). Seam rows are not baked in:
+    // the scroll inserts exactly one blank row between any two blocks
+    // (AD-0051), so a plain block starts and ends on its text rows.
     let inner = width.saturating_sub(2).max(1);
     match block {
         // Filled blocks pad in their own fill (padded_block / tool_rows).
@@ -678,15 +698,14 @@ pub fn block_segments(
             width,
             THEME.bg(Bg::UserMessage),
         ))],
-        // Transparent blocks pad with plain blank rows. Either way every
-        // block carries one blank row above and below (pi's paddingY)
-        // and one blank column each side (paddingX): two blank rows
-        // separate any adjacent content rows, some tinted by their
-        // block's background, some not.
+        // Transparent blocks carry no padding rows — they start and
+        // end on text rows, and the scroll's seam provides the one
+        // blank row between neighbors (AD-0051). Filled blocks keep
+        // their fill rows: two backgrounds must never touch.
         TranscriptBlock::Message(Message::Assistant(blocks)) => {
-            // Prose as plain markdown, terminal-default text, no fill
-            // (pi); reasoning dimmed plain (AD-0048) — quieter than
-            // the reply, never hidden.
+            // One content block per display block (derive_blocks,
+            // AD-0051); prose as plain markdown, terminal-default
+            // text, no fill (pi); reasoning dimmed plain (AD-0048).
             let mut rows = Vec::new();
             for block in blocks {
                 match block {
@@ -698,24 +717,24 @@ pub fn block_segments(
                     }
                 }
             }
-            vec![Segment::Text(pad_plain(rows))]
+            vec![Segment::Text(inset_plain(rows))]
         }
-        TranscriptBlock::Message(Message::System(text)) => vec![Segment::Text(pad_plain(
+        TranscriptBlock::Message(Message::System(text)) => vec![Segment::Text(inset_plain(
             wrap_plain(text, inner, THEME.fg(Fg::Dim)),
         ))],
-        TranscriptBlock::Message(Message::Error(text)) => vec![Segment::Text(pad_plain(
+        TranscriptBlock::Message(Message::Error(text)) => vec![Segment::Text(inset_plain(
             wrap_plain(text, inner, THEME.fg(Fg::Error)),
         ))],
         // derive_blocks routes tool messages to TranscriptBlock::Tool;
         // if one ever lands here, render defensively instead of panicking.
         TranscriptBlock::Message(Message::ToolCall(call)) => {
-            vec![Segment::Text(pad_plain(wrap_plain(
+            vec![Segment::Text(inset_plain(wrap_plain(
                 &format!("{}({})", call.name, call.arguments),
                 inner,
                 THEME.fg(Fg::Dim),
             )))]
         }
-        TranscriptBlock::Message(Message::ToolResult(result)) => vec![Segment::Text(pad_plain(
+        TranscriptBlock::Message(Message::ToolResult(result)) => vec![Segment::Text(inset_plain(
             wrap_plain(&result.content, inner, THEME.fg(Fg::Dim)),
         ))],
         TranscriptBlock::Tool(exec) => tool_segments(exec, width, caps),
@@ -763,21 +782,19 @@ fn padded_block(rows: Vec<Line<'static>>, width: usize, fill: Style) -> Vec<Line
     out
 }
 
-/// One plain blank row above and below (paddingY) and one plain blank
-/// column each side (paddingX) — the transparent block's mirror of
-/// what `padded_block` does with a fill. Callers wrap at `width - 2`.
-fn pad_plain(rows: Vec<Line<'static>>) -> Vec<Line<'static>> {
-    let mut out = Vec::with_capacity(rows.len() + 2);
-    out.push(Line::raw(""));
-    for row in rows {
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(row.spans.len() + 2);
-        spans.push(Span::raw(" "));
-        spans.extend(row.spans);
-        spans.push(Span::raw(" "));
-        out.push(Line::from(spans));
-    }
-    out.push(Line::raw(""));
-    out
+/// One plain blank column each side (paddingX) — no padding rows: a
+/// plain block ends on its text rows, and the scroll owns the seam
+/// (AD-0051). Callers wrap at `width - 2`.
+fn inset_plain(rows: Vec<Line<'static>>) -> Vec<Line<'static>> {
+    rows.into_iter()
+        .map(|row| {
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(row.spans.len() + 2);
+            spans.push(Span::raw(" "));
+            spans.extend(row.spans);
+            spans.push(Span::raw(" "));
+            Line::from(spans)
+        })
+        .collect()
 }
 
 fn fill_row(width: usize, fill: Style) -> Line<'static> {
@@ -1670,12 +1687,13 @@ mod tests {
 
     #[test]
     fn every_block_insets_its_content_one_column_each_side() {
-        // Transparent: plain spaces flank the content.
+        // Transparent: plain spaces flank the content; the block ends
+        // on its text rows (seams are the scroll's business, AD-0051).
         let rows = block_rows(&TranscriptBlock::Message(Message::assistant("hello")), 30);
-        assert_eq!(rows[1].spans.len(), 3);
-        assert_eq!(rows[1].spans[0].content, " ");
-        assert_eq!(rows[1].spans[1].content, "hello");
-        assert_eq!(rows[1].spans[2].content, " ");
+        assert_eq!(rows[0].spans.len(), 3);
+        assert_eq!(rows[0].spans[0].content, " ");
+        assert_eq!(rows[0].spans[1].content, "hello");
+        assert_eq!(rows[0].spans[2].content, " ");
         // Filled: the fill still runs the FULL width (ruled), with the
         // content inset one column inside it. "hello" fills its row:
         // 1 pad + 28 content + 1 pad = 30.
@@ -1687,30 +1705,27 @@ mod tests {
     }
 
     #[test]
-    fn assistant_block_has_no_fill_and_its_own_padding() {
+    fn a_plain_block_starts_and_ends_on_its_text_rows() {
         let rows = block_rows(
             &TranscriptBlock::Message(Message::assistant("plain reply")),
             30,
         );
-        // paddingY: one plain blank row above and below; paddingX:
-        // one plain column each side of the content.
-        assert_eq!(rows.len(), 3);
-        let buf = &mut Buffer::empty(Rect::new(0, 0, 30, 3));
+        // No padding rows: plain blocks "end" with rows having text
+        // (AD-0051) — the seam between blocks is inserted by the
+        // scroll, never baked in here.
+        assert_eq!(rows.len(), 1);
+        let buf = &mut Buffer::empty(Rect::new(0, 0, 30, 1));
         segments_into(vec![Segment::Text(rows)], buf);
-        assert_eq!(text_of(buf, 0, 30), "");
-        assert_eq!(text_of(buf, 1, 30), " plain reply"); // trailing pad trimmed
-        assert_eq!(text_of(buf, 2, 30), "");
-        for y in 0..3 {
-            assert_eq!(buf[(0, y)].bg, ratatui::style::Color::Reset);
-        }
+        assert_eq!(text_of(buf, 0, 30), " plain reply"); // trailing pad trimmed
+        assert_eq!(buf[(0, 0)].bg, ratatui::style::Color::Reset);
     }
 
     #[test]
     fn assistant_markdown_renders_headings() {
         let rows = block_rows(&TranscriptBlock::Message(Message::assistant("# Plan")), 30);
-        // rows[1] spans: [paddingX " ", heading, paddingX " "].
+        // rows[0] spans: [paddingX " ", heading, paddingX " "].
         assert!(
-            rows[1].spans[1]
+            rows[0].spans[1]
                 .style
                 .add_modifier
                 .contains(ratatui::style::Modifier::BOLD)
@@ -1723,11 +1738,11 @@ mod tests {
             &TranscriptBlock::Message(Message::System("note".into())),
             20,
         );
-        assert_eq!(system.len(), 3); // paddingY rows flank the content
-        assert_eq!(system[1].spans[1].style.fg, THEME.fg(Fg::Dim).fg); // [pad, text, pad]
+        assert_eq!(system.len(), 1); // no padding rows (AD-0051)
+        assert_eq!(system[0].spans[1].style.fg, THEME.fg(Fg::Dim).fg); // [pad, text, pad]
         let error = block_rows(&TranscriptBlock::Message(Message::Error("boom".into())), 20);
-        assert_eq!(error.len(), 3);
-        assert_eq!(error[1].spans[1].style.fg, THEME.fg(Fg::Error).fg);
+        assert_eq!(error.len(), 1);
+        assert_eq!(error[0].spans[1].style.fg, THEME.fg(Fg::Error).fg);
     }
 
     #[test]
@@ -1761,6 +1776,39 @@ mod tests {
         let pending = pending.unwrap();
         assert_eq!(pending.call.unwrap().name, "bash");
         assert!(pending.result.is_none());
+    }
+
+    #[test]
+    fn an_assistant_message_derives_one_display_block_per_content_block() {
+        let message = Message::Assistant(vec![
+            hi_core::message::AssistantBlock::Thinking {
+                thinking: "weigh it".into(),
+                signature: None,
+                redacted: false,
+            },
+            hi_core::message::AssistantBlock::Text("the reply".into()),
+        ]);
+        let (blocks, pending) = derive_blocks(&[Message::User("go".into()), message]);
+        assert!(pending.is_none());
+        assert_eq!(
+            blocks.len(),
+            3,
+            "user, thinking, reply: three display blocks"
+        );
+        assert!(matches!(
+            &blocks[0],
+            TranscriptBlock::Message(Message::User(_))
+        ));
+        assert!(
+            matches!(&blocks[1], TranscriptBlock::Message(Message::Assistant(v))
+                if matches!(v.as_slice(), [hi_core::message::AssistantBlock::Thinking { .. }]))
+        );
+        assert!(
+            matches!(&blocks[2], TranscriptBlock::Message(Message::Assistant(v))
+                if matches!(v.as_slice(), [hi_core::message::AssistantBlock::Text(_)]))
+        );
+        // A contentless assistant message derives nothing.
+        assert_eq!(derive_blocks(&[Message::Assistant(vec![])]).0.len(), 0);
     }
 
     #[test]

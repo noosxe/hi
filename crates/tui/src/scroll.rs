@@ -112,9 +112,7 @@ impl Scroll {
     }
 
     fn push_block(&mut self, block: TranscriptBlock, width: u16, caps: Option<Protocol>) {
-        let segments = block_segments(&block, width, caps);
-        let height = segments_height(&segments) as usize;
-        let rows = block_rows(&block, width);
+        let (segments, rows, height) = Self::cached(&block, width, caps, true);
         self.total += height;
         self.blocks.push(CachedBlock {
             source: block,
@@ -122,6 +120,28 @@ impl Scroll {
             rows,
             height,
         });
+    }
+
+    /// A block's cached rendering. `separator` prepends the seam row —
+    /// exactly one blank row above the block (AD-0051): the seam is
+    /// part of the block, so it flushes, scrolls, and survives resizes
+    /// with it. Every block after the welcome seed carries one; filled
+    /// blocks keep their own fill rows inside, so two backgrounds never
+    /// touch and plain blocks end on text rows either way.
+    fn cached(
+        block: &TranscriptBlock,
+        width: u16,
+        caps: Option<Protocol>,
+        separator: bool,
+    ) -> (Vec<Segment>, Vec<Line<'static>>, usize) {
+        let mut segments = block_segments(block, width, caps);
+        let mut rows = block_rows(block, width);
+        if separator {
+            segments.insert(0, Segment::Text(vec![Line::raw("")]));
+            rows.insert(0, Line::raw(""));
+        }
+        let height = segments_height(&segments) as usize;
+        (segments, rows, height)
     }
 
     fn rebuild_from_cursor(&mut self, _messages: &[Message], caps: Option<Protocol>) {
@@ -136,10 +156,11 @@ impl Scroll {
             seg: 0,
             row: 0,
         };
-        for block in &mut self.blocks[self.cursor.block..] {
-            let segments = block_segments(&block.source, self.width, caps);
-            let height = segments_height(&segments) as usize;
-            let rows = block_rows(&block.source, self.width);
+        // Index 0 is the welcome seed: synthetic and width-invariant,
+        // so it is never re-derived (re-deriving would clobber it into
+        // blank `System("")` rows — it lives only here).
+        for block in self.blocks.iter_mut().skip(self.cursor.block.max(1)) {
+            let (segments, rows, height) = Self::cached(&block.source, self.width, caps, true);
             block.segments = segments;
             block.rows = rows;
             block.height = height;
@@ -266,11 +287,127 @@ mod tests {
     }
 
     #[test]
+    fn the_welcome_line_survives_rebuilds() {
+        let mut scroll = Scroll::new();
+        assert_eq!(scroll.window_rows().len(), 1);
+        scroll.sync(&[], 80, None);
+        let rows = scroll.window_rows();
+        let text: Vec<String> = rows
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.clone())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(
+            text,
+            vec!["hi · say something, ctrl-c to quit".to_string()],
+            "{text:?}"
+        );
+    }
+
+    /// Window texts, one string per row.
+    fn texts(scroll: &Scroll) -> Vec<String> {
+        scroll
+            .window_rows()
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.clone()).collect())
+            .collect()
+    }
+
+    #[test]
     fn welcome_seeds_one_window_row() {
         let scroll = Scroll::new();
         assert_eq!(scroll.totals(), (0, 1));
         assert_eq!(scroll.window_rows().len(), 1);
         assert!(scroll.window_rows()[0].spans[0].content.contains("hi"));
+    }
+
+    #[test]
+    fn any_two_blocks_are_separated_by_exactly_one_blank_row() {
+        let scroll = scroll_with(&[user("hello"), Message::assistant("hi there")], 40);
+        // welcome, separator, [fill, hello, fill], separator, hi there
+        let rows = texts(&scroll);
+        assert_eq!(rows.len(), 7, "{rows:?}");
+        assert_eq!(rows[5], "", "exactly one separator row");
+        assert_eq!(rows[6].trim(), "hi there");
+        assert!(
+            scroll.window_rows()[5].spans.is_empty(),
+            "the seam is plain"
+        );
+        // Every block after the seed leads with its separator (so the
+        // seam survives flushing — it is part of the block).
+        for block in scroll.blocks.iter().skip(1) {
+            assert!(block.rows.first().unwrap().spans.is_empty());
+        }
+        // The filled block keeps its fill rows (rule: bg blocks pad):
+        // seam + fill + text + fill.
+        assert_eq!(scroll.blocks[1].rows.len(), 4);
+    }
+
+    #[test]
+    fn two_filled_blocks_get_one_separator_between_their_fills() {
+        let call = |id: &str| {
+            Message::ToolCall(hi_core::ToolCall {
+                id: id.into(),
+                name: "read".into(),
+                arguments: "{}".into(),
+            })
+        };
+        let result = |id: &str| {
+            Message::ToolResult(hi_core::ToolResult {
+                call_id: id.into(),
+                name: "read".into(),
+                content: "ok".into(),
+                is_error: false,
+                images: Vec::new(),
+            })
+        };
+        let scroll = scroll_with(
+            &[user("go"), call("a"), result("a"), call("b"), result("b")],
+            40,
+        );
+        // welcome, user, tool, tool — one block each plus the seed.
+        assert_eq!(scroll.blocks.len(), 4);
+        let fills = |rows: &[Line<'static>]| {
+            rows.iter()
+                .filter(|r| r.spans.iter().any(|s| s.style.bg.is_some()))
+                .count()
+        };
+        for i in [1, 2, 3] {
+            let rows = &scroll.blocks[i].rows;
+            assert_eq!(rows.first().unwrap().spans.len(), 0, "leading seam: {i}");
+            // padded_block tints every span, so every row but the seam
+            // is fill: the block kept its top and bottom fill rows.
+            assert_eq!(fills(rows), rows.len() - 1, "bg blocks stay filled: {i}");
+        }
+        // tool|tool: fill of the first, seam, fill of the second.
+        // Exactly one truly empty row per seam: three seams, no others
+        // (fill rows are whitespace, not empty).
+        let rows = texts(&scroll);
+        let seams = rows.iter().filter(|r| r.is_empty()).count();
+        assert_eq!(seams, 3, "{rows:?}");
+    }
+
+    #[test]
+    fn thinking_and_reply_are_separate_blocks_with_one_blank_row() {
+        let message = Message::Assistant(vec![
+            hi_core::message::AssistantBlock::Thinking {
+                thinking: "weigh it".into(),
+                signature: None,
+                redacted: false,
+            },
+            hi_core::message::AssistantBlock::Text("the reply".into()),
+        ]);
+        let scroll = scroll_with(&[user("go"), message], 40);
+        assert_eq!(scroll.blocks.len(), 4); // welcome + user + thinking + reply
+        let rows = texts(&scroll);
+        let n = rows.len();
+        assert_eq!(rows[n - 3].trim(), "weigh it");
+        assert_eq!(rows[n - 2], "", "one blank between thinking and reply");
+        assert_eq!(rows[n - 1].trim(), "the reply");
     }
 
     #[test]

@@ -1598,3 +1598,32 @@ pump's append marker is captured after the send handler pushed the
 line, so no later append's range ever included it (headless recorded
 prompts correctly; interactive transcripts silently lost them). The
 send path now appends its own line immediately (`persist_last`).
+
+**AD-0051 (2026-10-20): transcript seams are inserted, not inherited.**
+
+Every block used to bake its own blank rows in (`pad_plain` put one
+above and below its content), so spacing was an emergent accident: two
+plain blocks met in two blank rows, two filled blocks met in two
+tinted rows touching — two different backgrounds flush against each
+other — and thinking and the reply, welded into one display block by
+`derive_blocks`' 1:1 message mapping, met in nothing at all.
+
+The contract is now three rules. One: the scroll inserts **exactly one
+blank separator row between any two adjacent blocks**, whatever their
+kinds — the one spacing decision, in one place (`Scroll::cached`), and
+the seam is part of the lower block so it flushes and survives
+resizes. Two: a block with a background keeps its tinted fill rows
+top and bottom — unbreakable — which is precisely why the seam must
+exist between filled neighbors: backgrounds never touch. Three: a
+plain block carries no padding rows; it ends on text rows, so the
+separator is all the air two plain blocks get. Assistant messages
+derive one display block per content block, so thinking and the reply
+are governed by the same seam as everything else; the live stream
+mirrors it (one seam per live unit) to keep AD-0024's no-reflow
+guarantee.
+
+The work also fixed a latent bug the seam tests flushed out: the
+welcome seed was synthetic and width-invariant, but `rebuild_from_cursor`
+re-derived every block including index 0 — so the first frame's width
+sync clobbered "hi · say something" into blank `System("")` rows. The
+seed is now never re-derived; a regression test holds the line.
