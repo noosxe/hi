@@ -142,9 +142,6 @@ pub fn run(
     //    origin to the end of the screen and then restores the cursor,
     //    so the last drawn frame doesn't linger under the shell
     // 2. restore terminal modes (raw mode off)
-    // 3. two newlines: the cursor was parked on the viewport's middle
-    //    row, so this lands on the first line *below* the old viewport
-    //    — a fresh row for the shell prompt
     //
     // Quitting mid-turn: `app` drops here, dropping the turn's
     // Receiver. The provider thread's next send fails, so it returns
@@ -157,8 +154,6 @@ pub fn run(
     // restore() reports its own errors to stderr and returns () —
     // the try_restore() variant is the Result-returning one.
     ratatui::restore();
-    println!();
-    println!();
     result
 }
 
