@@ -80,7 +80,7 @@ the pre-thinking plain string (upgraded to one `Text` block on replay).
 ## agent.rs — the multi-turn loop
 
 `spawn_agent_turn(provider, registry, gate, history, max_tool_rounds) -> Receiver<Event>`
-(default rounds: `DEFAULT_MAX_TOOL_ROUNDS`, 16; callers pass the
+(default rounds: `DEFAULT_MAX_TOOL_ROUNDS`, 32; callers pass the
 `settings.maxToolRounds` override or the default — resolved once in
 `resolve_target`, carried on `Target`/`SessionInit`, so the TUI and the
 headless paths agree). Runs rounds of `spawn_turn` + tool execution until
