@@ -1065,12 +1065,16 @@ mod tests {
             "live text hugs the left edge: {:?}",
             row_text(content)
         );
-        // paddingY: the live block opens with its own blank row — two
-        // blank rows now separate the user text from the live text
-        // (the user block's bottom pad plus this one).
+        // Seam model (AD-0051): exactly one plain seam row above the
+        // live unit, and above that the user block's bottom fill row.
+        assert!(
+            row_text(content - 1).trim().is_empty(),
+            "no seam row above the live block: {:?}",
+            row_text(content - 1)
+        );
         assert!(
             row_text(content - 2).trim().is_empty(),
-            "no top pad above the live block: {:?}",
+            "user block lost its bottom fill row: {:?}",
             row_text(content - 2)
         );
     }
