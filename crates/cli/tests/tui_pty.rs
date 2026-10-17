@@ -506,6 +506,36 @@ fn fake_sse_endpoint(reply: &str) -> String {
             let body = body.clone();
             std::thread::spawn(move || {
                 let mut stream = stream;
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                // Drain the request first: answering (and closing)
+                // while the client is still writing its body is a
+                // broken pipe on the client — CI lost exactly that
+                // race. Same discipline as wire tests' FakeApi.
+                let mut buf: Vec<u8> = Vec::new();
+                let mut chunk = [0u8; 8192];
+                let header_end = loop {
+                    if let Some(pos) = find_sub(&buf, b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                    match stream.read(&mut chunk) {
+                        Ok(0) => return,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        Err(_) => return,
+                    }
+                };
+                let headers = String::from_utf8_lossy(&buf[..header_end]).to_lowercase();
+                let content_length = headers
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length:"))
+                    .and_then(|v| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                while buf.len() < header_end + content_length {
+                    match stream.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        Err(_) => break,
+                    }
+                }
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
                      Connection: close\r\nContent-Length: {}\r\n\r\n{}",
@@ -518,6 +548,13 @@ fn fake_sse_endpoint(reply: &str) -> String {
         }
     });
     format!("http://127.0.0.1:{port}/v1")
+}
+
+/// The `needle in haystack` scan, byte-wise (no std helper for this).
+fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn session_files(data_home: &std::path::Path) -> Vec<std::path::PathBuf> {
