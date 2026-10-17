@@ -105,6 +105,25 @@ fn paste_key(key: &KeyEvent) -> bool {
             || key.modifiers.contains(KeyModifiers::SUPER))
 }
 
+/// Nothing in this suite may touch the developer's (or CI runner's)
+/// real `~/.config/hi`: the persisting tests read-modify-write the
+/// real `settings.json`, and under `cargo test`'s parallel processes
+/// those writes raced into empty-file parse errors. Armed once per
+/// process, before the first `App` exists — every `config_dir()`
+/// lookup afterwards lands in the scratch dir.
+#[cfg(test)]
+fn hermetic_config() {
+    static ARMED: std::sync::Once = std::sync::Once::new();
+    ARMED.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("hi-tui-test-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("hi")).unwrap();
+        // Safety: armed once, serialized by `Once`, before any test
+        // reads the environment through `config_dir`.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
+    });
+}
+
 #[cfg(test)]
 pub(crate) fn test_app() -> App {
     app_with(crate::SessionInit {
@@ -131,6 +150,7 @@ pub(crate) fn test_app() -> App {
 
 #[cfg(test)]
 fn app_with(init: crate::SessionInit) -> App {
+    hermetic_config();
     App::new(
         Arc::new(hi_core::MockProvider::default()),
         Status {
@@ -2578,10 +2598,9 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    /// `apply_thinking_choice` persists to the real
-    /// `~/.config/hi/settings.json`; tests that reach it hold this
-    /// lock so parallel threads cannot interleave read-modify-write
-    /// on the one path.
+    /// The two tests that persist through `apply_thinking_choice`
+    /// still serialize: their read-modify-write on the one scratch
+    /// `settings.json` must not interleave in-process.
     static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
     fn app() -> App {
