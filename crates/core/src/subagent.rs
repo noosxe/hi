@@ -19,7 +19,7 @@ use crate::ToolGate;
 use crate::agent::spawn_agent_turn;
 use crate::config::ModelsConfig;
 use crate::event::{Event, Usage};
-use crate::message::Message;
+use crate::message::{AssistantBlock, Message};
 use crate::openai::OpenAiCompatProvider;
 use crate::selection;
 use crate::session::Session;
@@ -228,7 +228,7 @@ impl SubagentRunner {
             &history,
             max_rounds,
         );
-        let mut text = String::new();
+        let mut blocks: Vec<AssistantBlock> = Vec::new();
         let mut narration = String::new();
         let mut usage = Usage::default();
         let mut rounds = 0usize;
@@ -241,22 +241,26 @@ impl SubagentRunner {
         let mut tbuf: Vec<Message> = Vec::new();
         for event in rx {
             match event {
-                Event::Token(t) => text.push_str(&t),
+                Event::Token(t) => AssistantBlock::push_text(&mut blocks, &t),
+                Event::Thinking { delta, field } => {
+                    AssistantBlock::push_thinking(&mut blocks, &delta, field);
+                }
                 Event::ToolCall(c) => {
                     rounds += 1;
                     // The reply that matters is the one after the last
                     // tool round; keep the pre-tool prose as the run's
                     // narration so a cap failure can return it.
-                    if !text.trim().is_empty() {
-                        narration = text.clone();
+                    let prose = AssistantBlock::text_of(&blocks);
+                    if !prose.trim().is_empty() {
+                        narration = prose;
                     }
                     if transcript.is_some() {
-                        if !text.is_empty() {
-                            tbuf.push(Message::Assistant(text.clone()));
+                        if !blocks.is_empty() {
+                            tbuf.push(Message::Assistant(blocks.clone()));
                         }
                         tbuf.push(Message::ToolCall(c.clone()));
                     }
-                    text.clear();
+                    blocks.clear();
                 }
                 Event::ToolResult(r) => {
                     if transcript.is_some() {
@@ -280,8 +284,8 @@ impl SubagentRunner {
                 }
                 Event::TurnEnd => {
                     // The settled reply is the buffer's last message.
-                    if !text.is_empty() {
-                        tbuf.push(Message::Assistant(text.clone()));
+                    if !blocks.is_empty() {
+                        tbuf.push(Message::Assistant(blocks.clone()));
                     }
                     flush_transcript(&mut transcript, &mut tbuf);
                 }
@@ -297,23 +301,26 @@ impl SubagentRunner {
                      higher max_rounds, or split the task into smaller \
                      subagent runs."
                 );
-                let partial = if !text.trim().is_empty() {
-                    text.trim()
-                } else {
-                    narration.trim()
+                let partial = {
+                    let prose = AssistantBlock::text_of(&blocks);
+                    if !prose.trim().is_empty() {
+                        prose.trim().to_string()
+                    } else {
+                        narration.trim().to_string()
+                    }
                 };
                 if partial.is_empty() {
                     msg.push_str(" (no partial output)");
                 } else {
                     msg.push_str("\n\nPartial output before the cap:\n");
-                    msg.push_str(partial);
+                    msg.push_str(&partial);
                 }
                 return Err(msg);
             }
             return Err(e);
         }
         Ok(SubagentResult {
-            text,
+            text: AssistantBlock::text_of(&blocks),
             usage,
             rounds,
             recorded,
@@ -370,10 +377,10 @@ mod tests {
         assert_eq!(loaded.header.parent.as_deref(), Some("parent-9"));
         // The transcript mirrors the loop's working history.
         assert_eq!(loaded.messages[0], Message::User("dig".into()));
-        assert_eq!(loaded.messages[1], Message::Assistant("checking".into()));
+        assert_eq!(loaded.messages[1], Message::assistant("checking"));
         assert!(matches!(loaded.messages[2], Message::ToolCall(_)));
         assert!(matches!(loaded.messages[3], Message::ToolResult(_)));
-        assert_eq!(loaded.messages[4], Message::Assistant("final reply".into()));
+        assert_eq!(loaded.messages[4], Message::assistant("final reply"));
         assert_eq!(loaded.messages.len(), 5);
         assert_eq!(loaded.usage.prompt_tokens, 90);
         let _ = std::fs::remove_dir_all(&dir);

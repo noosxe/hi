@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{ModelConfig, ProviderConfig};
 use crate::event::{Event, Usage};
-use crate::message::Message;
+use crate::message::{AssistantBlock, Message};
 use crate::provider::Provider;
 use crate::thinking::ThinkingLevel;
 use crate::tool::{ToolCall, ToolRegistry, ToolResult};
@@ -315,6 +315,11 @@ impl OpenAiCompatProvider {
                             return Ok(());
                         }
                     }
+                    DataLine::Thinking(delta, field) => {
+                        if tx.send(Event::Thinking { delta, field }).is_err() {
+                            return Ok(());
+                        }
+                    }
                     DataLine::ToolFragments(fragments) => {
                         for fragment in fragments {
                             accumulate_fragment(&mut partials, fragment);
@@ -470,6 +475,8 @@ fn describe(action: &str, err: ureq::Error) -> String {
 #[derive(Debug, PartialEq)]
 enum DataLine {
     Token(String),
+    /// A reasoning delta plus the wire field it arrived on.
+    Thinking(String, &'static str),
     ToolFragments(Vec<ToolCallDelta>),
     Usage(Usage),
     Done,
@@ -503,6 +510,22 @@ fn parse_data_line(line: &str) -> Vec<DataLine> {
     let Some(choice) = chunk.choices.into_iter().next() else {
         return out;
     };
+    // Reasoning streams under several field names depending on the
+    // server; first match in pi's preference order wins (AD-0048).
+    let picks = [
+        ("reasoning_content", choice.delta.reasoning_content),
+        ("reasoning", choice.delta.reasoning),
+        ("reasoning_text", choice.delta.reasoning_text),
+    ];
+    debug_assert_eq!(picks.len(), crate::message::REASONING_FIELDS.len());
+    for (field, value) in picks {
+        if let Some(delta) = value
+            && !delta.is_empty()
+        {
+            out.push(DataLine::Thinking(delta, field));
+            break;
+        }
+    }
     if let Some(content) = choice.delta.content
         && !content.is_empty()
     {
@@ -558,6 +581,11 @@ pub(crate) struct WireMessage<'a> {
     tool_call_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
+    /// The assistant's reasoning, replayed (AD-0048): the recorded
+    /// wire field as the key, the joined thinking as the value.
+    /// `flatten` keeps the per-provider key out of the fixed shape.
+    #[serde(flatten)]
+    reasoning: BTreeMap<&'a str, Cow<'a, str>>,
 }
 
 /// A message's `content` in either legal shape: a plain string (every
@@ -593,6 +621,7 @@ impl<'a> WireMessage<'a> {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            reasoning: BTreeMap::new(),
         }
     }
 
@@ -611,6 +640,7 @@ impl<'a> WireMessage<'a> {
             tool_calls: None,
             tool_call_id: Some(&result.call_id),
             name: Some(&result.name),
+            reasoning: BTreeMap::new(),
         }
     }
 
@@ -635,6 +665,7 @@ impl<'a> WireMessage<'a> {
             tool_calls: None,
             tool_call_id: None,
             name: None,
+            reasoning: BTreeMap::new(),
         }
     }
 }
@@ -661,24 +692,33 @@ struct WireFunction<'a> {
 /// separate assistant turns would read as phantom messages.
 struct AssistantGroup<'a> {
     text: Option<Cow<'a, str>>,
+    reasoning: Option<(&'a str, Vec<&'a str>)>,
     calls: Vec<WireToolCall<'a>>,
 }
 
 impl<'a> AssistantGroup<'a> {
     fn flush(&mut self, out: &mut Vec<WireMessage<'a>>) {
-        if self.text.is_none() && self.calls.is_empty() {
+        if self.text.is_none() && self.calls.is_empty() && self.reasoning.is_none() {
             return;
         }
         // `take` the pieces so the group can keep being reused within
         // one `wire_messages` scan.
         let text = self.text.take();
+        let reasoning = self.reasoning.take();
         let calls = std::mem::take(&mut self.calls);
+        // One wire message carries one reasoning field; the first
+        // block's field wins and later blocks join it.
+        let mut reasoning_map: BTreeMap<&'a str, Cow<'a, str>> = BTreeMap::new();
+        if let Some((field, parts)) = reasoning {
+            reasoning_map.insert(field, Cow::Owned(parts.join("\n")));
+        }
         out.push(WireMessage {
             role: "assistant",
             content: text.map(WireContent::Text),
             tool_calls: if calls.is_empty() { None } else { Some(calls) },
             tool_call_id: None,
             name: None,
+            reasoning: reasoning_map,
         });
     }
 }
@@ -698,6 +738,7 @@ pub(crate) fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
     let mut out: Vec<WireMessage<'_>> = Vec::new();
     let mut group = AssistantGroup {
         text: None,
+        reasoning: None,
         calls: Vec::new(),
     };
     for message in history {
@@ -707,15 +748,34 @@ pub(crate) fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
                 out.push(WireMessage::text("user", text));
             }
             Message::Error(_) | Message::System(_) => {}
-            Message::Assistant(text) => match &mut group.text {
-                // Merge consecutive assistant texts (rare, but history
-                // is caller-built — never lose a word).
-                Some(existing) => {
-                    let merged = format!("{existing}{text}");
-                    *existing = Cow::Owned(merged);
+            Message::Assistant(blocks) => {
+                // Prose merges (rare, but history is caller-built —
+                // never lose a word); reasoning records its replay
+                // field. Consecutive assistant messages stay one wire
+                // message either way.
+                for block in blocks {
+                    match block {
+                        AssistantBlock::Text(text) => match &mut group.text {
+                            Some(existing) => existing.to_mut().push_str(text),
+                            None => group.text = Some(Cow::Borrowed(text)),
+                        },
+                        AssistantBlock::Thinking {
+                            thinking,
+                            signature,
+                            ..
+                        } => {
+                            let field = match signature {
+                                Some(recorded) => recorded.as_str(),
+                                None => crate::message::DEFAULT_REASONING_FIELD,
+                            };
+                            match &mut group.reasoning {
+                                Some((_, parts)) => parts.push(thinking),
+                                None => group.reasoning = Some((field, vec![thinking])),
+                            }
+                        }
+                    }
                 }
-                None => group.text = Some(Cow::Borrowed(text)),
-            },
+            }
             Message::ToolCall(call) => {
                 group.calls.push(WireToolCall {
                     id: &call.id,
@@ -802,6 +862,14 @@ struct StreamChoice {
 struct Delta {
     #[serde(default)]
     content: Option<String>,
+    /// Reasoning streams under one of several field names depending
+    /// on the server (AD-0048); all three are probed, pi's order.
+    #[serde(default)]
+    reasoning_content: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_text: Option<String>,
     /// OpenAI streams a tool call in index-keyed fragments: the first
     /// chunk carries `id` and `function.name`, later chunks append
     /// `function.arguments` pieces — never the whole call at once.
@@ -1005,7 +1073,7 @@ mod tests {
         let history = vec![
             Message::User("question".into()),
             Message::Error("local annotation".into()),
-            Message::Assistant("answer".into()),
+            Message::assistant("answer"),
         ];
         let wire = wire_messages(&history);
         assert_eq!(wire.len(), 2);
@@ -1515,7 +1583,7 @@ mod tests {
             .collect();
         let turn2 = vec![
             Message::User("q1".into()),
-            Message::Assistant("one".into()),
+            Message::assistant("one"),
             Message::User("q2".into()),
         ];
         let _: Vec<Event> = spawn_turn(Arc::new(provider), &turn2).iter().collect();
@@ -1655,7 +1723,7 @@ mod tests {
         let provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "m");
         let base = vec![
             Message::User("q1".into()),
-            Message::Assistant("Checking.".into()),
+            Message::assistant("Checking."),
             Message::ToolCall(crate::tool::ToolCall {
                 id: "call_1".into(),
                 name: "imgtool".into(),
@@ -1668,7 +1736,7 @@ mod tests {
             .iter()
             .collect();
         let mut turn2 = base.clone();
-        turn2.push(Message::Assistant("one".into()));
+        turn2.push(Message::assistant("one"));
         turn2.push(Message::User("q2".into()));
         let _: Vec<Event> = spawn_turn(Arc::new(provider), &turn2).iter().collect();
 
@@ -1687,5 +1755,78 @@ mod tests {
             second["messages"][3]["content"][1]["image_url"]["url"],
             "data:image/png;base64,aW1n"
         );
+    }
+
+    #[test]
+    fn reasoning_deltas_parse_with_their_wire_field() {
+        assert_eq!(
+            parse_data_line(r#"data: {"choices":[{"delta":{"reasoning_content":"hmm"}}]}"#),
+            vec![DataLine::Thinking("hmm".into(), "reasoning_content")]
+        );
+        assert_eq!(
+            parse_data_line(r#"data: {"choices":[{"delta":{"reasoning":"why"}}]}"#),
+            vec![DataLine::Thinking("why".into(), "reasoning")]
+        );
+        assert_eq!(
+            parse_data_line(r#"data: {"choices":[{"delta":{"reasoning_text":"x"}}]}"#),
+            vec![DataLine::Thinking("x".into(), "reasoning_text")]
+        );
+        // Probe order: the first non-empty field wins.
+        assert_eq!(
+            parse_data_line(
+                r#"data: {"choices":[{"delta":{"reasoning":"a","reasoning_content":"b"}}]}"#
+            ),
+            vec![DataLine::Thinking("b".into(), "reasoning_content")]
+        );
+    }
+
+    #[test]
+    fn thinking_replays_on_the_recorded_wire_field() {
+        use crate::message::AssistantBlock;
+        let history = vec![
+            Message::User("q".into()),
+            Message::Assistant(vec![
+                AssistantBlock::Thinking {
+                    thinking: "deep".into(),
+                    signature: Some("reasoning".into()),
+                    redacted: false,
+                },
+                AssistantBlock::Text("a".into()),
+            ]),
+        ];
+        let assistant = wire_messages(&history)
+            .into_iter()
+            .find(|m| m.role == "assistant")
+            .expect("assistant wire message");
+        let body = serde_json::to_value(&assistant).unwrap();
+        assert_eq!(body["reasoning"], "deep", "recorded field wins");
+        assert_eq!(body["content"], "a", "prose stays content");
+        // No record: the chat-completions convention applies.
+        let history = vec![Message::Assistant(vec![AssistantBlock::Thinking {
+            thinking: "hm".into(),
+            signature: None,
+            redacted: false,
+        }])];
+        let assistant = wire_messages(&history).pop().unwrap();
+        let body = serde_json::to_value(&assistant).unwrap();
+        assert_eq!(body["reasoning_content"], "hm");
+        // Multiple blocks join onto one field, one wire message.
+        let history = vec![Message::Assistant(vec![
+            AssistantBlock::Thinking {
+                thinking: "one".into(),
+                signature: Some("reasoning_text".into()),
+                redacted: false,
+            },
+            AssistantBlock::Text("mid".into()),
+            AssistantBlock::Thinking {
+                thinking: "two".into(),
+                signature: Some("reasoning_text".into()),
+                redacted: false,
+            },
+        ])];
+        let assistant = wire_messages(&history).pop().unwrap();
+        let body = serde_json::to_value(&assistant).unwrap();
+        assert_eq!(body["reasoning_text"], "one\ntwo");
+        assert_eq!(body["content"], "mid");
     }
 }

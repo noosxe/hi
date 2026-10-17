@@ -18,6 +18,11 @@ pub enum Event {
     /// One fragment of the assistant's reply, in order. Concatenating
     /// every `Token` of a turn reproduces the full reply exactly.
     Token(String),
+    /// One fragment of the assistant's reasoning (AD-0048), in order.
+    /// `field` is the wire field it streamed on (`reasoning_content`,
+    /// `reasoning`, `reasoning_text`) — recorded verbatim on the
+    /// block so replay writes it back where this provider expects it.
+    Thinking { delta: String, field: &'static str },
     /// The model asked to run a tool. Arrives after any `Token`s that
     /// preceded it in the same round of the agent loop; the answering
     /// `ToolResult` always follows before the turn can end.

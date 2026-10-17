@@ -722,3 +722,55 @@ fn json_mode_streams_the_wire_events() {
         json!(true)
     );
 }
+
+#[test]
+fn resumed_thinking_replays_to_the_provider() {
+    let env = Env::new("thinking-replay");
+    let reasoning_turn = Script::Sse(sse(&[
+        json!({"choices": [{"delta": {"reasoning_content": "pondering"}}]}),
+        token_chunk("Hel"),
+        token_chunk("lo"),
+        usage_chunk(10, 5),
+    ]));
+    let second_turn = Script::Sse(sse(&[token_chunk("again"), usage_chunk(50, 2)]));
+    let api = FakeApi::start(vec![reasoning_turn, second_turn]);
+    env.write_models_json(api.url(), plain_model());
+    let project = env.project("replay-proj");
+
+    // Turn 1: reasoning streams, lands in the session as a block.
+    let (code, stdout, stderr) = run(
+        &project,
+        &env,
+        &["-p", "--provider", "fake", "--model", "fake-mini", "hi"],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, format!("{REPLY}\n"));
+    let mut files = session_files(&env);
+    assert_eq!(files.len(), 1);
+    let session = std::fs::read_to_string(files.remove(0)).unwrap();
+    assert!(
+        session.contains(r#""thinking":"pondering""#),
+        "session stores the thinking block: {session}"
+    );
+    assert!(
+        session.contains(r#""signature":"reasoning_content""#),
+        "the wire field is recorded for replay: {session}"
+    );
+
+    // Turn 2 (--continue): the restored history replays the reasoning
+    // onto the field the provider used — pi's contract, AD-0048.
+    let (code, _, stderr) = run(&project, &env, &["-p", "--continue", "again"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let requests = api.requests();
+    assert_eq!(requests.len(), 2);
+    let messages = requests[1].body["messages"].as_array().unwrap();
+    let assistant = messages
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .expect("replayed assistant turn");
+    assert_eq!(
+        assistant["reasoning_content"], "pondering",
+        "thinking replays on the recorded field: {assistant}"
+    );
+    assert_eq!(assistant["content"], REPLY);
+}

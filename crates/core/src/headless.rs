@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::agent::spawn_agent_turn;
 use crate::event::{Event, Usage};
-use crate::message::Message;
+use crate::message::{AssistantBlock, Message};
 use crate::provider::Provider;
 use crate::session::{Session, SessionHeader};
 use crate::tool::{ToolGate, ToolRegistry};
@@ -82,6 +82,9 @@ pub enum JsonRecord {
     /// A streaming fragment of the assistant's reply, in order.
     /// Concatenating every delta reproduces the full reply exactly.
     Token { delta: String },
+    /// A streaming fragment of the assistant's reasoning (AD-0048);
+    /// `field` is the wire field it arrived on.
+    Thinking { delta: String, field: &'static str },
     /// A finalized transcript message — the user prompt, narration,
     /// tool traffic, partial output, the error line.
     Message { message: Message },
@@ -142,7 +145,7 @@ pub fn run_with(
     // accumulate; narration before a tool call is its own assistant
     // message; `Error` marks the reply failed but `TurnEnd` still
     // closes the turn — one finalization path for both outcomes.
-    let mut text = String::new();
+    let mut blocks: Vec<AssistantBlock> = Vec::new();
     let mut transcript: Vec<Message> = Vec::new();
     let mut error: Option<String> = None;
     // The round's bill rides the session file even though headless
@@ -155,11 +158,18 @@ pub fn run_with(
                 sink(&JsonRecord::Token {
                     delta: token.clone(),
                 });
-                text.push_str(&token);
+                AssistantBlock::push_text(&mut blocks, &token);
+            }
+            Event::Thinking { delta, field } => {
+                sink(&JsonRecord::Thinking {
+                    delta: delta.clone(),
+                    field,
+                });
+                AssistantBlock::push_thinking(&mut blocks, &delta, field);
             }
             Event::ToolCall(call) => {
-                if !text.is_empty() {
-                    let message = Message::Assistant(std::mem::take(&mut text));
+                if !blocks.is_empty() {
+                    let message = Message::Assistant(std::mem::take(&mut blocks));
                     sink(&JsonRecord::Message {
                         message: message.clone(),
                     });
@@ -190,9 +200,9 @@ pub fn run_with(
     }
     // Defensive: a closed channel without `TurnEnd` still finalizes.
     // Whatever accumulated since the last tool call is the final reply.
-    let reply = std::mem::take(&mut text);
-    if !reply.is_empty() {
-        let message = Message::Assistant(reply.clone());
+    let blocks = std::mem::take(&mut blocks);
+    if !blocks.is_empty() {
+        let message = Message::Assistant(blocks.clone());
         sink(&JsonRecord::Message {
             message: message.clone(),
         });
@@ -207,7 +217,7 @@ pub fn run_with(
         sink(&JsonRecord::Failed { reason });
     } else {
         sink(&JsonRecord::Done {
-            text: reply.clone(),
+            text: AssistantBlock::text_of(&blocks),
         });
     }
 
@@ -221,7 +231,7 @@ pub fn run_with(
 
     match error {
         Some(reason) => Err(reason),
-        None => Ok(reply),
+        None => Ok(AssistantBlock::text_of(&blocks)),
     }
 }
 
@@ -298,10 +308,7 @@ mod tests {
         assert_eq!(reply, "hello");
         assert_eq!(
             history,
-            vec![
-                Message::User("hi".into()),
-                Message::Assistant("hello".into()),
-            ]
+            vec![Message::User("hi".into()), Message::assistant("hello"),]
         );
     }
 
@@ -332,10 +339,10 @@ mod tests {
             history,
             vec![
                 Message::User("go".into()),
-                Message::Assistant("checking".into()),
+                Message::assistant("checking"),
                 Message::ToolCall(call("c1", "{\"x\":1}")),
                 Message::ToolResult(result("c1", "{\"x\":1}")),
-                Message::Assistant("done".into()),
+                Message::assistant("done"),
             ]
         );
     }
@@ -365,7 +372,7 @@ mod tests {
             history,
             vec![
                 Message::User("hi".into()),
-                Message::Assistant("par".into()),
+                Message::assistant("par"),
                 Message::Error("boom".into()),
             ]
         );
@@ -495,6 +502,7 @@ mod tests {
         match record {
             JsonRecord::Session { .. } => "session",
             JsonRecord::Token { .. } => "token",
+            JsonRecord::Thinking { .. } => "thinking",
             JsonRecord::Message { .. } => "message",
             JsonRecord::Usage { .. } => "usage",
             JsonRecord::Done { .. } => "done",
@@ -546,7 +554,7 @@ mod tests {
         assert_eq!(
             records[2],
             JsonRecord::Message {
-                message: Message::Assistant("checking".into())
+                message: Message::assistant("checking")
             }
         );
         assert_eq!(
@@ -594,7 +602,7 @@ mod tests {
         assert_eq!(
             records[2],
             JsonRecord::Message {
-                message: Message::Assistant("par".into())
+                message: Message::assistant("par")
             }
         );
         assert_eq!(

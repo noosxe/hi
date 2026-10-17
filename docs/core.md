@@ -18,9 +18,18 @@ Selected}`), not re-exported at the root.
 
 ## message.rs — the transcript entry type
 
-`enum Message { User(String), Assistant(String), ToolCall(ToolCall), ToolResult(ToolResult), Error(String), System(String) }`
-plus `Message::text(&self) -> Option<&str>` (the four prose variants; the tool variants carry
+`enum Message { User(String), Assistant(Vec<AssistantBlock>), ToolCall(ToolCall), ToolResult(ToolResult), Error(String), System(String) }`
+plus `Message::text(&self) -> Option<String>` (the four prose variants; the tool variants carry
 structured payloads instead).
+
+`AssistantBlock` (AD-0048) is `Text(String)` or `Thinking { thinking, signature,
+redacted }` — the assistant's prose and reasoning in stream order.
+`AssistantBlock::push_text` / `push_thinking` are the stream accumulators
+(extend the trailing block, start a new one on a kind flip);
+`replay_field` names the wire field a block streamed on
+(`DEFAULT_REASONING_FIELD` = `reasoning_content` when unrecorded).
+Session JSONL accepts both assistant shapes: the current block array and
+the pre-thinking plain string (upgraded to one `Text` block on replay).
 
 **Invariants**
 - Enum, not struct-with-role: payload lives in the variant, `match` is
@@ -30,6 +39,8 @@ structured payloads instead).
   `error_messages_are_never_sent_to_the_model` in `openai.rs`.
 - `ToolCall`/`ToolResult` always appear as a pair in agent-loop-built history — one result per
   call, results directly after their calls (see [turn-lifecycle.md](turn-lifecycle.md)).
+- Thinking blocks are stored verbatim; `signature` is opaque and is the
+  replay write-back key (AD-0048).
 
 ## event.rs — the turn event stream
 
@@ -306,6 +317,14 @@ Adding a provider = implement `Provider` + construct it somewhere in
 
 ## openai.rs — the one wire protocol
 
+Reasoning rides the stream under one of `reasoning_content` / `reasoning` /
+`reasoning_text` (probed in that order, `DataLine::Thinking` carries the
+field) and surfaces as `Event::Thinking { delta, field }`. On replay,
+`wire_messages` writes a history thinking block back onto its recorded
+field (flattened into the assistant wire message); compaction-style
+summarization requests are the one place pi omits it, and hi has none yet
+(AD-0048).
+
 `OpenAiCompatProvider` (Clone) — any OpenAI-compatible endpoint. Everything
 here is **blocking `ureq`** by design (no async runtime in the project).
 
@@ -440,7 +459,8 @@ re-serializes the actual outgoing request — the system wire message,
 `tools.definitions()`, and `openai::wire_messages` output — and bills
 each class bytes over four: system prompt, tool schemas, user,
 assistant (content split from its `tool_calls` array), tool results,
-image carriers. Transcript notes never appear (the wire drops them).
+image carriers, and the replayed reasoning field as `Thinking` (AD-0048).
+Transcript notes never appear (the wire drops them).
 `ContextReport::anchored()` scales the classes by largest remainder
 to sum exactly to the provider's last `prompt_tokens` when one
 exists — the split is ours, the total is the provider's.

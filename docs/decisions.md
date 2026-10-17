@@ -1540,3 +1540,28 @@ rulings:
    menu-slot panel — rows recompute fresh each frame, any key
    closes. A known window (config entry or catalog, the AD-0044
    chain) adds a free-space row.
+
+**AD-0048 (2026-10-19): reasoning is content — store it, replay it
+(#137).** The chat-completions wire streams thinking under
+`reasoning_content` / `reasoning` / `reasoning_text`; hi used to drop
+it at parse and pay its tokens anyway. Five rulings, maintainer-set:
+
+1. **Pi-style blocks.** `Assistant` carries a block list
+   (`AssistantBlock::Text` | `Thinking { thinking, signature,
+   redacted }`) in stream order — interleaved thinking stays
+   representable, and the Anthropic shape costs nothing later.
+2. **OpenAI-completions only.** Ingest probes the three fields in
+   pi's order; replay writes back onto the recorded field,
+   `reasoning_content` by default. Everything else: later.
+3. **Replay always on.** No `models.json` knob — if a real server
+   rejects replayed reasoning, the flag arrives then.
+4. **Trimming untouched.** #121 proceeds on its own premises;
+   superseded-turn thinking is a candidate there, not here.
+5. **No session-format marker.** Old files carry the assistant
+   payload as a plain string and deserialize into a single `Text`
+   block; absent field means no thinking.
+
+The `signature` field records, opaquely, the wire field a block
+streamed on — it is replay's write-back key. Live thinking streams
+dimmed; the transcript renders it dim below the prose; `/context`
+bills it as its own `Thinking` class — it is real context now.

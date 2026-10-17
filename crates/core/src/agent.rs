@@ -20,7 +20,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
 use crate::event::Event;
-use crate::message::Message;
+use crate::message::{AssistantBlock, Message};
 use crate::provider::{Provider, spawn_turn};
 use crate::tool::{ToolCall, ToolDecision, ToolGate, ToolRegistry, ToolResult};
 
@@ -86,7 +86,7 @@ fn run_agent_turn(
     }
     for _round in 0..max_tool_rounds {
         let rx = spawn_turn(Arc::clone(&provider), &working);
-        let mut round_text = String::new();
+        let mut round_blocks: Vec<AssistantBlock> = Vec::new();
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut failed = false;
         for event in rx {
@@ -95,8 +95,14 @@ fn run_agent_turn(
                 // single TurnStart.
                 Event::TurnStart => {}
                 Event::Token(token) => {
-                    round_text.push_str(&token);
+                    AssistantBlock::push_text(&mut round_blocks, &token);
                     if tx.send(Event::Token(token)).is_err() {
+                        return;
+                    }
+                }
+                Event::Thinking { delta, field } => {
+                    AssistantBlock::push_thinking(&mut round_blocks, &delta, field);
+                    if tx.send(Event::Thinking { delta, field }).is_err() {
                         return;
                     }
                 }
@@ -151,8 +157,8 @@ fn run_agent_turn(
         // assistant text that preceded the calls (possibly none), every
         // call, then one result per call — the exact grouping the wire
         // layer maps onto OpenAI's message shapes.
-        if !round_text.is_empty() {
-            working.push(Message::Assistant(round_text));
+        if !round_blocks.is_empty() {
+            working.push(Message::Assistant(round_blocks));
         }
         for call in &calls {
             working.push(Message::ToolCall(call.clone()));
@@ -418,7 +424,7 @@ mod tests {
             replayed,
             &vec![
                 Message::User("run echo".into()),
-                Message::Assistant("Checking. ".into()),
+                Message::assistant("Checking. "),
                 Message::ToolCall(call("c1", "echo", r#"{"msg":"hey"}"#)),
                 Message::ToolResult(ToolResult {
                     call_id: "c1".into(),
