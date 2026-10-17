@@ -106,21 +106,27 @@ fn paste_key(key: &KeyEvent) -> bool {
 }
 
 /// Nothing in this suite may touch the developer's (or CI runner's)
-/// real `~/.config/hi`: the persisting tests read-modify-write the
-/// real `settings.json`, and under `cargo test`'s parallel processes
-/// those writes raced into empty-file parse errors. Armed once per
-/// process, before the first `App` exists — every `config_dir()`
-/// lookup afterwards lands in the scratch dir.
+/// real home: config (the persisting tests read-modify-write the real
+/// `settings.json`, which raced into empty-file parse errors under
+/// `cargo test`'s parallel processes) and data (`Session::start` with
+/// no explicit root writes real session files). Armed once per
+/// process, before the first `App` exists — every `config_dir()` and
+/// `sessions_dir()` lookup afterwards lands in the scratch tree.
 #[cfg(test)]
 fn hermetic_config() {
     static ARMED: std::sync::Once = std::sync::Once::new();
     ARMED.call_once(|| {
-        let dir = std::env::temp_dir().join(format!("hi-tui-test-config-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("hi")).unwrap();
+        let config =
+            std::env::temp_dir().join(format!("hi-tui-test-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(config.join("hi")).unwrap();
+        let data = std::env::temp_dir().join(format!("hi-tui-test-data-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(data.join("hi")).unwrap();
         // Safety: armed once, serialized by `Once`, before any test
-        // reads the environment through `config_dir`.
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
+        // reads the environment through `config_dir`/`sessions_dir`.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &config) };
+        unsafe { std::env::set_var("XDG_DATA_HOME", &data) };
     });
 }
 

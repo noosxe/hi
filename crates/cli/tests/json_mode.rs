@@ -1,7 +1,8 @@
 //! `--mode json`: the real binary streams JSONL records (#18, AD-0038).
 //!
 //! Plain pipes, no pty — headless runs never touch a terminal. Each
-//! run gets its own `XDG_DATA_HOME` so session files land in a temp
+//! run gets its own XDG root so session files and config land in a
+//! temp tree (never the real home)
 //! tree and the session header is genuinely exercised.
 
 use std::process::Command;
@@ -15,6 +16,9 @@ fn run_json(args: &[&str]) -> std::process::Output {
     let out = Command::new(env!("CARGO_BIN_EXE_hi"))
         .args(args)
         .env("XDG_DATA_HOME", &root)
+        // Config too: the maintainer's real settings.json (taskTurns
+        // on, a thinking level) must not leak into the run's behavior.
+        .env("XDG_CONFIG_HOME", &root)
         .output()
         .unwrap();
     let _ = std::fs::remove_dir_all(&root);
