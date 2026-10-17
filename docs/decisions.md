@@ -1565,3 +1565,17 @@ The `signature` field records, opaquely, the wire field a block
 streamed on — it is replay's write-back key. Live thinking streams
 dimmed; the transcript renders it dim below the prose; `/context`
 bills it as its own `Thinking` class — it is real context now.
+
+**AD-0049 (2026-10-19): the tool-round default moves 16 → 32.**
+
+`DEFAULT_MAX_TOOL_ROUNDS` was 16 — chosen when the loop had no real
+workload behind it ("real tool conversations settle in single
+digits"). Field use (#137-era testing against a reasoning model that
+chains reads and greps) showed 16 is not headroom, it is a ceiling the
+loop actually hits; a turn that dies at the cap loses all its pending
+work at once. The default doubles to 32; the cap's *nature* is
+unchanged — still a loud `Event::Error` on the single finalization
+path, still a constant, not a preference, still overridable per
+installation via `settings.maxToolRounds`. The doc's "settle in single
+digits" claim is retired: the belt exists so an unattended turn cannot
+burn the night, not because any specific number is sacred.

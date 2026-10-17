@@ -84,7 +84,7 @@ A credential *source*, not necessarily a literal:
   "images": true                   // image upload master switch; default on
   "taskTurns": false               // opt-in: finished background tasks may start a turn
   "sessionRetention": 30           // opt-in: prune session files older than N days at startup
-  "maxToolRounds": 40              // opt-in: main-loop tool-round cap; default 16, must be >= 1
+  "maxToolRounds": 40              // opt-in: main-loop tool-round cap; default 32, must be >= 1
   "subagentTranscripts": true     // opt-in: record each subagent run as its own session file
   "subagents": true               // master switch for the subagent tool; default on
 }
@@ -106,7 +106,7 @@ A credential *source*, not necessarily a literal:
   written right now refreshes its mtime, so a live run is never a
   prune candidate.
 - `maxToolRounds` is opt-in and absent by default: the main loop's
-  tool-round cap stays at the built-in 16 unless you set it. Must be at
+  tool-round cap stays at the built-in 32 unless you set it. Must be at
   least 1 (zero fails every turn — rejected at startup with a clear
   error). Resolved once at startup, so `/settings` does not flip it;
   the `subagent` tool's `max_rounds` argument is a separate, per-call

@@ -28,9 +28,9 @@ use crate::tool::{ToolCall, ToolDecision, ToolGate, ToolRegistry, ToolResult};
 ///
 /// A runaway model that keeps demanding tools must not spin forever;
 /// hitting the cap is a loud `Event::Error`, not a silent stop. The
-/// number is a safety belt, not a feature — real tool conversations
-/// settle in single digits.
-pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 16;
+/// number is a safety belt, not a feature — it exists so an unattended
+/// turn cannot burn the night, not because 32 is a magic threshold.
+pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 32;
 
 /// The round-cap failure fragment. Shared with the subagent runner
 /// (#4) so it can recognize its own loop's cap error and enrich it
