@@ -194,6 +194,16 @@ impl SubagentRunner {
             )
             .ok()
         });
+        // Materialize NOW or not at all: an open failure (root gone
+        // unwritable mid-flight, path occupied) must be visible here —
+        // `recorded: None` — not surface later as a silently lost
+        // transcript on first append.
+        let opened = transcript
+            .as_mut()
+            .is_none_or(|session| session.materialize().is_ok());
+        if !opened {
+            transcript = None;
+        }
         if let Some(session) = transcript.as_mut() {
             let _ = session.append(&[Message::User(spec.prompt.clone())]);
         }

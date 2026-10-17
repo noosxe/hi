@@ -242,10 +242,12 @@ fn dispatch(cli: Cli) -> ExitCode {
         Ok(cwd) => cwd,
         Err(err) => return fail(&format!("cannot determine current directory: {err}")),
     };
-    // Session persistence: every run writes a session file; --continue
-    // reopens the newest one for this directory; --no-session skips the
-    // disk entirely. Failures degrade to a warning — chat never depends
-    // on the disk.
+    // Session persistence: every run plans a session file, but the
+    // file only materializes on the first recorded record — an opened
+    // and abandoned run leaves nothing behind. --continue reopens the
+    // newest one for this directory; --no-session skips the disk
+    // entirely. Failures degrade to a warning — chat never depends on
+    // the disk.
     let opened = open_session(
         &cli,
         true,

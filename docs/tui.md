@@ -150,7 +150,11 @@ menu-bar icons — `⌃ S`, `⌥ D`, `⌫`/`⌦` for the named editing keys —
 through `icon_label(chord, mac)`; every other platform keeps the
 table's words. The mapping is pure, so tests pin both platforms on
 any host.
-Like unknown-command reports, notices persist in the session file but
+The user's sent prompt persists at send time (not frame-end): event
+handling runs before the frame's append marker, so the send path rides
+its own append (`persist_last`) — the recording gap the lazy-session
+e2e exposed (AD-0050). Like unknown-command reports, notices persist in
+the session file but
 never reach the provider. Commands may carry arguments: the dispatch
 splits on the first space, name first, the rest rides to the handler.
 
