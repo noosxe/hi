@@ -2,3 +2,4 @@
 .direnv
 .DS_Store
 .pi/tasks
+/result
