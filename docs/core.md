@@ -229,9 +229,14 @@ keeps the current value, a vanished model falls back with a warning
 (`selection::model_available` is the availability rule).
 
 One JSONL file per session under the data dir (`config::data_dir()` +
-`sessions/`), in a cwd-keyed project directory (pi-style encoding). Only
-finalized messages — and one `usage` record per round (the bill, #85) —
-are persisted, appended and flushed at turn end; the reader tolerates a
+`sessions/`), in a cwd-keyed project directory (pi-style encoding).
+Creation is lazy (AD-0050): `Session::start*` plans the path and
+materializes nothing — the file appears on the first recorded record
+(`materialize()` forces it early; an empty `append` is a deliberate
+no-op so the transcript pollers can call freely), which means an
+opened-but-unused hi leaves session storage untouched. Only finalized
+messages — and one `usage` record per round (the bill, #85) — are
+persisted, appended and flushed at turn end; the reader tolerates a
 torn final line and rejects malformation anywhere else. Retention is
 opt-in (#23): with `sessionRetention` set (days), startup deletes aged
 `*.jsonl` files across every project before any session opens —

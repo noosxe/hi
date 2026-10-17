@@ -1579,3 +1579,22 @@ path, still a constant, not a preference, still overridable per
 installation via `settings.maxToolRounds`. The doc's "settle in single
 digits" claim is retired: the belt exists so an unattended turn cannot
 burn the night, not because any specific number is sacred.
+
+**AD-0050 (2026-10-19): session files are created lazily.**
+
+Opening hi without `--continue` used to create a session file at
+startup — accidental opens polluted session storage and `/resume`
+listings with empty transcripts. `Session::start*` now plans the path
+and touches no disk; the file materializes on the first recorded
+record (message, usage, or name), and `materialize()` is the explicit
+force verb for callers that must know at open time — the subagent
+transcript opens eagerly or not at all, preserving its silent-degrade
+contract. An empty `append` is a no-op: the transcript pollers call it
+every frame, and a session with no records must not exist for them.
+
+The e2e test written for this decision exposed a second, older bug:
+the TUI never recorded the user's sent prompt at all — the frame
+pump's append marker is captured after the send handler pushed the
+line, so no later append's range ever included it (headless recorded
+prompts correctly; interactive transcripts silently lost them). The
+send path now appends its own line immediately (`persist_last`).

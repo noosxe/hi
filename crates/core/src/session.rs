@@ -92,9 +92,11 @@ pub struct LoadedSession {
     pub path: PathBuf,
 }
 
-/// The shared file-creation tail of `start_in` and
-/// `start_subagent_in`: one project directory, one fresh file, the
-/// header line first.
+/// The shared creation tail of `start_in` and `start_subagent_in`:
+/// one project directory, one fresh path — *planned only*. Nothing
+/// touches the disk here: the file (directory, header line first)
+/// materializes on the first write, so opening hi and quitting
+/// without sending anything leaves session storage untouched.
 fn create(
     root: &Path,
     cwd: &Path,
@@ -102,28 +104,24 @@ fn create(
     header: SessionHeader,
 ) -> Result<Session, String> {
     let dir = root.join(project_key(cwd));
-    std::fs::create_dir_all(&dir)
-        .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
     let path = dir.join(format!("{created_at}_{}.jsonl", header.id));
-    let mut file = std::fs::OpenOptions::new()
-        .create_new(true)
-        .append(true)
-        .open(&path)
-        .map_err(|err| format!("cannot create {}: {err}", path.display()))?;
-    writeln!(file, "{}", header_line(&header)?)
-        .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
-    file.flush()
-        .map_err(|err| format!("cannot write {}: {err}", path.display()))?;
-    Ok(Session { file, path, header })
+    Ok(Session {
+        file: None,
+        path,
+        header,
+    })
 }
 
-/// An open session file, ready to append finalized messages.
+/// A session, ready to append finalized messages.
 ///
-/// The `File` handle is held in append mode for the lifetime of the
-/// session; `append` writes one JSONL line per message and flushes, so
-/// the on-disk transcript is never behind by more than one turn.
+/// Creation is lazy: `start_in` plans the path and materializes
+/// nothing. The `File` handle appears on the first write (append,
+/// usage, rename) — directory, exclusive create, header line first —
+/// and is held in append mode for the rest of the session; every
+/// write flushes, so the on-disk transcript is never behind by more
+/// than one turn. A session that never writes never exists on disk.
 pub struct Session {
-    file: std::fs::File,
+    file: Option<std::fs::File>,
     path: PathBuf,
     header: SessionHeader,
 }
@@ -210,7 +208,7 @@ impl Session {
             .open(path)
             .map_err(|err| format!("cannot open {}: {err}", path.display()))?;
         Ok(Session {
-            file,
+            file: Some(file),
             path: path.to_path_buf(),
             header,
         })
@@ -248,6 +246,11 @@ impl Session {
     /// (`create` wrote it); an empty file means something external
     /// truncated it — fail loudly.
     fn rewrite_header_line(&mut self) -> Result<(), String> {
+        // Before the first write there is no file: the in-memory
+        // header IS the truth, and materialization bakes it in.
+        if self.file.is_none() {
+            return Ok(());
+        }
         let body = std::fs::read_to_string(&self.path)
             .map_err(|err| format!("cannot read {}: {err}", self.path.display()))?;
         let mut lines = body.splitn(2, '\n');
@@ -259,12 +262,43 @@ impl Session {
         out.push_str(&header_line(&self.header)?);
         out.push('\n');
         out.push_str(rest);
-        std::fs::write(&self.path, out)
-            .map_err(|err| format!("cannot write {}: {err}", self.path.display()))?;
-        self.file = std::fs::OpenOptions::new()
+        let path = self.path.display().to_string();
+        std::fs::write(&path, out).map_err(|err| format!("cannot write {path}: {err}"))?;
+        self.file = Some(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .map_err(|err| format!("cannot reopen {path}: {err}"))?,
+        );
+        Ok(())
+    }
+
+    /// The write side of materialization, shared by every record
+    /// writer: on first use, create the project directory, create the
+    /// file exclusively, write the header line, flush. A collision (the
+    /// planned path already exists) fails here, loudly, exactly where
+    /// the old eager `create` failed.
+    /// Force the file into existence now — directory, exclusive
+    /// create, header line first. Callers that must know at open time
+    /// whether recording is possible (the subagent transcript) use
+    /// this instead of waiting for the first append.
+    pub fn materialize(&mut self) -> Result<(), String> {
+        if self.file.is_some() {
+            return Ok(());
+        }
+        let dir = self.path.parent().expect("session path has a parent");
+        std::fs::create_dir_all(dir)
+            .map_err(|err| format!("cannot create {}: {err}", dir.display()))?;
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
             .append(true)
             .open(&self.path)
-            .map_err(|err| format!("cannot reopen {}: {err}", self.path.display()))?;
+            .map_err(|err| format!("cannot create {}: {err}", self.path.display()))?;
+        writeln!(file, "{}", header_line(&self.header)?)
+            .map_err(|err| format!("cannot write {}: {err}", self.path.display()))?;
+        file.flush()
+            .map_err(|err| format!("cannot write {}: {err}", self.path.display()))?;
+        self.file = Some(file);
         Ok(())
     }
 
@@ -334,17 +368,38 @@ impl Session {
         &self.header
     }
 
+    /// The [`LoadedSession`] shape of a never-yet-written session:
+    /// empty transcript, zero bill. The TUI's `/new` adopts through
+    /// this instead of reading a file that does not exist yet.
+    pub fn fresh_snapshot(&self) -> LoadedSession {
+        LoadedSession {
+            header: self.header.clone(),
+            messages: Vec::new(),
+            usage: Usage::default(),
+            usage_last_prompt: 0,
+            path: self.path.clone(),
+        }
+    }
+
     /// Append finalized messages — called at turn end. One line per
     /// message, flushed immediately: the crash window is one message,
     /// not one session.
     pub fn append(&mut self, messages: &[Message]) -> Result<(), String> {
-        for message in messages {
-            writeln!(self.file, "{}", message_line(message)?)
-                .map_err(|err| format!("cannot write {}: {err}", self.path.display()))?;
+        if messages.is_empty() {
+            // Nothing to record — and therefore nothing to create. The
+            // transcript pollers append empty slices every frame; a
+            // session with no records must not materialize for them.
+            return Ok(());
         }
-        self.file
-            .flush()
-            .map_err(|err| format!("cannot write {}: {err}", self.path.display()))
+        self.materialize()?;
+        let path = self.path.display().to_string();
+        let file = self.file.as_mut().expect("materialized above");
+        for message in messages {
+            writeln!(file, "{}", message_line(message)?)
+                .map_err(|err| format!("cannot write {path}: {err}"))?;
+        }
+        file.flush()
+            .map_err(|err| format!("cannot write {path}: {err}"))
     }
 
     /// The session's effective name — the header's `--name` with any
@@ -360,20 +415,23 @@ impl Session {
     /// line by construction. Flushed like every append.
     pub fn rename(&mut self, name: &str) -> Result<(), String> {
         let sanitized = name.replace(['\r', '\n'], " ").trim().to_string();
+        self.materialize()?;
+        let path = self.path.display().to_string();
+        let file = self.file.as_mut().expect("materialized above");
         writeln!(
-            self.file,
+            file,
             "{}",
             serde_json::json!({ "type": "name", "name": sanitized })
         )
-        .map_err(|err| format!("cannot write {}: {err}", self.path.display()))?;
+        .map_err(|err| format!("cannot write {path}: {err}"))?;
         self.header.name = if sanitized.is_empty() {
             None
         } else {
             Some(sanitized)
         };
-        self.file
-            .flush()
-            .map_err(|err| format!("cannot write {}: {err}", self.path.display()))
+        let file = self.file.as_mut().expect("materialized above");
+        file.flush()
+            .map_err(|err| format!("cannot write {path}: {err}"))
     }
 
     /// Append one round's bill — the `usage` record (#85). One line
@@ -382,15 +440,18 @@ impl Session {
     pub fn append_usage(&mut self, usage: &Usage) -> Result<(), String> {
         let payload =
             serde_json::to_value(usage).map_err(|err| format!("cannot serialize usage: {err}"))?;
+        self.materialize()?;
+        let path = self.path.display().to_string();
+        let file = self.file.as_mut().expect("materialized above");
         writeln!(
-            self.file,
+            file,
             "{}",
             serde_json::json!({ "type": "usage", "usage": payload })
         )
-        .map_err(|err| format!("cannot write {}: {err}", self.path.display()))?;
-        self.file
-            .flush()
-            .map_err(|err| format!("cannot write {}: {err}", self.path.display()))
+        .map_err(|err| format!("cannot write {path}: {err}"))?;
+        let file = self.file.as_mut().expect("materialized above");
+        file.flush()
+            .map_err(|err| format!("cannot write {path}: {err}"))
     }
 }
 
@@ -827,7 +888,7 @@ mod tests {
     fn subagent_sessions_carry_kind_and_parent() {
         let root = std::env::temp_dir().join(format!("hi-sess-sub-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let session = Session::start_subagent_in(
+        let mut session = Session::start_subagent_in(
             &root,
             Path::new("/p"),
             "prov",
@@ -836,6 +897,7 @@ mod tests {
             Some("parent-1"),
         )
         .unwrap();
+        session.materialize().unwrap();
         assert_eq!(session.header().kind.as_deref(), Some("subagent"));
         assert_eq!(session.header().parent.as_deref(), Some("parent-1"));
         let loaded = load(session.path()).unwrap();
@@ -947,8 +1009,9 @@ mod tests {
         // An old binary's session: the header predates `thinking`
         // (serde default None). Restamping must not require it.
         let root = temp_root("restamp-old");
-        let session =
+        let mut session =
             Session::start_in(&root, Path::new("/p"), "zai", "glm-5.3", None, None).unwrap();
+        session.materialize().unwrap();
         let path = session.path().to_path_buf();
         let mut reopened = Session::resume(&path).unwrap();
         reopened.set_thinking(Some("max")).unwrap();
@@ -1168,9 +1231,10 @@ mod tests {
     #[test]
     fn name_and_forked_from_are_optional_camel_case_fields() {
         let root = temp_root("nameheader");
-        let session =
+        let mut session =
             Session::start_in(&root, Path::new("/p"), "prov", "mod", None, Some("my work"))
                 .unwrap();
+        session.materialize().unwrap();
         let raw = std::fs::read_to_string(session.path()).unwrap();
         let header: serde_json::Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
         assert_eq!(header["name"], "my work");
@@ -1245,7 +1309,9 @@ mod tests {
         // with a zero bill, and a usage record before the header is as
         // loud as a message before one.
         let root = temp_root("nousage");
-        let session = Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        let mut session =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        session.materialize().unwrap();
         let header = std::fs::read_to_string(session.path()).unwrap();
         std::fs::write(
             session.path(),
@@ -1334,12 +1400,15 @@ mod tests {
         // The forward-compat seam again: files written before #89 load
         // untouched, --name riding the header as always.
         let root = temp_root("nonames");
-        let session =
+        let mut session =
             Session::start_in(&root, Path::new("/p"), "prov", "mod", None, Some("kept")).unwrap();
+        session.materialize().unwrap();
         let loaded = load(session.path()).unwrap();
         assert_eq!(loaded.header.name.as_deref(), Some("kept"));
 
-        let session = Session::start_in(&root, Path::new("/q"), "prov", "mod", None, None).unwrap();
+        let mut session =
+            Session::start_in(&root, Path::new("/q"), "prov", "mod", None, None).unwrap();
+        session.materialize().unwrap();
         let loaded = load(session.path()).unwrap();
         assert_eq!(loaded.header.name, None);
     }
@@ -1367,7 +1436,9 @@ mod tests {
     #[test]
     fn a_name_record_before_the_header_is_an_error() {
         let root = temp_root("orphanname");
-        let session = Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        let mut session =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        session.materialize().unwrap();
         let header = std::fs::read_to_string(session.path()).unwrap();
         std::fs::write(
             session.path(),
@@ -1415,7 +1486,8 @@ mod tests {
         // session written before images existed loads with none.
         let root = temp_root("preimage");
         let cwd = Path::new("/p");
-        let session = Session::start_in(&root, cwd, "prov", "mod", None, None).unwrap();
+        let mut session = Session::start_in(&root, cwd, "prov", "mod", None, None).unwrap();
+        session.materialize().unwrap();
         let header = std::fs::read_to_string(session.path()).unwrap();
         let legacy = format!(
             "{header}{{\"type\":\"message\",\"message\":{{\"toolResult\":{{\"callId\":\"c1\",\"name\":\"read\",\"content\":\"text only\",\"isError\":false}}}}}}\n"
@@ -1434,8 +1506,14 @@ mod tests {
     fn prune_removes_only_aged_session_files() {
         let root = temp_root("retention");
         let cwd = Path::new("/ret-demo");
-        Session::start_in(&root, cwd, "p", "m", None, None).unwrap();
-        Session::start_in(&root, cwd, "p", "m", None, None).unwrap();
+        Session::start_in(&root, cwd, "p", "m", None, None)
+            .unwrap()
+            .materialize()
+            .unwrap();
+        Session::start_in(&root, cwd, "p", "m", None, None)
+            .unwrap()
+            .materialize()
+            .unwrap();
         let dir = root.join(project_key(cwd));
         let paths: Vec<PathBuf> = std::fs::read_dir(&dir)
             .unwrap()
@@ -1454,8 +1532,14 @@ mod tests {
     #[test]
     fn prune_walks_every_project_dir() {
         let root = temp_root("retention-multi");
-        Session::start_in(&root, Path::new("/a"), "p", "m", None, None).unwrap();
-        Session::start_in(&root, Path::new("/b"), "p", "m", None, None).unwrap();
+        Session::start_in(&root, Path::new("/a"), "p", "m", None, None)
+            .unwrap()
+            .materialize()
+            .unwrap();
+        Session::start_in(&root, Path::new("/b"), "p", "m", None, None)
+            .unwrap()
+            .materialize()
+            .unwrap();
         // Don't hardcode the project-key encoding — walk whatever
         // subdirs exist.
         for entry in std::fs::read_dir(&root).unwrap().flatten() {
@@ -1501,9 +1585,15 @@ mod tests {
     fn latest_still_finds_the_newest_after_prune() {
         let root = temp_root("retention-latest");
         let cwd = Path::new("/ret-latest");
-        Session::start_in(&root, cwd, "p", "old", None, None).unwrap();
+        Session::start_in(&root, cwd, "p", "old", None, None)
+            .unwrap()
+            .materialize()
+            .unwrap();
         std::thread::sleep(Duration::from_millis(5));
-        Session::start_in(&root, cwd, "p", "new", None, None).unwrap();
+        Session::start_in(&root, cwd, "p", "new", None, None)
+            .unwrap()
+            .materialize()
+            .unwrap();
         let dir = root.join(project_key(cwd));
         let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
             .unwrap()
@@ -1524,5 +1614,75 @@ mod tests {
         let f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
         f.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now() - age))
             .unwrap();
+    }
+    #[test]
+    fn start_touches_no_disk_until_the_first_write() {
+        let root = temp_root("lazy");
+        let mut session =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        // Nothing on disk yet: an opened-but-never-used hi must not
+        // pollute session storage.
+        assert!(!root.exists());
+        session.append(&[Message::User("hello".into())]).unwrap();
+        let path = session.path().to_path_buf();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.messages.len(), 1);
+    }
+
+    #[test]
+    fn an_empty_append_is_a_no_op_the_pollers_may_call_freely() {
+        // The transcript pollers append empty slices every frame; a
+        // session with no records must not materialize for them.
+        // `materialize()` is the explicit force verb.
+        let root = temp_root("lazyempty");
+        let mut session =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        session.append(&[]).unwrap();
+        assert!(!session.path().exists());
+        session.materialize().unwrap();
+        let raw = std::fs::read_to_string(session.path()).unwrap();
+        assert_eq!(raw.lines().count(), 1);
+    }
+
+    #[test]
+    fn a_model_switch_before_the_first_write_bakes_into_the_header() {
+        let root = temp_root("lazymodel");
+        let mut session =
+            Session::start_in(&root, Path::new("/p"), "prov", "old", None, None).unwrap();
+        session.set_model("zai", "glm-new").unwrap();
+        session.append(&[Message::User("hi".into())]).unwrap();
+        let loaded = load(session.path()).unwrap();
+        assert_eq!(loaded.header.provider, "zai");
+        assert_eq!(loaded.header.model, "glm-new");
+    }
+
+    #[test]
+    fn usage_and_name_records_materialize_too() {
+        let root = temp_root("lazyrecords");
+        let mut session =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        session.rename("work").unwrap();
+        assert!(session.path().exists(), "rename materializes");
+        let mut other =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        other
+            .append_usage(&Usage {
+                prompt_tokens: 1,
+                completion_tokens: 2,
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(other.path().exists(), "usage materializes");
+    }
+
+    #[test]
+    fn a_first_write_collision_errors_clearly() {
+        let root = temp_root("lazycollide");
+        let mut session =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        std::fs::create_dir_all(session.path().parent().unwrap()).unwrap();
+        std::fs::write(session.path(), "occupied").unwrap();
+        let err = session.append(&[Message::User("hi".into())]).unwrap_err();
+        assert!(err.contains("cannot create"), "{err}");
     }
 }

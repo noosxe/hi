@@ -131,7 +131,9 @@ hi -p --no-session "throwaway"          # don't touch the session dir
   headless selectors — `--resume` needs a terminal for its picker and
   refuses under `--print`.
 - The machinery is `hi_core::headless` — the same agent loop, tools,
-  and session files as the TUI (see [core.md](core.md)).
+  and session files as the TUI (see [core.md](core.md)). A fresh
+  interactive run plans a session but writes nothing until the first
+  recorded record — open, look, quit leaves no file (AD-0050).
 - `--tools` composes: `hi -p --tools read-only "…"` runs headless with
   only the observation tools; `--tools none` restores a pure-text model.
 

@@ -46,6 +46,14 @@ const QUERIES: &[(&[u8], &[u8])] = &[
 
 struct Tui {
     master: Box<dyn MasterPty + Send>,
+    /// The spawned binary's isolated XDG data root — tests assert on
+    /// what it did (or did not) write.
+    data_home: std::path::PathBuf,
+    /// Same for config: models.json must land here BEFORE the spawn.
+    /// Read only by `spawn_configured`'s callers through the fresh
+    /// homes; kept on the harness for symmetry with `data_home`.
+    #[expect(dead_code)]
+    config_home: std::path::PathBuf,
     journal: Arc<Mutex<String>>,
     child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
     emu: Arc<Mutex<Vt>>,
@@ -65,6 +73,25 @@ impl Drop for Tui {
     }
 }
 
+/// Unique per spawn: the tests run in parallel and must not share
+/// (or delete) each other's cwd — and the spawned hi must never
+/// touch the real ~/.config or ~/.local/share.
+fn fresh_xdg() -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let pid = std::process::id();
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let cwd = std::env::temp_dir().join(format!("hi-pty-{pid}-{seq}"));
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd).unwrap();
+    let data_home = std::env::temp_dir().join(format!("hi-pty-data-{pid}-{seq}"));
+    let _ = std::fs::remove_dir_all(&data_home);
+    std::fs::create_dir_all(&data_home).unwrap();
+    let config_home = std::env::temp_dir().join(format!("hi-pty-config-{pid}-{seq}"));
+    let _ = std::fs::remove_dir_all(&config_home);
+    std::fs::create_dir_all(&config_home).unwrap();
+    (cwd, data_home, config_home)
+}
+
 impl Tui {
     /// Spawn `hi` inside a fresh pty in an empty temp cwd (no config,
     /// no sessions), pumping its output through the emulator on a
@@ -72,21 +99,28 @@ impl Tui {
     /// they appear (crossterm re-queries the cursor position on
     /// resize; one missed reply is a 2s stall then a boot error).
     fn spawn(args: &[&str]) -> Self {
-        Self::spawn_sized(args, ROWS, COLS)
+        let (cwd, data_home, config_home) = fresh_xdg();
+        Self::spawn_in(args, cwd, data_home, config_home, ROWS, COLS)
     }
 
-    fn spawn_sized(args: &[&str], rows: u16, cols: u16) -> Self {
-        // Unique per spawn: the tests run in parallel and must not
-        // share (or delete) each other's cwd.
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let cwd = std::env::temp_dir().join(format!(
-            "hi-pty-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&cwd);
-        std::fs::create_dir_all(&cwd).unwrap();
+    /// A TUI with a models.json already in its isolated config root —
+    /// for tests that exercise a real provider round-trip.
+    fn spawn_configured(args: &[&str], models_json: &str) -> Self {
+        let (cwd, data_home, config_home) = fresh_xdg();
+        let dir = config_home.join("hi");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("models.json"), models_json).unwrap();
+        Self::spawn_in(args, cwd, data_home, config_home, ROWS, COLS)
+    }
 
+    fn spawn_in(
+        args: &[&str],
+        cwd: std::path::PathBuf,
+        data_home: std::path::PathBuf,
+        config_home: std::path::PathBuf,
+        rows: u16,
+        cols: u16,
+    ) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows,
@@ -98,6 +132,8 @@ impl Tui {
         let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_hi"));
         cmd.args(args);
         cmd.cwd(&cwd);
+        cmd.env("XDG_DATA_HOME", &data_home);
+        cmd.env("XDG_CONFIG_HOME", &config_home);
         let child = pty.slave.spawn_command(cmd).unwrap();
         // Belt and suspenders: some platforms do not honor the size
         // given at openpty; crossterm renders nothing into a 0x0 pty.
@@ -156,6 +192,8 @@ impl Tui {
             }
         });
         Self {
+            data_home,
+            config_home,
             master: pty.master,
             journal,
             child: Arc::new(Mutex::new(child)),
@@ -449,6 +487,97 @@ fn a_terminal_still_opens_the_tui_without_flags() {
     let mut tui = Tui::spawn(&["--mock"]);
     tui.sees("\u{2500}");
     assert!(tui.exits_cleanly(Duration::from_secs(20)));
+}
+
+/// A one-shot OpenAI-compatible SSE endpoint: every request gets the
+/// same reply (one content chunk, one usage chunk, [DONE]). Enough
+/// server for a one-turn TUI session — the pty counterpart of wire
+/// tests' FakeApi, minus the recording.
+fn fake_sse_endpoint(reply: &str) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let body = format!(
+        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{reply}\"}}}}]}}\n\n\
+         data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}}}\n\n\
+         data: [DONE]\n\n"
+    );
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let body = body.clone();
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                     Connection: close\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            });
+        }
+    });
+    format!("http://127.0.0.1:{port}/v1")
+}
+
+fn session_files(data_home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let sessions = data_home.join("hi").join("sessions");
+    std::fs::read_dir(&sessions)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .flat_map(|e| std::fs::read_dir(e.path()).map(|d| d.filter_map(Result::ok)))
+                .flatten()
+                .map(|e| e.path())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn quitting_without_sending_writes_no_session_file() {
+    // Lazy session creation, end to end: a real provider, a real TUI,
+    // opened — looked — quit. The session was planned (the status bar
+    // even knows its path) but nothing was recorded, so no file may
+    // exist. This is the field complaint: accidental opens must not
+    // pollute session storage.
+    let url = fake_sse_endpoint("unused");
+    let models = format!(
+        "{{\"providers\":{{\"fake\":{{\"baseUrl\":\"{url}\",\"apiKey\":\"k\",\"models\":[{{\"id\":\"fake-mini\"}}]}}}}}}"
+    );
+    let mut tui = Tui::spawn_configured(&["--provider", "fake", "--model", "fake-mini"], &models);
+    tui.sees("\u{2500}");
+    let data_home = tui.data_home.clone();
+    assert!(tui.exits_cleanly(Duration::from_secs(20)));
+    let files = session_files(&data_home);
+    assert!(files.is_empty(), "an opened-but-unused hi wrote {files:?}");
+}
+
+#[test]
+fn a_sent_message_materializes_the_session_file() {
+    // The lazy counterpart: one real turn leaves exactly one session
+    // file — header first, then the user line and the reply.
+    let url = fake_sse_endpoint("recorded reply ok");
+    let models = format!(
+        "{{\"providers\":{{\"fake\":{{\"baseUrl\":\"{url}\",\"apiKey\":\"k\",\"models\":[{{\"id\":\"fake-mini\"}}]}}}}}}"
+    );
+    let mut tui = Tui::spawn_configured(&["--provider", "fake", "--model", "fake-mini"], &models);
+    tui.sees("\u{2500}");
+    let data_home = tui.data_home.clone();
+    tui.type_keys("record me");
+    tui.write("\r");
+    tui.settled_turn("recorded reply ok");
+    assert!(tui.exits_cleanly(Duration::from_secs(20)));
+    let files = session_files(&data_home);
+    assert_eq!(files.len(), 1, "one turn, one session file: {files:?}");
+    let raw = std::fs::read_to_string(&files[0]).unwrap();
+    let lines: Vec<&str> = raw.lines().collect();
+    assert!(lines.len() >= 3, "header + user + reply, got {raw:?}");
+    assert!(lines[0].contains("\"type\":\"session\""), "{}", lines[0]);
+    assert!(
+        raw.to_lowercase().contains("record me"),
+        "user line missing from {raw:?}"
+    );
 }
 
 #[test]

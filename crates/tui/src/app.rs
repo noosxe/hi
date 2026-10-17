@@ -878,6 +878,12 @@ impl App {
                     return;
                 }
                 self.messages.push(Message::User(msg));
+                // Persist NOW: the frame pump's `added_from` marker is
+                // captured after this push, so the user line would
+                // otherwise never ride a later append (the recording
+                // gap the lazy-session e2e exposed — headless recorded
+                // it, the TUI silently did not).
+                self.persist_last();
                 self.start_turn();
             }
             KeyCode::Esc => {
@@ -2306,11 +2312,12 @@ impl App {
                 return;
             }
         };
-        let path = session.path().to_path_buf();
-        match hi_core::session::load(&path) {
-            Ok(loaded) => self.adopt(session, loaded, format!("new session {}", path.display())),
-            Err(err) => self.messages.push(Message::Error(err)),
-        }
+        // Nothing on disk yet: the file materializes on the first
+        // recorded record (lazy session creation), so adoption reads
+        // the in-memory snapshot instead of a file that does not exist.
+        let intro = format!("new session {}", session.path().display());
+        let loaded = session.fresh_snapshot();
+        self.adopt(session, loaded, intro);
     }
 
     /// What the input's right-side title shows while work is in
@@ -2514,6 +2521,15 @@ impl App {
         self.persist_new(added_from);
     }
 
+    /// Append the message just pushed by an event handler. Event
+    /// handling runs before the frame's `added_from` marker is
+    /// captured, so anything pushed here is invisible to the frame's
+    /// own range and must ride its own append.
+    fn persist_last(&mut self) {
+        let last = self.messages.len().saturating_sub(1);
+        self.persist_new(last);
+    }
+
     /// Append everything since `added_from` to the session file. An
     /// append failure degrades once, loudly — the session is dropped so
     /// the note is not spammed every frame, and chat continues without
@@ -2665,6 +2681,28 @@ mod tests {
     /// before the note is sent, so a single pump after
     /// `wait_task_finished` can race it (the #82 CI flake). Predicate
     /// waits only — no fixed sleeps.
+
+    #[test]
+    fn a_sent_turn_records_the_user_line_then_the_reply() {
+        let root = std::env::temp_dir().join(format!("hi-tui-record-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = test_app();
+        app.session_root = Some(root.clone());
+        app.run_command("new", "");
+        // Lazy: nothing on disk yet.
+        assert!(!app.session.as_ref().unwrap().path().exists());
+        app.set_input("record me".to_string());
+        app.handle_key(key(KeyCode::Enter));
+        pump_until(&mut app, "the turn", |a| a.turn.is_none());
+        let path = app.session.as_ref().unwrap().path().to_path_buf();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("record me"),
+            "the user line must be recorded: {raw:?}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn pump_until(app: &mut App, what: &str, done: impl Fn(&App) -> bool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -2843,7 +2881,9 @@ mod tests {
         let mut app = test_app();
         app.session_root = Some(root.clone());
         let cwd = std::env::current_dir().unwrap();
-        let first = hi_core::Session::start_in(&root, &cwd, "mock", "mock", None, None).unwrap();
+        let mut first =
+            hi_core::Session::start_in(&root, &cwd, "mock", "mock", None, None).unwrap();
+        first.materialize().unwrap();
         app.switch_session(first.path());
         // A live bill and transcript from the session we are leaving.
         app.usage = Usage {
@@ -2867,11 +2907,24 @@ mod tests {
         assert!(app.history.is_empty(), "the ring resets");
         let new_id = app.session.as_ref().unwrap().id().to_string();
         assert_ne!(new_id, old_id, "a new session id took over");
-        // The new file exists, headed by the cwd we are in.
+        // Lazy creation: /new alone writes nothing — the file appears
+        // on the first recorded record, not at open time.
+        assert!(!app.session.as_ref().unwrap().path().exists());
+        app.session
+            .as_mut()
+            .unwrap()
+            .materialize()
+            .expect("materialize");
+        // Now it exists, headed by the cwd we are in.
         let loaded = hi_core::session::load(app.session.as_ref().unwrap().path()).unwrap();
         assert_eq!(loaded.header.cwd, cwd.to_string_lossy());
         // An optional argument names the session it creates.
         app.run_command("new", "scratch");
+        app.session
+            .as_mut()
+            .unwrap()
+            .materialize()
+            .expect("materialize");
         let second = hi_core::session::load(app.session.as_ref().unwrap().path()).unwrap();
         assert_eq!(second.header.name.as_deref(), Some("scratch"));
         let _ = std::fs::remove_dir_all(&root);
@@ -4192,7 +4245,7 @@ mod tests {
     fn name_names_the_session_and_the_file_records_it() {
         let root = std::env::temp_dir().join(format!("hi-name-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let session = hi_core::Session::start_in(
+        let mut session = hi_core::Session::start_in(
             &root,
             std::path::Path::new("/p"),
             "mock",
@@ -4201,6 +4254,7 @@ mod tests {
             None,
         )
         .unwrap();
+        session.materialize().unwrap();
         let path = session.path().to_path_buf();
         drop(session);
 
@@ -4226,7 +4280,7 @@ mod tests {
     fn bare_name_shows_the_current_name() {
         let root = std::env::temp_dir().join(format!("hi-bare-name-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let session = hi_core::Session::start_in(
+        let mut session = hi_core::Session::start_in(
             &root,
             std::path::Path::new("/p"),
             "mock",
@@ -4235,6 +4289,7 @@ mod tests {
             None,
         )
         .unwrap();
+        session.materialize().unwrap();
         let path = session.path().to_path_buf();
 
         let mut app = test_app();
@@ -4342,7 +4397,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("hi-think-resume2-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let cwd = std::env::current_dir().unwrap();
-        let session = hi_core::Session::start_in(&root, &cwd, "mock", "mock", None, None).unwrap();
+        let mut session =
+            hi_core::Session::start_in(&root, &cwd, "mock", "mock", None, None).unwrap();
+        session.materialize().unwrap();
         let mut app = test_app();
         app.session_root = Some(root);
         app.thinking = Some(hi_core::thinking::ThinkingLevel::Medium);
@@ -4359,6 +4416,11 @@ mod tests {
         let mut app = test_app();
         app.session_root = Some(root);
         app.run_command("new", "");
+        app.session
+            .as_mut()
+            .unwrap()
+            .materialize()
+            .expect("materialize");
         app.run_command("thinking", "high");
         let path = app.session.as_ref().unwrap().path().to_path_buf();
         let loaded = hi_core::session::load(&path).unwrap();
@@ -4408,8 +4470,9 @@ mod tests {
         let root = std::env::temp_dir().join(format!("hi-model-gone-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let cwd = std::env::current_dir().unwrap();
-        let session =
+        let mut session =
             hi_core::Session::start_in(&root, &cwd, "mock", "ghost-model", None, None).unwrap();
+        session.materialize().unwrap();
         let mut app = test_app();
         app.session_root = Some(root);
         app.switch_session(session.path());
@@ -4434,6 +4497,11 @@ mod tests {
         let mut app = test_app();
         app.session_root = Some(root);
         app.run_command("new", "");
+        app.session
+            .as_mut()
+            .unwrap()
+            .materialize()
+            .expect("materialize");
         app.apply_model_choice("mock/mock-2".into());
         let path = app.session.as_ref().unwrap().path().to_path_buf();
         let loaded = hi_core::session::load(&path).unwrap();
