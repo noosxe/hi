@@ -28,9 +28,8 @@ data), `status.rs` (status-bar facts), `ui.rs` (widgets/drawing),
 - `event_loop` = the frame clock: wait up to **50ms** for a key, then draw
   and `pump` either way. Loop exits when `app.quit`.
 - Teardown order: `terminal.clear()` (wipe managed region) →
-  `ratatui::restore()` (raw mode off) → two newlines (park the shell prompt
-  on a fresh row). Quitting mid-turn is safe: dropping `app` drops the
-  turn's `Receiver`, which stops the provider thread (see
+  `ratatui::restore()` (raw mode off). Quitting mid-turn is safe: dropping
+  `app` drops the turn's `Receiver`, which stops the provider thread (see
   [turn-lifecycle.md](turn-lifecycle.md)).
 
 ## app.rs — all state, one struct
