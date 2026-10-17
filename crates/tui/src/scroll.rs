@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn folding_caches_blocks_and_advances_seen() {
-        let scroll = scroll_with(&[user("hello"), Message::Assistant("hi there".into())], 40);
+        let scroll = scroll_with(&[user("hello"), Message::assistant("hi there")], 40);
         // Welcome + two message blocks.
         assert_eq!(scroll.blocks.len(), 3);
         assert_eq!(scroll.seen(), 2);
@@ -285,11 +285,7 @@ mod tests {
     #[test]
     fn flush_reaches_the_target_and_the_window_shows_the_tail() {
         let mut scroll = scroll_with(
-            &[
-                user("hello"),
-                Message::Assistant("hi there".into()),
-                user("again"),
-            ],
+            &[user("hello"), Message::assistant("hi there"), user("again")],
             40,
         );
         let total = scroll.total;
@@ -335,10 +331,7 @@ mod tests {
     #[test]
     fn width_change_rewraps_unflushed_blocks_and_keeps_the_flushed_prefix() {
         let mut scroll = scroll_with(
-            &[
-                user("a longer first message"),
-                Message::Assistant("reply".into()),
-            ],
+            &[user("a longer first message"), Message::assistant("reply")],
             40,
         );
         scroll.take_flush(2, false).expect("flush");
@@ -347,10 +340,7 @@ mod tests {
         // The cursor snaps back to the partial block's start (at most
         // one block re-prints at the seam) and then converges again.
         scroll.sync(
-            &[
-                user("a longer first message"),
-                Message::Assistant("reply".into()),
-            ],
+            &[user("a longer first message"), Message::assistant("reply")],
             12,
             None,
         );

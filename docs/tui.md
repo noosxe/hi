@@ -134,7 +134,9 @@ reads `App::settings_rows()` live each frame.
 annotation badges (`read-only` / `destructive`, only when the tool claims
 them), and the first sentence of each description (`ToolRegistry::info()`
 in core snapshots the facts; the TUI formats). `/tasks` opens the tasks
-pane (AD-0021) — bare to list, `/tasks <id>` for one task's live output.
+pane (AD-0021) — bare to list, `/tasks <id>` for one task's live output. The live reply renders blocks in stream
+order (AD-0048): reasoning dimmed plain (`Fg::Dim`), prose as markdown —
+the flushed transcript block matches, so completion is a visual no-op.
 `/new` starts a fresh session for the directory hi runs in —
 optionally named (`/new scratch`) — and walks the same reset resume
 walks, so transcript, bill, and ring all begin again while the model

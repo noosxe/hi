@@ -318,9 +318,10 @@ const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 
 /// One assistant reply being streamed by a provider thread.
 pub struct Turn {
-    /// Reply text accumulated so far — rendered live, finalized into
+    /// The reply accumulated so far as blocks (AD-0048) — prose and
+    /// reasoning in stream order; rendered live, finalized into
     /// `messages` when the turn ends.
-    pub text: String,
+    pub blocks: Vec<hi_core::message::AssistantBlock>,
     /// Set when the provider reported a failure for this turn;
     /// `Some` turns the finalization into an error transcript entry.
     pub error: Option<String>,
@@ -339,7 +340,7 @@ impl Turn {
     /// chunk timing.
     pub(crate) fn with_text(text: &str) -> Turn {
         Turn {
-            text: text.to_string(),
+            blocks: vec![hi_core::message::AssistantBlock::Text(text.to_string())],
             error: None,
             started_at: Instant::now(),
             rx: std::sync::mpsc::channel().1,
@@ -860,9 +861,9 @@ impl App {
                 // drop-is-cancellation mechanism as quitting.
                 // pi's behavior: partial output stays in the transcript.
                 if let Some(turn) = self.turn.take()
-                    && !turn.text.is_empty()
+                    && !turn.blocks.is_empty()
                 {
-                    self.messages.push(Message::Assistant(turn.text));
+                    self.messages.push(Message::Assistant(turn.blocks));
                 }
                 // Cancel means cancel everything: hand the queued
                 // text back so nothing typed is lost.
@@ -892,7 +893,7 @@ impl App {
             self.max_tool_rounds,
         );
         self.turn = Some(Turn {
-            text: String::new(),
+            blocks: Vec::new(),
             error: None,
             started_at: Instant::now(),
             rx,
@@ -2406,14 +2407,23 @@ impl App {
         while let Ok(event) = turn.rx.try_recv() {
             match event {
                 Event::TurnStart => {} // nothing to do yet — tokens follow
-                Event::Token(token) => turn.text.push_str(&token),
+                Event::Token(token) => {
+                    hi_core::message::AssistantBlock::push_text(&mut turn.blocks, &token);
+                }
+                Event::Thinking { delta, field } => {
+                    hi_core::message::AssistantBlock::push_thinking(
+                        &mut turn.blocks,
+                        &delta,
+                        field,
+                    );
+                }
                 Event::ToolCall(call) => {
                     // Narration before a call is its own assistant
-                    // message: flush the accumulated tokens so the
+                    // message: flush the accumulated blocks so the
                     // transcript keeps text and request separate.
-                    if !turn.text.is_empty() {
-                        let text = std::mem::take(&mut turn.text);
-                        transcript.push(Message::Assistant(text));
+                    if !turn.blocks.is_empty() {
+                        let blocks = std::mem::take(&mut turn.blocks);
+                        transcript.push(Message::Assistant(blocks));
                     }
                     transcript.push(Message::ToolCall(call));
                 }
@@ -2453,8 +2463,8 @@ impl App {
             if let Some(turn) = self.turn.take() {
                 // Partial output is still worth keeping; the error
                 // entry goes below it so the failure is visible.
-                if !turn.text.is_empty() {
-                    self.messages.push(Message::Assistant(turn.text));
+                if !turn.blocks.is_empty() {
+                    self.messages.push(Message::Assistant(turn.blocks));
                 }
                 if let Some(err) = turn.error {
                     self.messages.push(Message::Error(err));
@@ -2563,8 +2573,16 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hi_core::message::AssistantBlock;
     use ratatui::crossterm::event::KeyEvent;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// `apply_thinking_choice` persists to the real
+    /// `~/.config/hi/settings.json`; tests that reach it hold this
+    /// lock so parallel threads cannot interleave read-modify-write
+    /// on the one path.
+    static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
     fn app() -> App {
         test_app()
@@ -2751,7 +2769,7 @@ mod tests {
             messages: vec![
                 Message::System("resumed 3 messages".into()),
                 Message::User("first".into()),
-                Message::Assistant("hi".into()),
+                Message::assistant("hi"),
                 Message::User("second".into()),
             ],
             session: None,
@@ -3125,7 +3143,7 @@ mod tests {
         let mut app = test_app();
         app.messages = vec![
             Message::User("hello there".into()),
-            Message::Assistant("hi".into()),
+            Message::assistant("hi"),
         ];
         app.usage_last_prompt = 1_000;
         let rows = app.context_panel_rows();
@@ -3140,6 +3158,28 @@ mod tests {
         app.usage_last_prompt = 0;
         let rows = app.context_panel_rows();
         assert!(rows[0].contains("estimated"), "{:?}", rows[0]);
+    }
+
+    #[test]
+    fn context_panel_buckets_thinking() {
+        let mut app = test_app();
+        app.messages = vec![
+            Message::User("hello there".into()),
+            Message::Assistant(vec![
+                AssistantBlock::Thinking {
+                    thinking: "pondering".into(),
+                    signature: Some("reasoning_content".into()),
+                    redacted: false,
+                },
+                AssistantBlock::Text("hi".into()),
+            ]),
+        ];
+        let rows = app.context_panel_rows();
+        let joined = rows.join("\n");
+        assert!(
+            joined.contains("thinking"),
+            "reasoning is real context: {joined}"
+        );
     }
 
     #[test]
@@ -3158,6 +3198,7 @@ mod tests {
 
     #[test]
     fn thinking_command_switches_level_directly() {
+        let _guard = SETTINGS_LOCK.lock().unwrap();
         let mut app = test_app();
         // The argument form never opens a modal — power path.
         app.run_command("thinking", "high");
@@ -3220,6 +3261,7 @@ mod tests {
 
     #[test]
     fn thinking_picker_enter_switches_wraps_and_persists() {
+        let _guard = SETTINGS_LOCK.lock().unwrap();
         let mut app = test_app();
         app.run_command("thinking", "");
         // Wrap up from auto (preselected: nothing set) lands on max.
@@ -4439,7 +4481,7 @@ mod tests {
         let mut app = app();
         let (_tx, rx) = std::sync::mpsc::channel();
         app.turn = Some(Turn {
-            text: String::new(),
+            blocks: Vec::new(),
             error: None,
             started_at: std::time::Instant::now(),
             rx,

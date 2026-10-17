@@ -788,7 +788,7 @@ mod tests {
     fn sample_messages() -> Vec<Message> {
         vec![
             Message::User("look at src".into()),
-            Message::Assistant("Checking. ".into()),
+            Message::assistant("Checking. "),
             Message::ToolCall(ToolCall {
                 id: "call_1".into(),
                 name: "read".into(),
@@ -810,7 +810,7 @@ mod tests {
             }),
             Message::Error("local annotation — persisted, never sent to the model".into()),
             Message::System("dim note".into()),
-            Message::Assistant("All done.".into()),
+            Message::assistant("All done."),
         ]
     }
 

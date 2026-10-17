@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod tests {
     use super::{ContextClass, ContextInput, context_report};
-    use crate::message::Message;
+    use crate::message::{AssistantBlock, Message};
     use crate::tool::ImageBlock;
     use crate::tool::{Tool, ToolCall, ToolRegistry, ToolResult};
     use std::sync::Arc;
@@ -28,7 +28,7 @@ mod tests {
     fn sample_history() -> Vec<Message> {
         vec![
             Message::User("hello there".into()),
-            Message::Assistant("hi".into()),
+            Message::assistant("hi"),
             Message::ToolCall(ToolCall {
                 id: "call_1".into(),
                 name: "probe".into(),
@@ -110,6 +110,37 @@ mod tests {
         let with = context_report(sample_input(&history, &registry), None).raw_total;
         assert_eq!(with, without, "Error/System never reach the wire");
     }
+
+    #[test]
+    fn reasoning_bills_as_its_own_class() {
+        let registry = sample_registry();
+        let history = vec![
+            Message::User("hello".into()),
+            Message::Assistant(vec![
+                AssistantBlock::Thinking {
+                    thinking: "pondering the question carefully".into(),
+                    signature: Some("reasoning_content".into()),
+                    redacted: false,
+                },
+                AssistantBlock::Text("answer".into()),
+            ]),
+        ];
+        let report = context_report(sample_input(&history, &registry), None);
+        let thinking = report
+            .classes
+            .iter()
+            .find(|(class, _)| *class == ContextClass::Thinking)
+            .expect("thinking row exists");
+        assert!(thinking.1 > 0, "reasoning carries real bytes");
+        let plain = context_report(sample_input(&sample_history(), &registry), None);
+        assert!(
+            !plain
+                .classes
+                .iter()
+                .any(|(class, _)| *class == ContextClass::Thinking),
+            "no reasoning, no row"
+        );
+    }
 }
 
 use crate::message::Message;
@@ -125,6 +156,9 @@ pub enum ContextClass {
     ToolSchemas,
     User,
     Assistant,
+    /// The assistant's reasoning, replaying as a flattened wire field
+    /// (AD-0048) — real context now, so it bills as its own class.
+    Thinking,
     ToolCalls,
     ToolResults,
     Images,
@@ -138,6 +172,7 @@ impl ContextClass {
             ContextClass::ToolSchemas => "tool schemas",
             ContextClass::User => "user",
             ContextClass::Assistant => "assistant",
+            ContextClass::Thinking => "thinking",
             ContextClass::ToolCalls => "tool calls",
             ContextClass::ToolResults => "tool results",
             ContextClass::Images => "images",
@@ -230,9 +265,19 @@ pub fn context_report(input: ContextInput, prompt_tokens: Option<u64>) -> Contex
         );
     }
     for wire in wire_messages(input.history) {
-        let Ok(value) = serde_json::to_value(&wire) else {
+        let Ok(mut value) = serde_json::to_value(&wire) else {
             continue;
         };
+        // Reasoning rides a flattened wire field (AD-0048): bill it as
+        // its own class and strip it before the other splits.
+        for field in crate::message::REASONING_FIELDS {
+            if let Some(payload) = value.as_object_mut().and_then(|o| o.remove(field)) {
+                add(
+                    ContextClass::Thinking,
+                    serde_json::to_vec(&payload).map(|v| v.len()).unwrap_or(0),
+                );
+            }
+        }
         // An assistant message carrying calls splits: the `tool_calls`
         // array bills as ToolCalls, the rest (content, scaffolding) as
         // Assistant.

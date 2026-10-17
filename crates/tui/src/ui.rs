@@ -511,8 +511,22 @@ fn draw_stream(frame: &mut Frame, area: Rect, app: &App) {
         // the same `width - 2` the assistant block uses — completing a
         // turn is visually a no-op, not a reflow jump.
         let inner = area.width.saturating_sub(2).max(1);
-        if !turn.text.is_empty() {
-            rows.extend(pad_plain(markdown_rows(&turn.text, inner, Style::new())));
+        // Blocks render in stream order (AD-0048): reasoning dimmed
+        // plain, prose as markdown — completing a turn stays a
+        // visual no-op.
+        for block in &turn.blocks {
+            match block {
+                hi_core::message::AssistantBlock::Text(text) => {
+                    rows.extend(pad_plain(markdown_rows(text, inner, Style::new())));
+                }
+                hi_core::message::AssistantBlock::Thinking { thinking, .. } => {
+                    rows.extend(pad_plain(wrap_plain(
+                        thinking,
+                        inner as usize,
+                        THEME.fg(Fg::Dim),
+                    )));
+                }
+            }
         }
         if let Some(err) = &turn.error {
             rows.extend(pad_plain(markdown_rows(err, inner, THEME.fg(Fg::Error))));
@@ -669,13 +683,22 @@ pub fn block_segments(
         // and one blank column each side (paddingX): two blank rows
         // separate any adjacent content rows, some tinted by their
         // block's background, some not.
-        TranscriptBlock::Message(Message::Assistant(text)) => {
-            // Plain markdown, terminal-default text, no fill (pi).
-            vec![Segment::Text(pad_plain(markdown_rows(
-                text,
-                inner as u16,
-                Style::new(),
-            )))]
+        TranscriptBlock::Message(Message::Assistant(blocks)) => {
+            // Prose as plain markdown, terminal-default text, no fill
+            // (pi); reasoning dimmed plain (AD-0048) — quieter than
+            // the reply, never hidden.
+            let mut rows = Vec::new();
+            for block in blocks {
+                match block {
+                    hi_core::message::AssistantBlock::Text(text) => {
+                        rows.extend(markdown_rows(text, inner as u16, Style::new()));
+                    }
+                    hi_core::message::AssistantBlock::Thinking { thinking, .. } => {
+                        rows.extend(wrap_plain(thinking, inner, THEME.fg(Fg::Dim)));
+                    }
+                }
+            }
+            vec![Segment::Text(pad_plain(rows))]
         }
         TranscriptBlock::Message(Message::System(text)) => vec![Segment::Text(pad_plain(
             wrap_plain(text, inner, THEME.fg(Fg::Dim)),
@@ -1251,12 +1274,51 @@ mod tests {
     }
 
     #[test]
+    fn the_live_area_streams_thinking_dimmed_ahead_of_prose() {
+        use crate::app::test_app;
+        let mut app = test_app();
+        let mut turn = crate::app::Turn::with_text("the reply");
+        turn.blocks.insert(
+            0,
+            hi_core::message::AssistantBlock::Thinking {
+                thinking: "quiet pondering".into(),
+                signature: Some("reasoning_content".into()),
+                redacted: false,
+            },
+        );
+        app.turn = Some(turn);
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend_mut().buffer().clone();
+        let row_text = |y: u16| {
+            (0..60u16)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        let rows: Vec<String> = (0..20u16).map(row_text).collect();
+        let pondering = rows
+            .iter()
+            .position(|r| r.contains("quiet pondering"))
+            .expect("thinking streams live: {rows:?}");
+        let reply = rows
+            .iter()
+            .position(|r| r.contains("the reply"))
+            .expect("prose follows: {rows:?}");
+        assert!(
+            pondering < reply,
+            "thinking renders in stream order, above the prose"
+        );
+    }
+
+    #[test]
     fn the_context_panel_renders_in_the_menu_zone() {
         use crate::app::test_app;
         let mut app = test_app();
         app.messages = vec![
             Message::User("hello there".into()),
-            Message::Assistant("hi".into()),
+            Message::assistant("hi"),
         ];
         app.usage_last_prompt = 500;
         app.run_command("context", "");
@@ -1609,10 +1671,7 @@ mod tests {
     #[test]
     fn every_block_insets_its_content_one_column_each_side() {
         // Transparent: plain spaces flank the content.
-        let rows = block_rows(
-            &TranscriptBlock::Message(Message::Assistant("hello".into())),
-            30,
-        );
+        let rows = block_rows(&TranscriptBlock::Message(Message::assistant("hello")), 30);
         assert_eq!(rows[1].spans.len(), 3);
         assert_eq!(rows[1].spans[0].content, " ");
         assert_eq!(rows[1].spans[1].content, "hello");
@@ -1630,7 +1689,7 @@ mod tests {
     #[test]
     fn assistant_block_has_no_fill_and_its_own_padding() {
         let rows = block_rows(
-            &TranscriptBlock::Message(Message::Assistant("plain reply".into())),
+            &TranscriptBlock::Message(Message::assistant("plain reply")),
             30,
         );
         // paddingY: one plain blank row above and below; paddingX:
@@ -1648,10 +1707,7 @@ mod tests {
 
     #[test]
     fn assistant_markdown_renders_headings() {
-        let rows = block_rows(
-            &TranscriptBlock::Message(Message::Assistant("# Plan".into())),
-            30,
-        );
+        let rows = block_rows(&TranscriptBlock::Message(Message::assistant("# Plan")), 30);
         // rows[1] spans: [paddingX " ", heading, paddingX " "].
         assert!(
             rows[1].spans[1]
