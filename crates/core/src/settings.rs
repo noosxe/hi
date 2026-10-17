@@ -59,7 +59,7 @@ pub struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_retention: Option<u64>,
     /// Main-loop tool-round cap, resolved once at startup: absent means
-    /// the built-in default (`agent::DEFAULT_MAX_TOOL_ROUNDS`, 16);
+    /// the built-in default (`agent::DEFAULT_MAX_TOOL_ROUNDS`, 32);
     /// when present it must be at least 1 (zero fails every turn).
     /// The subagent's own cap is a different knob — the `subagent`
     /// tool's `max_rounds` argument, defaulting to
