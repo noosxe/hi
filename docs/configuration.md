@@ -79,12 +79,20 @@ A credential *source*, not necessarily a literal:
 Opt-in per provider, default **off**. When `true`, a chat-request body
 of at least one kibibyte goes out gzip-compressed
 (`Content-Encoding: gzip`); smaller bodies ride identity, since deflate
-overhead can exceed the bytes saved. All the major clouds decode it
-(verified against OpenAI, Anthropic, Z.ai, OpenRouter, and Groq); a
-server that silently ignores request content-encoding would feed the
-compressed bytes to the model as the prompt — which is why hi never
-guesses. The knob touches request bodies only; response compression is
-negotiated by the HTTP client regardless.
+overhead can exceed the bytes saved. The knob touches request bodies
+only; response compression is negotiated by the HTTP client regardless.
+
+Decoding is provider-specific and **hard to verify from outside**: the
+major clouds authenticate before parsing the body (a no-auth probe with
+plain *invalid* JSON still 401s), so no unauthenticated probe can
+witness decoding at all. What is actually attested: Z.ai's coding
+endpoint `api.z.ai/api/coding/paas/v4` **rejects** gzip'd bodies —
+turns fail with 400 because the compressed bytes reach the JSON parser
+(observed 2026-10-20) — while Anthropic decodes them (Claude Code
+ships gzip'd requests). Everything else is unverified. The failure
+signature is quiet: 400s start exactly when the knob turns on. The fix
+is turning the knob back off; hi never guesses and does not retry a
+400 (too many other causes make a retry indistinguishable).
 
 ## `settings.json`
 

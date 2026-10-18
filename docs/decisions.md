@@ -1643,3 +1643,18 @@ gzip feature (which is response-side); the FakeApi test double records
 gzip'd request bodies decoded, so tests assert on the payload a
 decompressing server would hand its parser.
 
+**AD-0052 correction (2026-10-20): the verification claim was
+overstated.** The 401-parity probes behind "all five major clouds
+accept gzip'd request bodies" proved nothing: the discriminator — a
+plain *invalid* JSON body, no key — also 401s, which shows auth runs
+before body parsing, so a server that never decodes request bodies
+returns the same 401 as one that decodes fine. The first real test was
+the maintainer's daily driver: `api.z.ai/api/coding/paas/v4` 400s on a
+gzip'd body with a valid key — the compressed bytes reach the JSON
+parser. The default-off ruling kept a bad verification from shipping
+as a break: the knob was opt-in, the user turned it off, done. Docs now
+claim only what is attested: Anthropic decodes (Claude Code ships
+gzip'd requests); Z.ai's coding endpoint does not; the rest is
+unverified. The probe lesson generalizes: an endpoint that 401s
+invalid JSON without a key cannot witness body handling at all.
+
