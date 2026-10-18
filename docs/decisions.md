@@ -1658,3 +1658,23 @@ gzip'd requests); Z.ai's coding endpoint does not; the rest is
 unverified. The probe lesson generalizes: an endpoint that 401s
 invalid JSON without a key cannot witness body handling at all.
 
+**AD-0053 (2026-10-20): harness turns are a message variant, not a
+string prefix.** Resuming a `taskTurns` session put the auto-trigger
+mandate into the ↑ prompt-history ring: AD-0022 marked the turn with a
+text prefix, but the seeded ring derives from transcript
+`Message::User` lines and could not tell machine-spoken from
+human-typed. The differentiation is now structural: `Message::Harness`
+— a turn hi itself spoke to the model as the user (the mandate, the
+subagent's brief). Rulings: the variant names the *speaker*, not the
+occasion, so the next harness-spoken turn already has a home; the wire
+is unchanged (same role, same text — the `(auto-trigger)` prefix stays
+as the model's signal); session records gain a record-level
+`origin: "harness"` while the payload stays `{"user": …}`, so old
+binaries read new files unchanged and new binaries read old files
+unchanged (the record parser navigates by key, so the extra key is
+invisible to them); the transcript renders harness turns dim like
+system notes; prompt history and the resume picker's preview treat
+them as not-yours. The prefix-as-marker idea generalizes badly — a
+marker the model must see and a marker the harness must act on are
+different jobs, and only one of them belongs in the text.
+

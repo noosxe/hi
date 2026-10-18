@@ -782,7 +782,7 @@ pub(crate) fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
     };
     for message in history {
         match message {
-            Message::User(text) => {
+            Message::User(text) | Message::Harness(text) => {
                 group.flush(&mut out);
                 out.push(WireMessage::text("user", text));
             }
@@ -1194,6 +1194,16 @@ mod tests {
             !request.to_ascii_lowercase().contains("content-encoding:"),
             "no compression without the opt-in: {request}"
         );
+    }
+
+    #[test]
+    fn harness_turns_meet_the_wire_as_user_turns() {
+        // WireMessage compares through its wire form: same role, same
+        // content, byte-for-byte the request the provider sees.
+        let as_user = serde_json::to_value(wire_messages(&[Message::User("go".into())])).unwrap();
+        let as_harness =
+            serde_json::to_value(wire_messages(&[Message::Harness("go".into())])).unwrap();
+        assert_eq!(as_user, as_harness, "the model sees a normal user turn");
     }
 
     #[test]

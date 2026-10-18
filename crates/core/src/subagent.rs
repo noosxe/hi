@@ -205,7 +205,7 @@ impl SubagentRunner {
             transcript = None;
         }
         if let Some(session) = transcript.as_mut() {
-            let _ = session.append(&[Message::User(spec.prompt.clone())]);
+            let _ = session.append(&[Message::Harness(spec.prompt.clone())]);
         }
         // Name the artifact on the result (#125): capture the path
         // while the handle exists, before the drain takes ownership.
@@ -229,7 +229,7 @@ impl SubagentRunner {
                 .with_tools(Arc::clone(&registry))
                 .with_telemetry(self.telemetry),
         );
-        let history = vec![Message::User(spec.prompt.clone())];
+        let history = vec![Message::Harness(spec.prompt.clone())];
         let max_rounds = spec.max_tool_rounds.unwrap_or(SUBAGENT_MAX_TOOL_ROUNDS);
         let rx = spawn_agent_turn(
             provider,
@@ -386,7 +386,7 @@ mod tests {
         assert_eq!(loaded.header.kind.as_deref(), Some("subagent"));
         assert_eq!(loaded.header.parent.as_deref(), Some("parent-9"));
         // The transcript mirrors the loop's working history.
-        assert_eq!(loaded.messages[0], Message::User("dig".into()));
+        assert_eq!(loaded.messages[0], Message::Harness("dig".into()));
         assert_eq!(loaded.messages[1], Message::assistant("checking"));
         assert!(matches!(loaded.messages[2], Message::ToolCall(_)));
         assert!(matches!(loaded.messages[3], Message::ToolResult(_)));

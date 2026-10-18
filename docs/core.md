@@ -18,9 +18,21 @@ Selected}`), not re-exported at the root.
 
 ## message.rs — the transcript entry type
 
-`enum Message { User(String), Assistant(Vec<AssistantBlock>), ToolCall(ToolCall), ToolResult(ToolResult), Error(String), System(String) }`
-plus `Message::text(&self) -> Option<String>` (the four prose variants; the tool variants carry
+`enum Message { User(String), Harness(String), Assistant(Vec<AssistantBlock>), ToolCall(ToolCall), ToolResult(ToolResult), Error(String), System(String) }`
+plus `Message::text(&self) -> Option<String>` (the five prose variants; the tool variants carry
 structured payloads instead).
+
+`Harness` (AD-0053) is a turn hi itself spoke to the model as the user —
+no human wrote it: the task-completion mandate, the subagent's brief.
+The wire sees a normal user turn (same role, same text; the `(auto-trigger)`
+prefix inside the text is how the model knows). In session files the
+payload stays `{"user": …}` — a distinct key would break old binaries on
+an unknown externally-tagged variant — and the marker rides the record
+level instead: `{"type":"message","message":{…},"origin":"harness"}`.
+Old binaries ignore the key and read the line as a plain user turn; new
+binaries reconstruct `Harness`. `Message` serializes through a
+hand-written impl (`MessagePayloadOut`) precisely so `Harness` can share
+the `user` payload; deserialization keeps the `MessagePayload` shim.
 
 `AssistantBlock` (AD-0048) is `Text(String)` or `Thinking { thinking, signature,
 redacted }` — the assistant's prose and reasoning in stream order.

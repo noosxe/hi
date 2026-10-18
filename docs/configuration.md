@@ -152,7 +152,10 @@ is turning the knob back off; hi never guesses and does not retry a
 - `taskTurns` is the orchestrator opt-in (#72, AD-0022): when a
   background task finishes and no turn is in flight, hi starts a turn
   whose payload carries the completion notes, marked
-  `(auto-trigger)`. Default off — a turn spends the user's tokens, so
+  `(auto-trigger)` and recorded structurally as a harness turn
+  (AD-0053) — it renders dim, never lands in prompt history, and the
+  session record carries `origin: "harness"` so the differentiation
+  survives resume. Default off — a turn spends the user's tokens, so
   only the human flips this. A per-session budget (10 turns) bounds
   completion→turn→spawn→completion chains; when it runs out hi says so
   once in the transcript and further completions ride the human's next

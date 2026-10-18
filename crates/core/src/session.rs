@@ -748,10 +748,19 @@ fn parse_line(line: &str) -> Result<Entry, String> {
         )),
         Some("message") => {
             let message = value.get("message").ok_or("message line missing payload")?;
-            Ok(Entry::Message(
-                serde_json::from_value(message.clone())
-                    .map_err(|err| format!("malformed message: {err}"))?,
-            ))
+            let mut parsed: Message = serde_json::from_value(message.clone())
+                .map_err(|err| format!("malformed message: {err}"))?;
+            // The record-level origin marker (AD-0053): a user
+            // payload spoken by the harness itself. Old files carry
+            // no marker and stay `User`. A marker over any other
+            // payload is ignored — the payload is the truth.
+            if value.get("origin").and_then(|origin| origin.as_str()) == Some("harness") {
+                parsed = match parsed {
+                    Message::User(text) => Message::Harness(text),
+                    other => other,
+                };
+            }
+            Ok(Entry::Message(parsed))
         }
         Some("usage") => {
             let usage = value.get("usage").ok_or("usage line missing payload")?;
@@ -784,7 +793,14 @@ fn header_line(header: &SessionHeader) -> Result<String, String> {
 fn message_line(message: &Message) -> Result<String, String> {
     let payload =
         serde_json::to_value(message).map_err(|err| format!("cannot serialize message: {err}"))?;
-    Ok(serde_json::json!({ "type": "message", "message": payload }).to_string())
+    let mut line = serde_json::json!({ "type": "message", "message": payload });
+    // A harness turn keeps the user payload (old binaries read the
+    // line as a plain user turn) and marks itself at the record
+    // level (AD-0053).
+    if matches!(message, Message::Harness(_)) {
+        line["origin"] = serde_json::json!("harness");
+    }
+    Ok(line.to_string())
 }
 
 fn epoch_millis() -> u64 {
@@ -844,6 +860,34 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hi-session-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn harness_records_round_trip_through_the_origin_marker() {
+        let line = message_line(&Message::Harness("act on the notes".into())).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            value["origin"], "harness",
+            "the marker rides the record: {line}"
+        );
+        assert_eq!(
+            value["message"],
+            serde_json::json!({ "user": "act on the notes" })
+        );
+        let Entry::Message(Message::Harness(text)) = parse_line(&line).unwrap() else {
+            panic!("expected a harness turn");
+        };
+        assert_eq!(text, "act on the notes");
+    }
+
+    #[test]
+    fn a_plain_user_record_has_no_origin_and_stays_user() {
+        let line = message_line(&Message::User("hello".into())).unwrap();
+        assert!(!line.contains("origin"), "human turns are unmarked: {line}");
+        let Entry::Message(Message::User(text)) = parse_line(&line).unwrap() else {
+            panic!("expected a user turn");
+        };
+        assert_eq!(text, "hello");
     }
 
     fn sample_messages() -> Vec<Message> {
