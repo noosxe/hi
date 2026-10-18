@@ -13,7 +13,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write as _};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
@@ -60,6 +60,9 @@ pub struct OpenAiCompatProvider {
     /// a key and a stable prefix route to the same server-side cache.
     /// `None` (no session) sends nothing.
     cache_key: Option<String>,
+    /// The provider's `requestCompression` opt-in (AD-0052): gzip the
+    /// chat-request body when it clears the size floor.
+    request_compression: bool,
 }
 
 impl std::fmt::Debug for OpenAiCompatProvider {
@@ -77,6 +80,7 @@ impl std::fmt::Debug for OpenAiCompatProvider {
             )
             .field("thinking_level", &self.thinking_level.map(|l| l.name()))
             .field("tools", &self.tools.len())
+            .field("request_compression", &self.request_compression)
             .finish()
     }
 }
@@ -126,6 +130,7 @@ impl OpenAiCompatProvider {
             tools: Arc::new(ToolRegistry::new()),
             telemetry: false,
             cache_key: None,
+            request_compression: false,
         }
     }
 
@@ -147,6 +152,7 @@ impl OpenAiCompatProvider {
             tools: Arc::new(ToolRegistry::new()),
             telemetry: false,
             cache_key: None,
+            request_compression: cfg.request_compression,
         }
     }
 
@@ -287,8 +293,17 @@ impl OpenAiCompatProvider {
         for (name, value) in self.wire_headers() {
             request = request.header(name, value);
         }
+        // Serialize once, then optionally gzip (AD-0052): the knob
+        // is per provider, bodies under the floor ride identity.
+        let raw = serde_json::to_vec(&payload)
+            .map_err(|err| format!("cannot serialize request: {err}"))?;
+        let (body, gzipped) = encode_request_body(raw, self.request_compression);
+        if gzipped {
+            request = request.header("content-encoding", "gzip");
+        }
         let response = request
-            .send_json(&payload)
+            .header("content-type", "application/json")
+            .send(body)
             .map_err(|err| describe("chat request", err))?;
 
         // The body reader is a plain `Read`; buffering turns it into
@@ -354,6 +369,30 @@ impl OpenAiCompatProvider {
 /// only works if the worker reaches a checkpoint). The stream itself
 /// stays unbounded on purpose — turns think for minutes — and rides
 /// the dropped receiver for cancellation.
+/// Bodies smaller than this ride identity even when compression is
+/// enabled: deflate overhead can exceed the bytes saved on small
+/// JSON, and no cloud turn is this small anyway.
+const COMPRESS_MIN_BODY: usize = 1024;
+
+/// Gzip the request body when the provider opted in and the body
+/// clears [`COMPRESS_MIN_BODY`]. Returns the bytes to send and
+/// whether `Content-Encoding: gzip` must accompany them. A
+/// compression failure degrades to identity — the encoder writes to
+/// an in-memory buffer, so in practice this never triggers.
+fn encode_request_body(body: Vec<u8>, compress: bool) -> (Vec<u8>, bool) {
+    if !compress || body.len() < COMPRESS_MIN_BODY {
+        return (body, false);
+    }
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    if encoder.write_all(&body).is_err() {
+        return (body, false);
+    }
+    match encoder.finish() {
+        Ok(gzipped) => (gzipped, true),
+        Err(_) => (body, false),
+    }
+}
+
 fn bounded_agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(15)))
@@ -982,6 +1021,7 @@ mod tests {
     use crate::test_support::{EchoTool, FakeApi, json_response, sse_response};
     use crate::{Event, spawn_agent_turn};
     use std::collections::BTreeMap;
+    use std::io::Read as _;
     use std::sync::Arc;
 
     #[test]
@@ -1069,6 +1109,94 @@ mod tests {
     }
 
     #[test]
+    fn big_opted_in_request_bodies_compress_and_round_trip() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "x".repeat(4096)}]
+        }))
+        .unwrap();
+        let (encoded, gzipped) = encode_request_body(body.clone(), true);
+        assert!(gzipped);
+        assert!(
+            encoded.len() < body.len(),
+            "gzip wins on repetitive JSON: {} -> {}",
+            body.len(),
+            encoded.len()
+        );
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(&encoded[..])
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(decoded, body);
+    }
+
+    #[test]
+    fn small_or_disabled_bodies_ride_identity() {
+        let body = b"{}".to_vec();
+        let (encoded, gzipped) = encode_request_body(body.clone(), true);
+        assert!(!gzipped, "under the floor, overhead beats the savings");
+        assert_eq!(encoded, body);
+
+        let big = vec![b'x'; COMPRESS_MIN_BODY];
+        let (encoded, gzipped) = encode_request_body(big, false);
+        assert!(!gzipped, "the knob is off: nothing compresses");
+        assert_eq!(encoded, vec![b'x'; COMPRESS_MIN_BODY]);
+    }
+
+    #[test]
+    fn an_opted_in_provider_gzips_big_bodies_the_server_can_decode() {
+        let api = FakeApi::start(sse_response(&[
+            "{\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}",
+            "{\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}",
+            "[DONE]",
+        ]));
+        let cfg = ProviderConfig {
+            base_url: api.base_url.clone(),
+            api_key: None,
+            models: Vec::new(),
+            request_compression: true,
+        };
+        let provider = OpenAiCompatProvider::from_config(&cfg, "m");
+        let events: Vec<Event> = spawn_turn(Arc::new(provider), &[Message::User("x".repeat(4096))])
+            .iter()
+            .collect();
+        assert_eq!(events.last(), Some(&Event::TurnEnd), "{events:?}");
+
+        // FakeApi records the *decoded* body, so the assertion sees
+        // exactly what a decompressing server would hand its parser.
+        let request = api.first_request();
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("content-encoding: gzip"),
+            "the body was compressed: {request}"
+        );
+        let body = request.split("\r\n\r\n").nth(1).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(body)
+            .unwrap_or_else(|err| panic!("decoded body parses: {err}\n{body}"));
+        assert_eq!(parsed["model"], "m");
+    }
+
+    #[test]
+    fn compression_off_by_default_keeps_the_wire_identity() {
+        let api = FakeApi::start(sse_response(&[
+            "{\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}",
+            "{\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}",
+            "[DONE]",
+        ]));
+        let provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "m");
+        let events: Vec<Event> = spawn_turn(Arc::new(provider), &[Message::User("hello".into())])
+            .iter()
+            .collect();
+        assert_eq!(events.last(), Some(&Event::TurnEnd), "{events:?}");
+        let request = api.first_request();
+        assert!(
+            !request.to_ascii_lowercase().contains("content-encoding:"),
+            "no compression without the opt-in: {request}"
+        );
+    }
+
+    #[test]
     fn error_messages_are_never_sent_to_the_model() {
         let history = vec![
             Message::User("question".into()),
@@ -1087,6 +1215,7 @@ mod tests {
         let cfg = ProviderConfig {
             base_url: "http://127.0.0.1:1/v1".into(),
             api_key: None,
+            request_compression: false,
             models: vec![ModelConfig {
                 id: "listed".into(),
                 ..Default::default()
@@ -1130,6 +1259,7 @@ mod tests {
         let cfg = ProviderConfig {
             base_url: api.base_url.clone(),
             api_key: Some("sekrit".into()),
+            request_compression: false,
             models: vec![ModelConfig {
                 id: "test-model".into(),
                 thinking_level_map: Some(

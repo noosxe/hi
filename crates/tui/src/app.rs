@@ -2774,6 +2774,7 @@ mod tests {
             hi_core::ProviderConfig {
                 base_url: "http://x/v1".into(),
                 api_key: None,
+                request_compression: false,
                 models: vec![hi_core::ModelConfig {
                     id: "mock".into(),
                     context_window: Some(1_000_000),
@@ -3709,6 +3710,7 @@ mod tests {
             hi_core::ProviderConfig {
                 base_url: "http://x/v1".into(),
                 api_key: None,
+                request_compression: false,
                 models: vec![
                     hi_core::ModelConfig {
                         id: "blind".into(),
@@ -4448,6 +4450,7 @@ mod tests {
         let provider = hi_core::config::ProviderConfig {
             base_url: "http://localhost:1/v1".into(),
             api_key: None,
+            request_compression: false,
             models: vec![hi_core::config::ModelConfig {
                 id: "mock-2".into(),
                 name: None,

@@ -36,6 +36,13 @@ pub struct ProviderConfig {
     /// Models reachable at this endpoint.
     #[serde(default)]
     pub models: Vec<ModelConfig>,
+    /// Whether chat-request bodies of at least one kibibyte go out
+    /// gzip-compressed (`Content-Encoding: gzip`, AD-0052). Off by
+    /// default: a server that silently ignores request
+    /// content-encoding would feed the compressed bytes to the model
+    /// as the body. The major clouds all decode it.
+    #[serde(default, rename = "requestCompression")]
+    pub request_compression: bool,
 }
 
 fn default_vision() -> bool {
@@ -238,6 +245,19 @@ mod tests {
         // only an explicit `vision: false` opts out.
         assert!(models[0].vision);
         assert!(!models[1].vision);
+    }
+
+    #[test]
+    fn request_compression_is_an_explicit_per_provider_opt_in() {
+        // Default off: a server that silently ignores request
+        // content-encoding would feed compressed bytes to the model
+        // as the body (AD-0052). Only the explicit key opts in.
+        let raw = r#"{"providers":{
+            "quiet":{"baseUrl":"http://x/v1"},
+            "loud":{"baseUrl":"http://x/v1","requestCompression":true}}}"#;
+        let cfg: ModelsConfig = serde_json::from_str(raw).unwrap();
+        assert!(!cfg.providers.get("quiet").unwrap().request_compression);
+        assert!(cfg.providers.get("loud").unwrap().request_compression);
     }
 
     #[test]

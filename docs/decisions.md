@@ -1627,3 +1627,19 @@ welcome seed was synthetic and width-invariant, but `rebuild_from_cursor`
 re-derived every block including index 0 — so the first frame's width
 sync clobbered "hi · say something" into blank `System("")` rows. The
 seed is now never re-derived; a regression test holds the line.
+
+**AD-0052 (2026-10-20): request compression is a per-provider opt-in.**
+Chat-request bodies are the only large payloads hi ships (they scale
+with context); all five major clouds accept `Content-Encoding: gzip` on
+requests — verified by 401-parity probes with a valid gzip'd body and
+no key — but a server that silently ignores request content-encoding
+would feed gzip bytes to the model as the prompt. So the knob is
+`requestCompression` in `models.json`, default off: config's "hi has no
+opinion about which services exist" rules out host-sniffing auto-on,
+and default-on would break the long tail. Bodies under 1 KiB
+(`COMPRESS_MIN_BODY`) ride identity, since deflate overhead can exceed
+the savings on small JSON. flate2 rides the tree via ureq's default
+gzip feature (which is response-side); the FakeApi test double records
+gzip'd request bodies decoded, so tests assert on the payload a
+decompressing server would hand its parser.
+
