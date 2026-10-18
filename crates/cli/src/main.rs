@@ -219,24 +219,11 @@ fn dispatch(cli: Cli) -> ExitCode {
         Err(err) => return fail(&err),
     };
 
-    // The `/model` picker's menu, gathered once at startup (each
-    // provider bounded by the 10s discovery timeout). Providers that
-    // fail or list nothing simply don't appear; their errors are
-    // visible through --list-models.
-    let catalog = Catalog {
-        entries: target
-            .config
-            .providers
-            .iter()
-            .filter_map(|(name, entry)| {
-                entry
-                    .list_model_ids()
-                    .ok()
-                    .filter(|models| !models.is_empty())
-                    .map(|models| (name.clone(), models))
-            })
-            .collect(),
-    };
+    // The `/model` picker's menu, gathered once at startup — the same
+    // policy /reload uses (AD-0054). Providers that fail or list
+    // nothing simply don't appear; their errors are visible through
+    // --list-models.
+    let catalog = Catalog::from_config(&target.config);
 
     let cwd = match std::env::current_dir() {
         Ok(cwd) => cwd,
@@ -429,7 +416,7 @@ fn resolve_target(
         settings.telemetry_enabled(),
         // The `settings.subagentTranscripts` opt-in (#116): record each
         // run as its own session file under the project's directory.
-        if settings.subagent_transcripts {
+        if settings.subagent_transcripts_enabled() {
             hi_core::session::sessions_dir()
         } else {
             None

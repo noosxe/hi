@@ -1678,3 +1678,26 @@ them as not-yours. The prefix-as-marker idea generalizes badly — a
 marker the model must see and a marker the harness must act on are
 different jobs, and only one of them belongs in the text.
 
+**AD-0054 (2026-10-20): `/reload` — files win when they speak.**
+Editing `models.json` or `settings.json` mid-session meant restart;
+the running session kept its startup-frozen provider, catalog, and
+resolved settings. `/reload` re-reads both files and applies what
+they say, with per-file independence (a broken file keeps its old
+state and says so — reload never kills the session, and a mid-turn
+turn finishes on its own provider `Arc`). Settings follow "files win
+when they speak": present keys apply live (`thinking`, `taskTurns`,
+`images`, `maxToolRounds`, `subagentTranscripts`, `telemetry`);
+silence keeps the live value, which forced `subagentTranscripts` from
+a plain `bool` to `Option<bool>` — "off" must stay distinguishable
+from unspoken. Startup-only knobs (`defaultModel`, `defaultTools`,
+`subagents`, `sessionRetention`) are named in the note, not applied.
+Models: the catalog gather moved out of `crates/cli` into
+`Catalog::from_config`, shared by startup and `/reload`; the active
+provider rebuilds through the same path a `/model` switch uses, so
+baseUrl and `$VAR` key edits reach the next turn — the credential
+rule becomes "read at launch and on explicit `/reload`" — and a
+vanished model keeps the old provider running until the next
+`/model`. The catalog's discovery re-runs synchronously with the
+same 10s-per-provider bound as startup; if that ever hurts, the
+escape hatch is incremental discovery, not a semantics change.
+

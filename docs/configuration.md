@@ -68,8 +68,9 @@ configs never break older builds (tested for both files).
 
 A credential *source*, not necessarily a literal:
 
-- `"$NAME"` / `"${NAME}"` — read from the environment **once, at launch**;
-  mid-session changes do nothing (deliberate: predictable, testable)
+- `"$NAME"` / `"${NAME}"` — read from the environment **at launch and
+  on explicit `/reload`** (AD-0054); other mid-session changes do
+  nothing (deliberate: predictable, testable)
 - missing variable → empty string → **no `Authorization` header sent**
 - literal string → used as-is
 - omitted → no `Authorization` header (some local servers reject its presence)
@@ -145,6 +146,33 @@ is turning the knob back off; hi never guesses and does not retry a
   the model never sees it, so there is no schema entry and no call to
   reject. Startup policy only; moot keys compose (off also means no
   transcripts, since nothing runs).
+
+## `/reload`
+
+Both files are re-read mid-session by `/reload` (AD-0054), each
+independently: one that fails to read or parse keeps its previous
+state and the transcript note says so — reload never kills the
+session.
+
+- **Files win when they speak.** A key present in `settings.json`
+  applies live: `thinking`, `taskTurns`, `images`, `maxToolRounds`,
+  `subagentTranscripts`, `telemetry`. A key the file drops keeps its
+  live value — removing `thinking` from the file does not zero the
+  session's level. That is why `subagentTranscripts` reads through an
+  `Option`: "off" must stay distinguishable from unspoken.
+- **Startup-only stays startup-only**: `defaultModel`,
+  `defaultTools`, `subagents`, and `sessionRetention` are named in
+  the note ("startup-only kept: …") but not applied — the tool
+  registry and the retention pass are built once at startup.
+- **Models apply when they still fit.** The `/model` catalog re-runs
+  with the startup gather; if the session's `provider/model` still
+  resolves, the provider rebuilds from the new entry (baseUrl,
+  `apiKey` — including `$VAR` re-expansion — and per-model knobs
+  reach the next turn). If it vanished, the old provider keeps
+  running and the note says so until you `/model` somewhere valid.
+- An in-flight turn is untouched: it holds its own provider `Arc`
+  and finishes on the wire settings it started with.
+
 - `/settings` flips what the running session can flip — `taskTurns`,
   `images` — without touching this file; Ctrl-S on the board writes
   one field back here (AD-0023). The file stays the startup source of

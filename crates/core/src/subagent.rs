@@ -101,8 +101,9 @@ pub struct SubagentRunner {
     parent: Arc<Mutex<Option<String>>>,
     /// When set (the `settings.subagentTranscripts` opt-in), every run
     /// records its own ordinary session file under this sessions root.
-    /// `None` records nothing — the default.
-    transcripts: Option<PathBuf>,
+    /// `None` records nothing — the default. Behind the lock so
+    /// `/reload` can restamp it live (AD-0054).
+    transcripts: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl SubagentRunner {
@@ -119,7 +120,7 @@ impl SubagentRunner {
             gate: None,
             current: Arc::new(Mutex::new(None)),
             parent: Arc::new(Mutex::new(None)),
-            transcripts,
+            transcripts: Arc::new(Mutex::new(transcripts)),
         }
     }
 
@@ -139,6 +140,18 @@ impl SubagentRunner {
     /// `/resume`). The transcript header's lineage.
     pub fn stamp_session(&self, parent: Option<String>) {
         *self.parent.lock().unwrap() = parent;
+    }
+
+    /// Record the transcripts root — `/reload` restamps it when the
+    /// re-read `settings.json` speaks about `subagentTranscripts`
+    /// (AD-0054).
+    pub fn stamp_transcripts(&self, transcripts: Option<PathBuf>) {
+        *self.transcripts.lock().unwrap() = transcripts;
+    }
+
+    /// The transcripts root, for introspection and tests.
+    pub fn transcripts_dir(&self) -> Option<PathBuf> {
+        self.transcripts.lock().unwrap().clone()
     }
 
     fn stamped_parent(&self) -> Option<String> {
@@ -183,9 +196,9 @@ impl SubagentRunner {
         // full disk never fails the run. The first message is the
         // prompt; the drain below mirrors the loop's own working
         // history event by event.
-        let mut transcript = self.transcripts.as_ref().and_then(|root| {
+        let mut transcript = self.transcripts_dir().and_then(|root| {
             Session::start_subagent_in(
-                root,
+                &root,
                 &self.cwd,
                 &provider_name,
                 &model,
@@ -342,6 +355,22 @@ impl SubagentRunner {
 mod tests {
     use super::*;
     use crate::test_support::{FakeApi, sse_response};
+
+    #[test]
+    fn transcripts_restamp_follows_the_setting() {
+        // /reload restamps the transcripts root when the file's
+        // subagentTranscripts key speaks (AD-0054).
+        let runner =
+            SubagentRunner::new(ModelsConfig::default(), std::env::temp_dir(), false, None);
+        assert!(runner.transcripts_dir().is_none());
+        runner.stamp_transcripts(Some(std::path::PathBuf::from("/tmp/roots")));
+        assert_eq!(
+            runner.transcripts_dir().as_deref(),
+            Some(std::path::Path::new("/tmp/roots"))
+        );
+        runner.stamp_transcripts(None);
+        assert!(runner.transcripts_dir().is_none());
+    }
 
     #[test]
     fn transcripts_record_when_enabled() {

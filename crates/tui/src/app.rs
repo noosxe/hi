@@ -1686,10 +1686,120 @@ impl App {
             "thinking" => self.command_thinking(args),
             "name" => self.command_name(args),
             "new" => self.command_new(args),
+            "reload" => self.command_reload(),
             other => self
                 .messages
                 .push(Message::System(format!("unknown command: /{other}"))),
         }
+    }
+
+    /// `/reload`: re-read `models.json` and `settings.json` and apply
+    /// what they say to the live session (AD-0054). Per-file
+    /// independence: a file that fails to read or parse keeps its old
+    /// state and the note says so — reload never kills the session.
+    /// Settings: files win when they speak; silence keeps the live
+    /// value. Startup-only knobs (tool bundle, subagents switch,
+    /// session retention, the saved default model) stay startup-only
+    /// and are named in the note. Models: the catalog re-runs with
+    /// startup's discovery policy, and the active provider rebuilds
+    /// from the new config when its `provider/model` still resolves —
+    /// a vanished model keeps the old provider until the next
+    /// `/model`. Mid-turn is fine: the in-flight turn holds its own
+    /// provider `Arc` and finishes on it.
+    fn command_reload(&mut self) {
+        let mut parts: Vec<String> = Vec::new();
+
+        // Settings first: the provider rebuild below re-attaches
+        // thinking and telemetry, so the file's values must land
+        // before it runs.
+        match Settings::load() {
+            Ok(settings) => {
+                let mut applied: Vec<&'static str> = Vec::new();
+                if settings.thinking.is_some() {
+                    self.thinking = settings.thinking;
+                    applied.push("thinking");
+                }
+                if let Some(on) = settings.task_turns {
+                    self.task_turns = on;
+                    applied.push("taskTurns");
+                }
+                if let Some(on) = settings.images {
+                    // The gate itself re-resolves on the next provider
+                    // rebuild — the same shape as the settings board.
+                    self.images_setting = on;
+                    applied.push("images");
+                }
+                if let Some(cap) = settings.max_tool_rounds {
+                    self.max_tool_rounds = cap;
+                    applied.push("maxToolRounds");
+                }
+                if settings.subagent_transcripts.is_some() {
+                    self.subagent.stamp_transcripts(
+                        settings
+                            .subagent_transcripts_enabled()
+                            .then(hi_core::session::sessions_dir)
+                            .flatten(),
+                    );
+                    applied.push("subagentTranscripts");
+                }
+                if let Some(on) = settings.telemetry {
+                    self.telemetry = on;
+                    applied.push("telemetry");
+                }
+                if !applied.is_empty() {
+                    parts.push(format!("settings.json applied: {}", applied.join(", ")));
+                }
+                let mut startup_only: Vec<&'static str> = Vec::new();
+                if settings.default_model.is_some() {
+                    startup_only.push("defaultModel");
+                }
+                if settings.default_tools.is_some() {
+                    startup_only.push("defaultTools");
+                }
+                if settings.subagents.is_some() {
+                    startup_only.push("subagents");
+                }
+                if settings.session_retention.is_some() {
+                    startup_only.push("sessionRetention");
+                }
+                if !startup_only.is_empty() {
+                    parts.push(format!("startup-only kept: {}", startup_only.join(", ")));
+                }
+            }
+            Err(err) => parts.push(format!("settings.json kept as-is ({err})")),
+        }
+
+        match ModelsConfig::load() {
+            Ok(config) => {
+                self.config = config;
+                self.catalog = Catalog::from_config(&self.config);
+                // Copy the identity out: the rebuild takes `&mut self`
+                // whole, like every other picker-path call.
+                let (provider, model) = (self.status.provider.clone(), self.status.model.clone());
+                let current = format!("{provider}/{model}");
+                if hi_core::selection::model_available(&self.config, &provider, &model) {
+                    // Cache routing follows the live session, exactly
+                    // like a `/model` switch.
+                    let cache_key = self.session.as_ref().map(|s| s.id().to_string());
+                    self.rebuild_provider(&provider, &model, cache_key);
+                    parts.push("models.json applied — provider rebuilt from the new config".into());
+                } else {
+                    parts.push(format!(
+                        "models.json applied — {current} is gone from it; \
+keeping the old provider until you /model"
+                    ));
+                }
+            }
+            Err(err) => parts.push(format!("models.json kept as-is ({err})")),
+        }
+
+        let note = if parts.is_empty() {
+            "nothing to apply".to_string()
+        } else {
+            parts.join("; ")
+        };
+        self.messages
+            .push(Message::System(format!("reload: {note}")));
     }
 
     /// `/name <title>`: append the session's name record (#89) —
@@ -3371,6 +3481,163 @@ mod tests {
             "{:?}",
             app.messages
         );
+    }
+
+    /// The hermetic config dir `app_with` armed via XDG_CONFIG_HOME.
+    #[cfg(test)]
+    fn hermetic_config_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(std::env::var("XDG_CONFIG_HOME").unwrap()).join("hi")
+    }
+
+    /// Reload tests write real config files into the shared hermetic
+    /// dir; this clears them on entry and drops them on exit — panic
+    /// or not — so no other test reads reload's leftovers.
+    #[cfg(test)]
+    struct ConfigCleanup(std::path::PathBuf);
+
+    #[cfg(test)]
+    impl ConfigCleanup {
+        fn fresh() -> Self {
+            let dir = hermetic_config_dir();
+            let _ = std::fs::remove_file(dir.join("settings.json"));
+            let _ = std::fs::remove_file(dir.join("models.json"));
+            ConfigCleanup(dir)
+        }
+    }
+
+    #[cfg(test)]
+    impl Drop for ConfigCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.0.join("settings.json"));
+            let _ = std::fs::remove_file(self.0.join("models.json"));
+        }
+    }
+
+    /// A models.json whose `mock/mock` entry keeps the test app's
+    /// current model resolvable — configured list, no discovery.
+    #[cfg(test)]
+    fn write_mock_models(dir: &std::path::Path) {
+        std::fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{"mock":{"baseUrl":"http://localhost:9/v1","models":[{"id":"mock"}]}}}"#,
+        )
+        .unwrap();
+    }
+
+    #[cfg(test)]
+    fn last_system_note(app: &App) -> String {
+        match app.messages.last() {
+            Some(Message::System(text)) => text.clone(),
+            other => panic!("expected a system note, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reload_rereads_models_json_and_rebuilds_the_provider() {
+        let _guard = SETTINGS_LOCK.lock().unwrap();
+        let _cleanup = ConfigCleanup::fresh();
+        let mut app = test_app();
+        let dir = hermetic_config_dir();
+        write_mock_models(&dir);
+        let before = Arc::as_ptr(&app.provider) as *const u8;
+        app.run_command("reload", "");
+        assert!(app.config.providers.contains_key("mock"));
+        assert_eq!(app.catalog.items(), ["mock/mock"]);
+        assert_ne!(
+            before,
+            Arc::as_ptr(&app.provider) as *const u8,
+            "provider rebuilt from the new config"
+        );
+        // The identity is unchanged — only the config behind it moved.
+        assert_eq!(app.status.provider, "mock");
+        assert!(last_system_note(&app).contains("provider rebuilt"));
+    }
+
+    #[test]
+    fn reload_keeps_the_old_provider_when_the_model_vanished() {
+        let _guard = SETTINGS_LOCK.lock().unwrap();
+        let _cleanup = ConfigCleanup::fresh();
+        let mut app = test_app();
+        let dir = hermetic_config_dir();
+        std::fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{"other":{"baseUrl":"http://localhost:9/v1","models":[{"id":"x"}]}}}"#,
+        )
+        .unwrap();
+        let before = Arc::as_ptr(&app.provider) as *const u8;
+        app.run_command("reload", "");
+        assert_eq!(app.catalog.items(), ["other/x"]);
+        assert_eq!(
+            before,
+            Arc::as_ptr(&app.provider) as *const u8,
+            "the old provider keeps running"
+        );
+        assert!(last_system_note(&app).contains("mock/mock is gone"));
+    }
+
+    #[test]
+    fn reload_survives_a_broken_models_json_and_keeps_the_old() {
+        let _guard = SETTINGS_LOCK.lock().unwrap();
+        let _cleanup = ConfigCleanup::fresh();
+        let mut app = test_app();
+        let dir = hermetic_config_dir();
+        std::fs::write(dir.join("models.json"), "{ not json").unwrap();
+        let before = Arc::as_ptr(&app.provider) as *const u8;
+        app.run_command("reload", "");
+        assert!(app.config.providers.is_empty(), "old config kept");
+        assert!(app.catalog.items().is_empty());
+        assert_eq!(before, Arc::as_ptr(&app.provider) as *const u8);
+        assert!(last_system_note(&app).contains("models.json kept as-is"));
+    }
+
+    #[test]
+    fn reload_applies_settings_that_speak_and_keeps_the_silent() {
+        let _guard = SETTINGS_LOCK.lock().unwrap();
+        let _cleanup = ConfigCleanup::fresh();
+        let mut app = test_app();
+        let dir = hermetic_config_dir();
+        write_mock_models(&dir);
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"taskTurns":true,"thinking":"high","maxToolRounds":5}"#,
+        )
+        .unwrap();
+        app.run_command("reload", "");
+        assert!(app.task_turns);
+        assert_eq!(app.thinking, Some(ThinkingLevel::High));
+        assert_eq!(app.max_tool_rounds, 5);
+        let note = last_system_note(&app);
+        for key in ["taskTurns", "thinking", "maxToolRounds"] {
+            assert!(note.contains(key), "note should name {key}: {note}");
+        }
+        // Silence keeps the live value: the rewritten file says
+        // nothing about thinking or maxToolRounds.
+        std::fs::write(dir.join("settings.json"), r#"{"taskTurns":false}"#).unwrap();
+        app.run_command("reload", "");
+        assert!(!app.task_turns);
+        assert_eq!(
+            app.thinking,
+            Some(ThinkingLevel::High),
+            "a key the file drops keeps its live value"
+        );
+        assert_eq!(app.max_tool_rounds, 5);
+    }
+
+    #[test]
+    fn reload_survives_a_broken_settings_json() {
+        let _guard = SETTINGS_LOCK.lock().unwrap();
+        let _cleanup = ConfigCleanup::fresh();
+        let mut app = test_app();
+        let dir = hermetic_config_dir();
+        std::fs::write(dir.join("settings.json"), "{ not json").unwrap();
+        write_mock_models(&dir);
+        app.run_command("reload", "");
+        assert!(!app.task_turns, "settings kept as-is");
+        assert!(
+            app.config.providers.contains_key("mock"),
+            "models still applied"
+        );
+        assert!(last_system_note(&app).contains("settings.json kept as-is"));
     }
 
     #[test]
