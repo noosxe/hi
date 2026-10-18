@@ -399,7 +399,9 @@ kill-ring, undo, or Shift+Enter newline (named candidates for later).
 The ring is a **derivation of the transcript** (#87): on resume, on
 fork, and on in-app session switch it is re-derived from the file's
 `Message::User` lines, oldest-first, the ceiling holding on seed
-(drop-oldest). Nothing new is stored — #85's rule again: persist the
+(drop-oldest). Harness turns (`Message::Harness`, AD-0053 — the
+auto-trigger mandate, subagent briefs) ride the transcript but never
+the ring: prompt history is what the human spoke. Nothing new is stored — #85's rule again: persist the
 per-round facts, re-derive the totals on read. Commands never replay
 (they ride the live ring only, never the transcript); drafts, browse
 position, and the parked input stay session-local.

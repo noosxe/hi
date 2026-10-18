@@ -99,11 +99,20 @@ impl AssistantBlock {
 /// one speaker's data out of another's variant, and `match` over the
 /// variants is exhaustive — the tool-call kinds leaned on exactly that:
 /// every consumer must handle them at compile time.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "camelCase", from = "MessagePayload")]
 pub enum Message {
     /// Something the human typed.
     User(String),
+    /// Something hi itself spoke to the model as a user turn — no
+    /// human wrote it (AD-0053): the task-completion mandate, the
+    /// subagent's brief. On the wire it IS a user turn (same role,
+    /// same text — the prefix inside the text is how the model
+    /// knows); the session record carries the record-level
+    /// `origin: "harness"` marker so old binaries read the line
+    /// unchanged, and the front ends treat it as not-yours (no
+    /// prompt history, dim render).
+    Harness(String),
     /// Something the model produced, as a block list (AD-0048): prose
     /// and reasoning in stream order.
     Assistant(Vec<AssistantBlock>),
@@ -120,6 +129,37 @@ pub enum Message {
     /// A harness announcement (e.g. "default model saved: …"), shown
     /// dim in the transcript.
     System(String),
+}
+
+/// The serialization mirror of [`Message`]. `Harness` shares the
+/// `user` payload on purpose: on the wire and in session payloads a
+/// harness turn *is* a user turn, and a distinct payload key would
+/// break old binaries on an unknown externally-tagged variant. The
+/// harness-ness rides the session record's `origin` marker instead
+/// (`session::message_line`).
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum MessagePayloadOut<'a> {
+    User(&'a str),
+    Assistant(&'a [AssistantBlock]),
+    ToolCall(&'a ToolCall),
+    ToolResult(&'a ToolResult),
+    Error(&'a str),
+    System(&'a str),
+}
+
+impl serde::Serialize for Message {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let payload = match self {
+            Message::User(text) | Message::Harness(text) => MessagePayloadOut::User(text),
+            Message::Assistant(blocks) => MessagePayloadOut::Assistant(blocks),
+            Message::ToolCall(call) => MessagePayloadOut::ToolCall(call),
+            Message::ToolResult(result) => MessagePayloadOut::ToolResult(result),
+            Message::Error(text) => MessagePayloadOut::Error(text),
+            Message::System(text) => MessagePayloadOut::System(text),
+        };
+        payload.serialize(serializer)
+    }
 }
 
 /// Deserialization shim: pre-thinking session files carry the
@@ -179,9 +219,10 @@ impl Message {
     /// those from their fields.
     pub fn text(&self) -> Option<String> {
         match self {
-            Message::User(text) | Message::Error(text) | Message::System(text) => {
-                Some(text.clone())
-            }
+            Message::User(text)
+            | Message::Harness(text)
+            | Message::Error(text)
+            | Message::System(text) => Some(text.clone()),
             Message::Assistant(blocks) => {
                 let has_prose = blocks
                     .iter()
@@ -196,6 +237,19 @@ impl Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harness_serializes_with_the_user_payload() {
+        // The session payload cannot distinguish harness turns (an
+        // unknown externally-tagged variant would break old binaries);
+        // the marker lives at the record level instead (AD-0053).
+        let payload = serde_json::to_value(Message::Harness("go".into())).unwrap();
+        assert_eq!(payload, serde_json::json!({ "user": "go" }));
+        assert_eq!(
+            serde_json::to_value(Message::User("go".into())).unwrap(),
+            payload
+        );
+    }
 
     #[test]
     fn legacy_string_assistant_lines_upgrade_to_a_text_block() {

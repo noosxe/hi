@@ -722,6 +722,11 @@ pub fn block_segments(
         TranscriptBlock::Message(Message::System(text)) => vec![Segment::Text(inset_plain(
             wrap_plain(text, inner, THEME.fg(Fg::Dim)),
         ))],
+        // The mandate is spoken by hi itself — it wears the system
+        // styling, not the user tint (AD-0053).
+        TranscriptBlock::Message(Message::Harness(text)) => vec![Segment::Text(inset_plain(
+            wrap_plain(text, inner, THEME.fg(Fg::Dim)),
+        ))],
         TranscriptBlock::Message(Message::Error(text)) => vec![Segment::Text(inset_plain(
             wrap_plain(text, inner, THEME.fg(Fg::Error)),
         ))],
@@ -1747,6 +1752,18 @@ mod tests {
         let error = block_rows(&TranscriptBlock::Message(Message::Error("boom".into())), 20);
         assert_eq!(error.len(), 1);
         assert_eq!(error[0].spans[1].style.fg, THEME.fg(Fg::Error).fg);
+    }
+
+    #[test]
+    fn harness_turns_render_dim_like_system_notes() {
+        // Not-you: the mandate is spoken by hi itself, so it wears the
+        // system styling, not the user tint (AD-0053).
+        let harness = block_rows(
+            &TranscriptBlock::Message(Message::Harness("mandate".into())),
+            20,
+        );
+        assert_eq!(harness.len(), 1); // transparent, like System (AD-0051)
+        assert_eq!(harness[0].spans[1].style.fg, THEME.fg(Fg::Dim).fg);
     }
 
     #[test]

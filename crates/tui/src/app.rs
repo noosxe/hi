@@ -50,6 +50,8 @@ fn seed_history(messages: &[Message]) -> Vec<String> {
         .iter()
         .filter_map(|message| match message {
             Message::User(text) if !text.trim().is_empty() => Some(text.clone()),
+            // A harness turn is not a prompt the human spoke (AD-0053).
+            Message::Harness(_) => None,
             _ => None,
         })
         .collect();
@@ -2607,7 +2609,7 @@ impl App {
                 .push(Message::System(AUTO_TRIGGER_EXHAUSTED.into()));
         }
         self.messages
-            .push(Message::User(AUTO_TRIGGER_MANDATE.into()));
+            .push(Message::Harness(AUTO_TRIGGER_MANDATE.into()));
         self.start_turn();
     }
 }
@@ -3035,7 +3037,7 @@ mod tests {
     fn mandate_count(app: &App) -> usize {
         app.messages
             .iter()
-            .filter(|m| matches!(m, Message::User(text) if text.contains("(auto-trigger)")))
+            .filter(|m| matches!(m, Message::Harness(text) if text.contains("(auto-trigger)")))
             .count()
     }
 
@@ -4905,6 +4907,19 @@ mod tests {
         app.handle_key(ctrl(KeyCode::Char('a')));
         app.handle_key(alt(KeyCode::Char('d')));
         assert_eq!(app.input, " far now"); // "go" goes, the space stays
+    }
+
+    #[test]
+    fn seeded_history_leaves_harness_turns_out() {
+        // The mandate rides the transcript as a user-class turn (the
+        // model replays it), but prompt history is what the human
+        // spoke (AD-0053).
+        let ring = seed_history(&[
+            Message::User("asked question".into()),
+            Message::Harness("(auto-trigger) mandate".into()),
+            Message::User("follow-up".into()),
+        ]);
+        assert_eq!(ring, ["asked question", "follow-up"]);
     }
 
     #[test]
