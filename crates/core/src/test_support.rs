@@ -117,7 +117,25 @@ fn read_request(stream: &mut TcpStream) -> String {
         assert!(n > 0, "client closed before sending body");
         bytes.extend_from_slice(&buf[..n]);
     }
-    String::from_utf8_lossy(&bytes).to_string()
+    // A gzip'd request body (AD-0052 tests) is stored decoded, so
+    // assertions see the payload a decompressing server would hand
+    // its JSON parser. Headers stay exactly as they went out.
+    let mut request = String::from_utf8_lossy(&bytes[..header_end]).to_string();
+    let gzipped = lowered.lines().any(|line| {
+        line.strip_prefix("content-encoding:")
+            .is_some_and(|value| value.trim() == "gzip")
+    });
+    let body = &bytes[header_end..];
+    if gzipped {
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(body)
+            .read_to_end(&mut decoded)
+            .expect("test request body is valid gzip");
+        request.push_str(&String::from_utf8_lossy(&decoded));
+    } else {
+        request.push_str(&String::from_utf8_lossy(body));
+    }
+    request
 }
 
 fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {

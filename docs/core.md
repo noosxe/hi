@@ -388,6 +388,11 @@ Wire behavior:
 - Thinking kwargs: when the session level has an entry in the model's
   `thinkingLevelMap`, that JSON object is merged **top-level** into the
   request body (`stream()`). No map or no entry → nothing sent.
+- Request compression (AD-0052): when the provider's `requestCompression`
+  opt-in is set and the serialized body clears `COMPRESS_MIN_BODY`
+  (1 KiB), the body goes out gzip'd with `Content-Encoding: gzip`
+  (`encode_request_body`); smaller bodies and compression failures ride
+  identity.
 - SSE parsing: `parse_data_line` classifies each line into
   `DataLine::{Token, Done, Ignore, Malformed}`. `data: [DONE]` ends the
   stream; a server closing without `[DONE]` is tolerated as complete.
@@ -428,6 +433,7 @@ Types (serde, camelCase, **unknown fields ignored**):
 - `ModelsConfig { providers: BTreeMap<String, ProviderConfig> }` — the name
   is just a lookup key; `BTreeMap` gives sorted iteration (autopick order).
 - `ProviderConfig { base_url ("baseUrl", required), api_key ("apiKey"),
+  request_compression ("requestCompression", default false),
   models: Vec<ModelConfig> }`
 - `ModelConfig { id (required), name, reasoning, context_window
   ("contextWindow", u32, informational), max_tokens ("maxTokens", u32),

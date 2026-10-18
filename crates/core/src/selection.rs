@@ -224,6 +224,7 @@ mod tests {
                 ProviderConfig {
                     base_url: base_url.to_string(),
                     api_key: None,
+                    request_compression: false,
                     models: ids
                         .iter()
                         .map(|id| ModelConfig {

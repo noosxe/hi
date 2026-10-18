@@ -16,6 +16,7 @@ image = { version = "0.25", default-features = false, features = [
     "gif",
     "webp",
 ] }
+flate2 = "1"
 ureq = { version = "3", features = ["json"] }
 uuid = { version = "1", features = ["v4"] }
 regex = "1"

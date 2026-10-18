@@ -31,6 +31,7 @@ configs never break older builds (tested for both files).
     "<name>": {
       "baseUrl": "http://localhost:8080/v1",   // required; INCLUDE the version path
       "apiKey": "$MY_API_KEY",                 // optional; see credentials
+      "requestCompression": true,              // optional; default false — gzip request bodies (AD-0052)
       "models": [                              // optional; empty/absent = discover
         {
           "id": "model-id",                    // required; sent to the API as-is
@@ -72,6 +73,18 @@ A credential *source*, not necessarily a literal:
 - missing variable → empty string → **no `Authorization` header sent**
 - literal string → used as-is
 - omitted → no `Authorization` header (some local servers reject its presence)
+
+### Request compression (`requestCompression`)
+
+Opt-in per provider, default **off**. When `true`, a chat-request body
+of at least one kibibyte goes out gzip-compressed
+(`Content-Encoding: gzip`); smaller bodies ride identity, since deflate
+overhead can exceed the bytes saved. All the major clouds decode it
+(verified against OpenAI, Anthropic, Z.ai, OpenRouter, and Groq); a
+server that silently ignores request content-encoding would feed the
+compressed bytes to the model as the prompt — which is why hi never
+guesses. The knob touches request bodies only; response compression is
+negotiated by the HTTP client regardless.
 
 ## `settings.json`
 
