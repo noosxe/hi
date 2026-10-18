@@ -40,6 +40,10 @@ pub const COMMANDS: &[Command] = &[
         description: "alias for /exit",
     },
     Command {
+        name: "reload",
+        description: "re-read models.json and settings.json and apply them to this session",
+    },
+    Command {
         name: "resume",
         description: "switch to another session from this directory",
     },

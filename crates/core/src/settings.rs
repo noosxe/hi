@@ -73,8 +73,11 @@ pub struct Settings {
     /// sessions directory. Absent/false records nothing — the default,
     /// because a chatty parent turn can spawn many files. Startup
     /// policy only, not flippable from `/settings`.
-    #[serde(default)]
-    pub subagent_transcripts: bool,
+    /// Presence matters to `/reload` (AD-0054): a key the file drops
+    /// keeps its live value, so "off" must be distinguishable from
+    /// unspoken. Read through `subagent_transcripts_enabled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_transcripts: Option<bool>,
 }
 
 /// The effective telemetry choice: `HI_TELEMETRY` wins when set (pi's
@@ -145,6 +148,12 @@ impl Settings {
     /// `false` removes the `subagent` tool from the registry entirely,
     /// so the model never sees it. Absent means on: subagents ship as
     /// a default capability, not an opt-in.
+    /// The resolved `subagentTranscripts` choice — absent reads as
+    /// off (the default capability).
+    pub fn subagent_transcripts_enabled(&self) -> bool {
+        self.subagent_transcripts == Some(true)
+    }
+
     pub fn subagents_enabled(&self) -> bool {
         self.subagents.unwrap_or(true)
     }
@@ -311,9 +320,9 @@ mod tests {
     #[test]
     fn subagent_transcripts_default_off_camel_case() {
         let settings: Settings = serde_json::from_str(r#"{"subagentTranscripts": true}"#).unwrap();
-        assert!(settings.subagent_transcripts);
+        assert!(settings.subagent_transcripts_enabled());
         let settings: Settings = serde_json::from_str("{}").unwrap();
-        assert!(!settings.subagent_transcripts);
+        assert!(!settings.subagent_transcripts_enabled());
     }
 
     #[test]
@@ -344,7 +353,7 @@ mod tests {
             task_turns: None,
             session_retention: None,
             max_tool_rounds: None,
-            subagent_transcripts: false,
+            subagent_transcripts: None,
         };
         existing.save_to(&path).unwrap();
 
@@ -376,7 +385,7 @@ mod tests {
             task_turns: None,
             session_retention: None,
             max_tool_rounds: None,
-            subagent_transcripts: false,
+            subagent_transcripts: None,
         };
         existing.save_to(&path).unwrap();
 
@@ -466,7 +475,7 @@ mod tests {
             task_turns: None,
             session_retention: None,
             max_tool_rounds: None,
-            subagent_transcripts: false,
+            subagent_transcripts: None,
         };
         original.save_to(&path).unwrap();
         let loaded = Settings::load_from(&path).unwrap();

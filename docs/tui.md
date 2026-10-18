@@ -87,7 +87,7 @@ Behaviors (each pinned by a test in `app.rs`):
 
 ```rust
 pub struct Command { pub name: &'static str, pub description: &'static str }
-pub const COMMANDS: &[Command]  // sorted: context, exit, keybinds, model, name, new, quit, resume, settings, thinking, tasks, tools
+pub const COMMANDS: &[Command]  // sorted: context, exit, keybinds, model, name, new, quit, reload, resume, settings, thinking, tasks, tools
 pub fn matching(typed: &str) -> Vec<&'static Command>   // case-insensitive prefix
 pub fn find_exact(name: &str) -> Option<&'static Command>
 ```
@@ -139,7 +139,21 @@ the flushed transcript block matches, so completion is a visual no-op.
 `/new` starts a fresh session for the directory hi runs in —
 optionally named (`/new scratch`) — and walks the same reset resume
 walks, so transcript, bill, and ring all begin again while the model
-and thinking level carry (#98). `/keybinds` pushes the same kind of notice listing every registered
+and thinking level carry (#98). `/reload` (AD-0054) re-reads
+`models.json` and `settings.json` and applies what they say to the
+live session, with per-file independence: a file that fails to read
+or parse keeps its old state and the one system note says so. Settings
+follow "files win when they speak" — `thinking`, `taskTurns`,
+`images`, `maxToolRounds`, `subagentTranscripts`, and `telemetry`
+apply when the key is present; silence keeps the live value; the
+startup-only knobs (`defaultModel`, `defaultTools`, `subagents`,
+`sessionRetention`) are named in the note and left alone. Models: the
+catalog re-runs with startup's gather policy (`Catalog::from_config`,
+discovery bounded as at startup), and the active provider rebuilds
+from the new config when its `provider/model` still resolves — so
+baseUrl and `$VAR` key edits reach the next turn; a vanished model
+keeps the old provider until the next `/model`. Mid-turn is safe: the
+in-flight turn holds its own provider `Arc` and finishes on it. `/keybinds` pushes the same kind of notice listing every registered
 chord from `keybinds::KEYBINDS` — chord and one-line description,
 grouped movement / kills / yank / undo / session-level (#95). The
 table cannot drift from the bindings: a test scans `app.rs` for
