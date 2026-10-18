@@ -153,7 +153,7 @@ newer configs never break older builds.
 | `providers` | root | no | map of names; an empty/missing map is valid |
 | `baseUrl` | provider | **yes** | root URL *including* version path, e.g. `http://localhost:8080/v1` |
 | `apiKey` | provider | no | literal, `$NAME`, or `${NAME}`; see below |
-| `requestCompression` | provider | no | default `false`; when `true`, chat-request bodies ≥ 1 KiB go out gzip'd (`Content-Encoding: gzip`) — the major clouds decode it; leave off for endpoints that ignore request content-encoding (AD-0052) |
+| `requestCompression` | provider | no | default `false`; when `true`, chat-request bodies ≥ 1 KiB go out gzip'd (`Content-Encoding: gzip`) — decoding is provider-specific (Z.ai's coding endpoint rejects gzip'd bodies; details in configuration.md, AD-0052) |
 | `models` | provider | no | array; absent or empty means *discover* (below) |
 | `id` | model | **yes** | identifier sent to the API |
 | `name` | model | no | display name; falls back to `id` |
