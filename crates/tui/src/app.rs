@@ -5363,4 +5363,98 @@ mod tests {
         assert_eq!(app.input, "see /tmp/x.png paste now");
         assert_eq!(app.cursor, 15);
     }
+
+    /// One-shot local chat endpoint: answers `[DONE]` and hands back the
+    /// raw request (headers + JSON body).
+    fn one_shot_chat() -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!(
+            "http://127.0.0.1:{}/v1",
+            listener.local_addr().unwrap().port()
+        );
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let n = stream.read(&mut chunk).unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if let Some(at) = text.find("\r\n\r\n") {
+                    let len: usize = text[..at]
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .map(|v| v.trim().parse().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if buf.len() >= at + 4 + len {
+                        break;
+                    }
+                }
+            }
+            let body = "data: [DONE]\n\n";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            String::from_utf8_lossy(&buf).to_string()
+        });
+        (base, handle)
+    }
+
+    #[test]
+    fn esc_during_a_tool_then_a_new_message_sends_a_well_formed_request() {
+        let (base, server) = one_shot_chat();
+        let mut app = test_app();
+        app.config = serde_json::from_str(&format!(
+            r#"{{"providers":{{"prov":{{"baseUrl":"{base}"}}}}}}"#
+        ))
+        .unwrap();
+        app.status.provider = "prov".into();
+        app.status.model = "m".into();
+        app.rebuild_provider("prov", "m", None);
+        app.messages.push(Message::User("run it".into()));
+        // A live turn that has surfaced a tool call but no result yet.
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.turn = Some(Turn {
+            blocks: vec![],
+            error: None,
+            started_at: Instant::now(),
+            rx,
+        });
+        tx.send(Event::ToolCall(hi_core::ToolCall {
+            id: "call_1".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+        }))
+        .unwrap();
+        app.pump();
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.turn.is_none());
+        assert!(
+            !app.messages
+                .iter()
+                .any(|m| matches!(m, Message::ToolResult(_))),
+            "Esc records no result; the wire layer answers the call"
+        );
+        app.set_input("next".to_string());
+        app.handle_key(key(KeyCode::Enter));
+        let request = server.join().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        let roles: Vec<&str> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "tool", "user"], "{body}");
+        assert_eq!(body["messages"][2]["tool_call_id"], "call_1");
+        assert_eq!(body["messages"][3]["content"], "next");
+    }
 }

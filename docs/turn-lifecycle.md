@@ -82,6 +82,17 @@ into the scrollback above the viewport exactly once
   Partial output already pumped into `turn.text` is **kept**: finalization
   still pushes the partial `Assistant` message (plus `Error` if one was
   received).
+- Esc can land after a `ToolCall` was pushed (and persisted) but before
+  its `ToolResult`, leaving an orphan call. Nothing is written to history
+  or the session file for it; instead `wire_messages` repairs every
+  request: each `ToolCall` with no matching `ToolResult` gets a
+  synthesized `role: "tool"` message (same `tool_call_id`) after the
+  results that do exist for that assistant message and before the next
+  non-result message, or at the end. Its text says the call was cancelled
+  before a result was recorded and the tool may have run, partly run, or
+  still be running. This covers Esc, quitting mid-turn, crashes and old
+  session files alike (tests: `an_orphan_*`,
+  `esc_during_a_tool_then_a_new_message_sends_a_well_formed_request`).
 - Esc also clears the auto-trigger arm (`auto_armed`), so a cancelled
   turn's mandate cannot fire after the next unrelated human turn.
 - Esc also restores any queued mid-turn input back into the input box
@@ -146,7 +157,10 @@ path: partial `Token`s stand, then one `Event::Error` (message built by
    failed sends as "stop".
 6. Every `ToolCall` event is answered by exactly one `ToolResult` with the
    same `call_id`; a user turn may span rounds but keeps exactly one
-   `TurnStart` and one `TurnEnd` (the loop swallows round framing).
+   `TurnStart` and one `TurnEnd` (the loop swallows round framing). The
+   exception is a cancelled/aborted turn (Esc, quit, crash), which can
+   leave a recorded `ToolCall` with no result: history keeps it as is,
+   and `wire_messages` answers it on the wire (below).
 7. Finalized messages reach the session file at turn end (append + flush);
    only the in-flight turn is ever lost, and a persistence failure never
    blocks the conversation.

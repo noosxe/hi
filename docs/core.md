@@ -51,6 +51,11 @@ the pre-thinking plain string (upgraded to one `Text` block on replay).
   `error_messages_are_never_sent_to_the_model` in `openai.rs`.
 - `ToolCall`/`ToolResult` always appear as a pair in agent-loop-built history — one result per
   call, results directly after their calls (see [turn-lifecycle.md](turn-lifecycle.md)).
+  History interrupted by Esc/quit/crash can hold a call with no result;
+  `wire_messages` answers each such call with a synthesized `role: "tool"`
+  message (cancelled, outcome unknown), after the real results of its
+  assistant message and before the next non-result message. History and
+  session files are never rewritten.
 - Thinking blocks are stored verbatim; `signature` is opaque and is the
   replay write-back key (AD-0048).
 
