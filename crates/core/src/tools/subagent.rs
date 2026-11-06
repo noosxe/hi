@@ -297,7 +297,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hi-sub-esc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let (a, b) = (dir.join("a"), dir.join("b"));
+        let (a, b, started) = (dir.join("a"), dir.join("b"), dir.join("started"));
         let tc = |id: &str, name: &str, args: &str| {
             let frag = serde_json::json!({"choices":[{"delta":{"tool_calls":[
                 {"index":0,"id":id,"function":{"name":name,"arguments":args}}]}}]});
@@ -308,7 +308,11 @@ mod tests {
             tc(
                 "s1",
                 "bash",
-                &format!(r#"{{"command":"sleep 1; touch {}"}}"#, a.display()),
+                &format!(
+                    r#"{{"command":"touch {}; sleep 2; touch {}"}}"#,
+                    started.display(),
+                    a.display()
+                ),
             ),
             tc(
                 "s2",
@@ -337,7 +341,16 @@ mod tests {
                 break;
             }
         }
-        drop(rx); // Esc
+        // Esc lands during the subagent's first bash, not before it.
+        let start = Instant::now();
+        while !started.exists() {
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "bash never started"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(rx);
         // Wait until the in-flight bash has demonstrably finished…
         let start = Instant::now();
         while !a.exists() {
