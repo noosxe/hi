@@ -19,4 +19,4 @@ serde_json = "1"
 # event loop's 50ms poll clock and teardown ordering are tested where
 # a mock event source cannot reach (issue #10). The shipped `hi`
 # never links it (AD-0004 stays about runtime deps).
-portable-pty = "0.8"
+portable-pty = "0.9"
