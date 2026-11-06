@@ -14,14 +14,14 @@ cargo run            # hi --mock needs no config
 
 CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI). Third-party actions are SHA-pinned with a `# vX.Y.Z` comment; `dtolnay/rust-toolchain@stable` stays a moving branch ref on purpose — the compiler channel is pinned by `rust-toolchain.toml` (#24, AD-0037). Dependabot (`.github/dependabot.yml`) opens one grouped PR per ecosystem weekly (`cargo`, `github-actions`), ignoring Rust major bumps.
 
-Current count: **558 `#[test]` functions** (the README's count gets refreshed in passing;
+Current count: **564 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 88
-core: openai 27, session 27, settings 21, subagent 13, tasks 16, selection 15, read 13,
-agent 11, walk 11, headless 11, message 4, catalog 5, context_report 4, grep 8, image_util 7, truncate 7, edit 6,
-config 6, system_prompt 6, tasks-tool 6, bash 6, mod 6, image_resize 6, subagent-tool 9,
-find 4, write 3, ls 3, thinking 3, mock 2, event 1, tool 1. tui: app 101,
-ui 33, status 12, markdown 19, kitty 12, wrap 12, editor 9, picker 7, scroll 7,
-commands 4, clipboard 3, keybinds 3, theme 3, catalog 2. cli: 10 unit + 10 wire + 3 auto-print + 3 json-mode + 10 pty integration
+core: openai 32, session 34, settings 21, subagent 14, tasks 16, selection 15, read 13,
+agent 11, walk 11, headless 11, message 5, catalog 5, context_report 4, grep 8, image_util 7, truncate 7, edit 6,
+config 7, system_prompt 6, tasks-tool 6, bash 6, mod 6, image_resize 6, subagent-tool 9,
+find 4, write 3, ls 3, thinking 3, mock 2, event 1, tool 1. tui: app 112,
+ui 35, status 12, markdown 19, kitty 12, wrap 12, editor 9, picker 7, scroll 11,
+commands 4, clipboard 3, keybinds 3, theme 3, catalog 3. cli: 10 unit + 10 wire + 3 auto-print + 3 json-mode + 10 pty integration
 (`tests/tui_pty.rs` — the real binary in a pseudo-terminal, its byte stream
 rendered by the avt emulator (asciinema's), and every wait a predicate over
 rendered frames — typed keys must echo in the composer, a settled turn must
@@ -115,7 +115,7 @@ because of the #20 bug class — the startup provider never attached
 | images in read: magic-byte sniffing (never extensions), attach/withhold policy notes, base64 round-trip; the resize ladder — byte-identical pass-through, dimension scaling, JPEG transcode under budget, unshrinkable refusal, raw/decode guards; kitty rendering — chunk-exact encoding (`C=1`, 4096-byte `m` chunks), pi's detection matrix via injected env snapshots, fit math with the distortion chooser, PNG conversion guards (structural chunk-walk, decode-limited re-encode), corrupt fallback notes, segment placement and height; pasted attachments — RGBA→PNG encoding with shape checks, paste padding and line-ending normalization, staged-path outcomes through the frame pump, transient failure notes, and the command-dispatch rule that keeps `/tmp/…` paths messages; synthetic user carrier + image-only placeholder on the wire; carrier determinism under the byte-stable prefix; image session round-trip + pre-image files load; the fail-open image policy (configured `vision: false` honored, discovered models vision-capable, master switch first) and switch-time gate re-resolution | `core/tools/read.rs`, `core/tools/image_resize.rs`, `core/image_util.rs`, `core/openai.rs`, `core/session.rs`, `core/config.rs`, `core/settings.rs`, `tui/kitty.rs`, `tui/ui.rs` |
 | slash matching, exact dispatch, registry hygiene | `tui/commands.rs` |
 | catalog flattening, empty catalog | `tui/catalog.rs` |
-| queueing, Esc-cancel + queue restore, completion keys, unknown commands | `tui/app.rs` |
+| queueing, Esc-cancel + queue restore, completion keys, unknown commands, auto-trigger gating (`taskTurns` off/zero budget/Esc/toggled-off never fire) | `tui/app.rs` |
 | wrap width semantics, oversized-word hard split | `tui/wrap.rs` |
 
 Gaps to be aware of: `ui.rs` drawing has row-level tests (scrollback wrapping) but no pty/frame snapshots, `lib.rs` event loop is

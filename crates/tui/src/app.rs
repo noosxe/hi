@@ -899,6 +899,9 @@ impl App {
                 {
                     self.messages.push(Message::Assistant(turn.blocks));
                 }
+                // A cancelled turn's arm must not outlive it and fire
+                // after the next unrelated human turn.
+                self.auto_armed = false;
                 // Cancel means cancel everything: hand the queued
                 // text back so nothing typed is lost.
                 if let Some(queued) = self.queued.take() {
@@ -2538,7 +2541,7 @@ keeping the old provider until you /model"
         };
         // Mid-turn the same fact only arms: the one-turn invariant
         // holds, and the decision waits for the turn to finish.
-        if completions > 0 {
+        if completions > 0 && self.task_turns && self.auto_trigger_budget > 0 {
             self.auto_armed = true;
         }
         let mut finished = false;
@@ -2626,7 +2629,11 @@ keeping the old provider until you /model"
                 self.start_turn();
             } else if self.auto_armed {
                 self.auto_armed = false;
-                self.fire_auto_trigger();
+                // Re-check at fire time: the opt-in can be toggled off
+                // (settings board, `/reload`) while armed.
+                if self.task_turns && self.auto_trigger_budget > 0 {
+                    self.fire_auto_trigger();
+                }
             }
         }
         // Persist everything finalized this frame.
@@ -3257,6 +3264,82 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, Message::User(text) if text == "follow up"))
         );
+        assert_eq!(mandate_count(&app), 0);
+        assert_eq!(app.auto_trigger_budget, AUTO_TRIGGER_BUDGET);
+        assert!(!app.auto_armed);
+    }
+
+    /// Start a turn, finish a task under it, and pump until the
+    /// completion note is folded while the turn still runs.
+    fn complete_task_mid_turn(app: &mut App, tasks: &hi_core::tasks::TaskManager, cmd: &str) {
+        app.start_turn();
+        let id = tasks
+            .spawn(hi_core::tasks::TaskSpec::process(cmd, std::env::temp_dir()))
+            .unwrap();
+        wait_task_finished(tasks, id);
+        pump_until(app, "the folded note", |a| {
+            a.messages.iter().any(|m| {
+                matches!(m,
+                Message::System(text) if text.contains("finished (exit 0)"))
+            })
+        });
+        assert!(app.turn.is_some(), "completion must fold mid-turn");
+    }
+
+    #[test]
+    fn mid_turn_completion_with_task_turns_off_never_arms_or_fires() {
+        let (mut app, tasks) = app_with_tasks("auto-mid-off");
+        assert!(!app.task_turns);
+        complete_task_mid_turn(&mut app, &tasks, "echo done");
+        assert!(!app.auto_armed, "the default must not arm");
+        assert!(
+            !app.status_rows()[1].1.contains("auto: armed"),
+            "{:?}",
+            app.status_rows()
+        );
+        drain_turns(&mut app);
+        assert_eq!(mandate_count(&app), 0);
+        assert_eq!(app.auto_trigger_budget, AUTO_TRIGGER_BUDGET);
+    }
+
+    #[test]
+    fn mid_turn_completion_with_zero_budget_does_not_panic_or_fire() {
+        let (mut app, tasks) = app_with_tasks("auto-mid-zero");
+        app.task_turns = true;
+        app.auto_trigger_budget = 0;
+        complete_task_mid_turn(&mut app, &tasks, "echo done");
+        assert!(!app.auto_armed);
+        drain_turns(&mut app);
+        assert_eq!(mandate_count(&app), 0);
+        assert_eq!(app.auto_trigger_budget, 0);
+    }
+
+    #[test]
+    fn esc_clears_the_arm_so_a_cancelled_mandate_does_not_fire_later() {
+        let (mut app, tasks) = app_with_tasks("auto-esc");
+        app.task_turns = true;
+        complete_task_mid_turn(&mut app, &tasks, "echo done");
+        assert!(app.auto_armed);
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.turn.is_none());
+        assert!(!app.auto_armed, "Esc must clear the arm");
+        assert!(!app.status_rows()[1].1.contains("auto: armed"));
+        // The next unrelated human turn ends without a mandate turn.
+        app.messages.push(Message::User("unrelated".into()));
+        app.start_turn();
+        drain_turns(&mut app);
+        assert_eq!(mandate_count(&app), 0);
+        assert_eq!(app.auto_trigger_budget, AUTO_TRIGGER_BUDGET);
+    }
+
+    #[test]
+    fn toggling_task_turns_off_while_armed_cancels_the_auto_turn() {
+        let (mut app, tasks) = app_with_tasks("auto-toggle");
+        app.task_turns = true;
+        complete_task_mid_turn(&mut app, &tasks, "echo done");
+        assert!(app.auto_armed);
+        app.task_turns = false;
+        drain_turns(&mut app);
         assert_eq!(mandate_count(&app), 0);
         assert_eq!(app.auto_trigger_budget, AUTO_TRIGGER_BUDGET);
         assert!(!app.auto_armed);
