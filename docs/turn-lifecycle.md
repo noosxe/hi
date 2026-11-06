@@ -160,7 +160,7 @@ path: partial `Token`s stand, then one `Event::Error` (message built by
    `TurnStart` and one `TurnEnd` (the loop swallows round framing). The
    exception is a cancelled/aborted turn (Esc, quit, crash), which can
    leave a recorded `ToolCall` with no result: history keeps it as is,
-   and `wire_messages` answers it on the wire (below).
+   and `wire_messages` answers it on the wire (see "Cancellation (Esc)").
 7. Finalized messages reach the session file at turn end (append + flush);
    only the in-flight turn is ever lost, and a persistence failure never
    blocks the conversation.

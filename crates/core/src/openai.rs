@@ -683,11 +683,6 @@ impl<'a> WireMessage<'a> {
         }
     }
 
-    /// The synthetic user message that carries a tool result's images.
-    /// The OpenAI-compat `role: "tool"` message is text-only, so —
-    /// exactly as pi-ai does — the tool message keeps its note and the
-    /// images ride a follow-up user turn. Wire-only: history keeps the
-    /// images on the result, and every turn re-derives this shape.
     /// A synthesized answer for a call the history never answered
     /// (`wire_messages` repair). Wire-only; `role: "tool"` carries no
     /// error flag, so the text says it.
@@ -702,6 +697,11 @@ impl<'a> WireMessage<'a> {
         }
     }
 
+    /// The synthetic user message that carries a tool result's images.
+    /// The OpenAI-compat `role: "tool"` message is text-only, so —
+    /// exactly as pi-ai does — the tool message keeps its note and the
+    /// images ride a follow-up user turn. Wire-only: history keeps the
+    /// images on the result, and every turn re-derives this shape.
     fn image_carrier(result: &'a ToolResult) -> Self {
         let mut parts = Vec::with_capacity(result.images.len() + 1);
         parts.push(WirePart::Text {
@@ -2164,6 +2164,31 @@ mod tests {
                 "user",
                 "assistant:calls:b",
                 "tool:b"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_assistant_message_settles_the_previous_ones_unanswered_calls() {
+        // What Esc can produce: a batch answered in part, then the
+        // turn's partial text, then the next human message.
+        let history = [
+            Message::User("go".into()),
+            call("a", "bash"),
+            call("b", "read"),
+            result("a", "bash", "ok"),
+            assistant("partial"),
+            Message::User("next".into()),
+        ];
+        assert_eq!(
+            shape(&history),
+            [
+                "user",
+                "assistant:calls:a,b",
+                "tool:a",
+                "tool:b",
+                "assistant",
+                "user"
             ]
         );
     }
