@@ -315,8 +315,7 @@ exactly once, at startup, where both inputs exist:
 - **Magic-byte sniffing, never extensions**: a `.png` full of text is text.
   Hand-rolled (png/jpeg/webp/gif — the four formats the `image_url` wire
   accepts); the only new dependency is `base64` (canonical, zero-transitive).
-- **`execute_with_images` is the execution path the loop reaches** (via
-  `Tool::execute_with_probe`, whose default forwards to it, #170); the
+- **`execute_with_images` is the only execution path the loop calls**; the
   default wraps `execute` with no images, so the other ten tools are
   untouched and image support stays opt-in per tool.
 
@@ -1336,12 +1335,8 @@ implementation. The rulings:
 - **No transcript persistence in v1.** The result rides the caller's
   transcript as an ordinary tool result (spawn-echo precedent);
   recording subagent runs as their own session files is a filed
-  follow-up. Cancellation (corrected by #170): the dropped
-  `Receiver` is still the only signal, but the subagent does not
-  notice it by itself (the runner drains its channel; the parent is
-  blocked in the tool). `Event::Heartbeat` + `Tool::execute_with_probe`
-  let the runner probe the parent's channel and drop the subagent's
-  `Receiver` on failure (turn-lifecycle.md).
+  follow-up. Cancellation needs no new primitive — the abandoned
+  subagent self-stops at its own next send (turn-lifecycle.md).
 
 **AD-0040 addendum (2026-10-18, field feedback):** the first hi-on-hi
 audit sharpened three edges without amending a ruling. Cap failures are
@@ -1355,6 +1350,20 @@ keeps the belt. And a soft `HIGH TOKEN USE` marker at
 `SUBAGENT_HIGH_TOKEN_USE` (100k cumulative input) makes cost outliers
 visible; hard mid-run budgets stay out of scope — input re-sends every
 round, so the real lever is round count, which the caller already sets.
+
+**AD-0040 addendum (2026-11-06): #170, cancellation needs a probe.** The
+ruling above that an abandoned subagent "self-stops at its own next
+send" was wrong. `SubagentRunner::run` owns and drains the subagent's
+`Receiver`, so the subagent's sends keep succeeding, and the parent loop
+is blocked inside the tool call and sends nothing, so it never notices
+its own dropped `Receiver` either. The dropped `Receiver` stays the only
+cancellation signal; it is now probed by sending: `Event::Heartbeat` (no
+content, ignored by every consumer) plus `Tool::execute_with_probe(args,
+alive)`, which `subagent` alone overrides. The runner drains with
+`recv_timeout` and, when the probe fails, flushes the transcript, drops
+the subagent's `Receiver` and returns `Err`. Consequently the loop now
+reaches `execute_with_images` through `execute_with_probe` (whose default
+forwards to it); AD-0008's image ruling is otherwise unchanged.
 
 **AD-0041 (2026-10-19): the main-loop round cap becomes configurable,
 off by default.** Ecosystem check (pi: no counter anywhere — the
