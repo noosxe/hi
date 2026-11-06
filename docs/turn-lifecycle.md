@@ -82,6 +82,8 @@ into the scrollback above the viewport exactly once
   Partial output already pumped into `turn.text` is **kept**: finalization
   still pushes the partial `Assistant` message (plus `Error` if one was
   received).
+- Esc also clears the auto-trigger arm (`auto_armed`), so a cancelled
+  turn's mandate cannot fire after the next unrelated human turn.
 - Esc also restores any queued mid-turn input back into the input box
   (tested: `esc_cancels_the_turn_and_restores_the_queue_to_the_input`).
 - Hard limits: connect is bounded (15s) and DNS resolve (10s) so a worker can
