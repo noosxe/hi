@@ -688,6 +688,20 @@ impl<'a> WireMessage<'a> {
     /// exactly as pi-ai does — the tool message keeps its note and the
     /// images ride a follow-up user turn. Wire-only: history keeps the
     /// images on the result, and every turn re-derives this shape.
+    /// A synthesized answer for a call the history never answered
+    /// (`wire_messages` repair). Wire-only; `role: "tool"` carries no
+    /// error flag, so the text says it.
+    fn orphan_result(call_id: &'a str, name: &'a str) -> Self {
+        Self {
+            role: "tool",
+            content: Some(WireContent::Text(Cow::Borrowed(ORPHAN_RESULT_TEXT))),
+            tool_calls: None,
+            tool_call_id: Some(call_id),
+            name: Some(name),
+            reasoning: BTreeMap::new(),
+        }
+    }
+
     fn image_carrier(result: &'a ToolResult) -> Self {
         let mut parts = Vec::with_capacity(result.images.len() + 1);
         parts.push(WirePart::Text {
@@ -723,6 +737,11 @@ struct WireFunction<'a> {
     name: &'a str,
     arguments: &'a str,
 }
+
+/// Text of a synthesized result for a tool call with no recorded result
+/// (cancelled with Esc, quit mid-turn, crash). It must not claim the
+/// tool did nothing: it may have run, or may still be running.
+const ORPHAN_RESULT_TEXT: &str = "Error: this tool call was cancelled before a result was recorded. The tool may have run, or partly run, and may still be running; its outcome is unknown.";
 
 /// An assistant wire message under construction. Consecutive
 /// `Message::Assistant` text and `Message::ToolCall` entries merge into
@@ -773,6 +792,12 @@ impl<'a> AssistantGroup<'a> {
 ///   (see `AssistantGroup`).
 /// - Each `ToolResult` follows as its own `role: "tool"` message,
 ///   pointing at its call via `tool_call_id`.
+/// - A `ToolCall` with no recorded `ToolResult` (Esc, quit mid-turn, a
+///   crash, an old session file) is answered by a synthesized
+///   `role: "tool"` message, placed after the results that do exist for
+///   its assistant message and before the next non-result message (or
+///   at the end). History is never changed; strict servers reject an
+///   unanswered `tool_calls` and the session would stay stuck.
 pub(crate) fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
     let mut out: Vec<WireMessage<'_>> = Vec::new();
     let mut group = AssistantGroup {
@@ -780,10 +805,13 @@ pub(crate) fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
         reasoning: None,
         calls: Vec::new(),
     };
+    // (id, name) of the last assistant message's calls still unanswered.
+    let mut pending: Vec<(&str, &str)> = Vec::new();
     for message in history {
         match message {
             Message::User(text) | Message::Harness(text) => {
-                group.flush(&mut out);
+                flush_group(&mut group, &mut out, &mut pending);
+                settle(&mut out, &mut pending);
                 out.push(WireMessage::text("user", text));
             }
             Message::Error(_) | Message::System(_) => {}
@@ -828,7 +856,10 @@ pub(crate) fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
             Message::ToolResult(result) => {
                 // The assistant message carrying the calls must precede
                 // its results on the wire.
-                group.flush(&mut out);
+                flush_group(&mut group, &mut out, &mut pending);
+                if let Some(at) = pending.iter().position(|(id, _)| *id == result.call_id) {
+                    pending.remove(at);
+                }
                 out.push(WireMessage::tool_result(result));
                 if !result.images.is_empty() {
                     out.push(WireMessage::image_carrier(result));
@@ -836,8 +867,34 @@ pub(crate) fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
             }
         }
     }
-    group.flush(&mut out);
+    flush_group(&mut group, &mut out, &mut pending);
+    settle(&mut out, &mut pending);
     out
+}
+
+/// Emit the group as an assistant message. A new assistant message
+/// means the previous one's calls can no longer be answered, so they
+/// are settled first; the new message's calls become the pending set.
+fn flush_group<'a>(
+    group: &mut AssistantGroup<'a>,
+    out: &mut Vec<WireMessage<'a>>,
+    pending: &mut Vec<(&'a str, &'a str)>,
+) {
+    if group.text.is_none() && group.calls.is_empty() && group.reasoning.is_none() {
+        return;
+    }
+    settle(out, pending);
+    pending.extend(group.calls.iter().map(|c| (c.id, c.function.name)));
+    group.flush(out);
+}
+
+/// Answer every still-pending call with a synthesized result.
+fn settle<'a>(out: &mut Vec<WireMessage<'a>>, pending: &mut Vec<(&'a str, &'a str)>) {
+    out.extend(
+        pending
+            .drain(..)
+            .map(|(id, name)| WireMessage::orphan_result(id, name)),
+    );
 }
 
 /// One streamed chunk. `choices[0]` is all hi reads of a content
@@ -1017,6 +1074,7 @@ fn extract_model_ids(value: &serde_json::Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::AssistantBlock;
     use crate::provider::spawn_turn;
     use crate::test_support::{EchoTool, FakeApi, json_response, sse_response};
     use crate::{Event, spawn_agent_turn};
@@ -1968,5 +2026,201 @@ mod tests {
         let body = serde_json::to_value(&assistant).unwrap();
         assert_eq!(body["reasoning_text"], "one\ntwo");
         assert_eq!(body["content"], "mid");
+    }
+
+    // ---- orphan repair: a ToolCall with no ToolResult (Esc, quit, crash) ----
+
+    fn call(id: &str, name: &str) -> Message {
+        Message::ToolCall(crate::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: "{}".into(),
+        })
+    }
+
+    fn result(id: &str, name: &str, content: &str) -> Message {
+        Message::ToolResult(crate::tool::ToolResult {
+            call_id: id.into(),
+            name: name.into(),
+            content: content.into(),
+            is_error: false,
+            images: Vec::new(),
+        })
+    }
+
+    fn assistant(text: &str) -> Message {
+        Message::Assistant(vec![AssistantBlock::Text(text.into())])
+    }
+
+    /// The wire as `(role, tool_call_id | "calls:a,b")` pairs.
+    fn shape(history: &[Message]) -> Vec<String> {
+        let value = serde_json::to_value(wire_messages(history)).unwrap();
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| {
+                let role = m["role"].as_str().unwrap();
+                if let Some(id) = m["tool_call_id"].as_str() {
+                    format!("{role}:{id}")
+                } else if let Some(calls) = m["tool_calls"].as_array() {
+                    let ids: Vec<&str> = calls.iter().map(|c| c["id"].as_str().unwrap()).collect();
+                    format!("{role}:calls:{}", ids.join(","))
+                } else {
+                    role.to_string()
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_orphan_call_followed_by_a_user_message_is_answered_before_it() {
+        let history = [
+            Message::User("go".into()),
+            call("a", "bash"),
+            Message::User("next".into()),
+        ];
+        assert_eq!(
+            shape(&history),
+            ["user", "assistant:calls:a", "tool:a", "user"]
+        );
+        let value = serde_json::to_value(wire_messages(&history)).unwrap();
+        let text = value[2]["content"].as_str().unwrap();
+        assert!(
+            text.contains("cancelled before a result was recorded"),
+            "{text}"
+        );
+        assert!(
+            text.contains("may have run"),
+            "must not claim nothing happened: {text}"
+        );
+        assert_eq!(value[2]["name"], "bash");
+    }
+
+    #[test]
+    fn a_partially_answered_batch_gets_each_id_answered_exactly_once() {
+        let history = [
+            Message::User("go".into()),
+            call("a", "bash"),
+            call("b", "read"),
+            call("c", "bash"),
+            result("b", "read", "ok"),
+            Message::User("next".into()),
+        ];
+        let wire = shape(&history);
+        assert_eq!(
+            wire,
+            [
+                "user",
+                "assistant:calls:a,b,c",
+                "tool:b",
+                "tool:a",
+                "tool:c",
+                "user"
+            ]
+        );
+        // The real result keeps its text; only the missing ids are synthesized.
+        let value = serde_json::to_value(wire_messages(&history)).unwrap();
+        assert_eq!(value[2]["content"], "ok");
+    }
+
+    #[test]
+    fn an_orphan_at_the_end_of_the_history_is_answered() {
+        let history = [Message::User("go".into()), call("a", "bash")];
+        assert_eq!(shape(&history), ["user", "assistant:calls:a", "tool:a"]);
+    }
+
+    #[test]
+    fn an_orphan_followed_by_partial_text_then_a_user_message_is_answered() {
+        // The order Esc produces: ToolCall, then the turn's partial
+        // text as an Assistant message, then the next human message.
+        let history = [
+            Message::User("go".into()),
+            call("a", "bash"),
+            assistant("partial"),
+            Message::User("next".into()),
+        ];
+        assert_eq!(
+            shape(&history),
+            ["user", "assistant:calls:a", "tool:a", "user"]
+        );
+    }
+
+    #[test]
+    fn a_later_round_after_an_orphan_does_not_leave_it_unanswered() {
+        let history = [
+            Message::User("go".into()),
+            call("a", "bash"),
+            Message::User("again".into()),
+            call("b", "bash"),
+            result("b", "bash", "done"),
+        ];
+        assert_eq!(
+            shape(&history),
+            [
+                "user",
+                "assistant:calls:a",
+                "tool:a",
+                "user",
+                "assistant:calls:b",
+                "tool:b"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_orphan_reloaded_from_a_session_file_is_repaired_on_replay() {
+        let root = std::env::temp_dir().join(format!("hi-orphan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut session = crate::Session::start_in(
+            &root,
+            std::path::Path::new("/p"),
+            "mock",
+            "mock",
+            None,
+            None,
+        )
+        .unwrap();
+        session
+            .append(&[Message::User("go".into()), call("a", "bash")])
+            .unwrap();
+        let path = session.path().to_path_buf();
+        let before = std::fs::read(&path).unwrap();
+        let loaded = crate::session::load(&path).unwrap().messages;
+        let mut history = loaded;
+        history.push(Message::User("next".into()));
+        assert_eq!(
+            shape(&history),
+            ["user", "assistant:calls:a", "tool:a", "user"]
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before, "file not rewritten");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_well_formed_history_serializes_unchanged() {
+        let history = [
+            Message::User("go".into()),
+            assistant("thinking aloud"),
+            call("a", "bash"),
+            call("b", "read"),
+            result("a", "bash", "one"),
+            result("b", "read", "two"),
+            assistant("done"),
+            Message::User("thanks".into()),
+        ];
+        assert_eq!(
+            serde_json::to_string(&wire_messages(&history)).unwrap(),
+            concat!(
+                r#"[{"role":"user","content":"go"},"#,
+                r#"{"role":"assistant","content":"thinking aloud","tool_calls":["#,
+                r#"{"id":"a","type":"function","function":{"name":"bash","arguments":"{}"}},"#,
+                r#"{"id":"b","type":"function","function":{"name":"read","arguments":"{}"}}]},"#,
+                r#"{"role":"tool","content":"one","tool_call_id":"a","name":"bash"},"#,
+                r#"{"role":"tool","content":"two","tool_call_id":"b","name":"read"},"#,
+                r#"{"role":"assistant","content":"done"},"#,
+                r#"{"role":"user","content":"thanks"}]"#,
+            )
+        );
     }
 }
