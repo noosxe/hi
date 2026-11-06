@@ -774,3 +774,72 @@ fn resumed_thinking_replays_to_the_provider() {
     );
     assert_eq!(assistant["content"], REPLY);
 }
+
+/// #167: `--session` by path and by id reopened nothing — the file path
+/// was handed to the "newest session in this directory" lookup. Two
+/// sessions exist; the *older* one must be the one appended to.
+#[test]
+fn session_flag_reopens_that_exact_session_by_path_and_id() {
+    let env = Env::new("session-flag");
+    let project = env.project("session-flag-proj");
+    let api = FakeApi::start(
+        [
+            reply_script(),
+            reply_script(),
+            reply_script(),
+            reply_script(),
+        ]
+        .concat(),
+    );
+    env.write_models_json(api.url(), plain_model());
+    let base = ["-p", "--provider", "fake", "--model", "fake-mini"];
+    let with = |extra: &[&str], prompt: &'static str| -> Vec<String> {
+        extra
+            .iter()
+            .copied()
+            .chain(base)
+            .chain([prompt])
+            .map(String::from)
+            .collect()
+    };
+    let go = |args: Vec<String>| {
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        run(&project, &env, &refs)
+    };
+
+    let (code, _, stderr) = go(with(&[], "older"));
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let older = session_files(&env)[0].clone();
+    std::thread::sleep(Duration::from_millis(1100));
+    let (code, _, stderr) = go(with(&[], "newer"));
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let files = session_files(&env);
+    assert_eq!(files.len(), 2);
+    let newer = files.iter().find(|f| **f != older).unwrap().clone();
+    let lines = |p: &Path| std::fs::read_to_string(p).unwrap().lines().count();
+    let newer_lines = lines(&newer);
+
+    // By path.
+    let before = lines(&older);
+    let (code, _, stderr) = go(with(&["--session", older.to_str().unwrap()], "by path"));
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(lines(&older) > before, "older session was appended to");
+    assert_eq!(lines(&newer), newer_lines, "newest session untouched");
+
+    // By id (the file stem is `<timestamp>_<id>`).
+    let id = older
+        .file_stem()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .rsplit('_')
+        .next()
+        .unwrap()
+        .to_string();
+    let before = lines(&older);
+    let (code, _, stderr) = go(with(&["--session", &id], "by id"));
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(lines(&older) > before, "older session appended again by id");
+    assert_eq!(lines(&newer), newer_lines, "newest session untouched");
+    assert_eq!(session_files(&env).len(), 2, "no new file");
+}

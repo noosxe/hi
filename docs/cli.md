@@ -30,6 +30,11 @@ them combines with `--mock` or `--no-session`. `--session` that resolves to
 get a y/N fork prompt (pi's), headlessly a hard error naming `--fork`. A
 `--session`/`--fork` argument matching nothing is a hard error.
 
+`--session` and the `--resume` picker open exactly the chosen file
+(`open_session_file` → `session::load`); only `--continue` does a
+newest-in-directory lookup (`open_latest`). Never pass a file path where
+a project directory is expected (#167).
+
 Session layout and the on-disk format are in [core.md](core.md).
 | `--tools <BUNDLE>` | Built-in set: `none` \| `read-only` \| `coding` \| `all` (default `coding`, or `defaultTools` in settings) |
 
@@ -75,10 +80,11 @@ otherwise (interactive):
        stamp_session_cache_key re-stamps the provider with the session
        id (the prompt-cache routing key, AD-0007):
        --fork      → session::resolve + Session::fork_from + load copy
-       --session   → resolve → resume (Local) | fork prompt (Global,
-                     interactive) | refusal (Global, --print)
-       --resume    → sessions_in + hi_tui::pick_session (interactive only)
-       --continue  → session::latest + Session::resume
+       --session   → resolve → open_session_file(path) (Local) | fork prompt
+                     (Global, interactive) | refusal (Global, --print)
+       --resume    → sessions_in + hi_tui::pick_session →
+                     open_session_file(chosen path) (interactive only)
+       --continue  → open_latest(cwd): session::latest + Session::resume
        otherwise   → Session::start(provider, model, thinking, name)
   7. launch(...) → hi_tui::run(...)
 ```

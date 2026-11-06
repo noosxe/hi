@@ -816,3 +816,74 @@ fn shift_enter_multiline_input_lifecycle_over_a_real_pty() {
         "/exit did not exit cleanly"
     );
 }
+
+#[test]
+fn resume_picker_reopens_the_chosen_older_session_and_appends_to_it() {
+    // #167: every picker row failed with "no previous session" because
+    // the chosen file path was used as a directory. Two sessions in one
+    // project; the picker must open the OLDER one, not the newest.
+    let url = fake_sse_endpoint("pty reply ok");
+    let models = format!(
+        "{{\"providers\":{{\"fake\":{{\"baseUrl\":\"{url}\",\"apiKey\":\"k\",\"models\":[{{\"id\":\"fake-mini\"}}]}}}}}}"
+    );
+    let (cwd, data_home, config_home) = fresh_xdg();
+    let dir = config_home.join("hi");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("models.json"), models).unwrap();
+    for prompt in ["older-marker", "newer-marker"] {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_hi"))
+            .args(["-p", "--provider", "fake", "--model", "fake-mini", prompt])
+            .stdin(std::process::Stdio::null())
+            .env("XDG_DATA_HOME", &data_home)
+            .env("XDG_CONFIG_HOME", &config_home)
+            .current_dir(&cwd)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(1100)); // distinct mtimes
+    }
+    let files = session_files(&data_home);
+    assert_eq!(files.len(), 2);
+    let older = files
+        .iter()
+        .find(|f| std::fs::read_to_string(f).unwrap().contains("older-marker"))
+        .unwrap()
+        .clone();
+    let newer = files.iter().find(|f| **f != older).unwrap().clone();
+    let newer_before = std::fs::read_to_string(&newer).unwrap();
+
+    let mut tui = Tui::spawn_in(
+        &["--resume", "--provider", "fake", "--model", "fake-mini"],
+        cwd,
+        data_home.clone(),
+        config_home,
+        ROWS,
+        COLS,
+    );
+    tui.sees("older-marker");
+    tui.write("older-marker"); // type-to-filter down to the older row
+    tui.until("filter applied", Duration::from_secs(10), |f| {
+        !f.contains("newer-marker")
+    });
+    tui.write("\r");
+    tui.sees("\u{2500}"); // the main TUI booted: no resume error
+    tui.type_keys("pty followup");
+    tui.write("\r");
+    tui.settled_turn("pty reply ok");
+    assert!(tui.exits_cleanly(Duration::from_secs(20)));
+    assert!(
+        std::fs::read_to_string(&older)
+            .unwrap()
+            .contains("pty followup"),
+        "the chosen older session was appended to"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&newer).unwrap(),
+        newer_before,
+        "the newest session must stay untouched"
+    );
+}
