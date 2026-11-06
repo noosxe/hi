@@ -21,7 +21,7 @@ agent 11, walk 11, headless 11, message 4, catalog 5, context_report 4, grep 8, 
 config 6, system_prompt 6, tasks-tool 6, bash 6, mod 6, image_resize 6, subagent-tool 9,
 find 4, write 3, ls 3, thinking 3, mock 2, event 1, tool 1. tui: app 101,
 ui 33, status 12, markdown 19, kitty 12, wrap 12, editor 9, picker 7, scroll 7,
-commands 4, clipboard 3, keybinds 3, theme 3, catalog 2. cli: 10 unit + 10 wire + 3 auto-print + 3 json-mode + 8 pty integration
+commands 4, clipboard 3, keybinds 3, theme 3, catalog 2. cli: 10 unit + 10 wire + 3 auto-print + 3 json-mode + 10 pty integration
 (`tests/tui_pty.rs` — the real binary in a pseudo-terminal, its byte stream
 rendered by the avt emulator (asciinema's), and every wait a predicate over
 rendered frames — typed keys must echo in the composer, a settled turn must
