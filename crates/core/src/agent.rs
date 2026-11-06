@@ -138,6 +138,9 @@ fn run_agent_turn(
                 // the turn truly ends: after a settled round, after a
                 // failed round, or at the round cap.
                 Event::TurnEnd => {}
+                // Providers never send probes; if one did, it is not
+                // content and is not forwarded.
+                Event::Heartbeat => {}
             }
         }
         if failed {
@@ -167,7 +170,8 @@ fn run_agent_turn(
         // Deterministic beats clever: results land in a stable order,
         // and parallel execution is background-task territory (#5).
         for call in &calls {
-            let result = decide_and_execute(gate, &registry, call);
+            let result =
+                decide_and_execute(gate, &registry, call, &|| tx.send(Event::Heartbeat).is_ok());
             working.push(Message::ToolResult(result.clone()));
             if tx.send(Event::ToolResult(result)).is_err() {
                 return;
@@ -190,6 +194,7 @@ fn decide_and_execute(
     gate: Option<&ToolGate>,
     registry: &ToolRegistry,
     call: &ToolCall,
+    alive: &dyn Fn() -> bool,
 ) -> ToolResult {
     let denied = |content: String| ToolResult {
         call_id: call.id.clone(),
@@ -221,7 +226,7 @@ fn decide_and_execute(
     let Some(tool) = registry.get(&call.name) else {
         return denied(format!("unknown tool: {}", call.name));
     };
-    match tool.execute_with_images(&arguments) {
+    match tool.execute_with_probe(&arguments, alive) {
         Ok(output) => ToolResult {
             call_id: call.id.clone(),
             name: call.name.clone(),
@@ -676,5 +681,110 @@ mod tests {
             panic!("expected the tool result in the replay");
         };
         assert_eq!(result.images.len(), 1);
+    }
+
+    fn probe_round() -> Vec<Vec<Event>> {
+        vec![
+            vec![
+                Event::TurnStart,
+                Event::ToolCall(call("p1", "probe", "{}")),
+                Event::TurnEnd,
+            ],
+            vec![Event::TurnStart, Event::Token("ok".into()), Event::TurnEnd],
+        ]
+    }
+
+    #[test]
+    fn a_tool_probe_sends_heartbeats_and_sees_a_live_consumer() {
+        // #170: the loop builds the probe from its own `tx`.
+        let provider = Arc::new(ScriptedProvider::new(probe_round()));
+        let registry = registry_with(Arc::new(crate::test_support::ProbeTool { probes: 3 }));
+        let events = collect(spawn_agent_turn(provider, registry, None, &[], 4));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, Event::Heartbeat))
+                .count(),
+            3
+        );
+        assert_eq!(tool_results(&events)[0].content, "alive 3/3");
+        // One TurnStart, one TurnEnd, still.
+        assert_eq!(events.first(), Some(&Event::TurnStart));
+        assert_eq!(events.last(), Some(&Event::TurnEnd));
+    }
+
+    #[test]
+    fn a_probe_fails_once_the_receiver_is_dropped() {
+        // The tool blocks until the consumer is gone, then probes.
+        struct Gate(
+            std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+            std::sync::Mutex<std::sync::mpsc::Sender<bool>>,
+        );
+        impl Tool for Gate {
+            fn name(&self) -> &str {
+                "probe"
+            }
+            fn description(&self) -> &str {
+                "waits, then probes"
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+            fn execute(&self, _: &str) -> Result<String, String> {
+                unreachable!()
+            }
+            fn execute_with_probe(
+                &self,
+                _: &str,
+                alive: &dyn Fn() -> bool,
+            ) -> Result<ToolOutput, String> {
+                self.0.lock().unwrap().recv().unwrap();
+                self.1.lock().unwrap().send(alive()).unwrap();
+                Ok("x".to_string().into())
+            }
+        }
+        let (go_tx, go_rx) = std::sync::mpsc::channel();
+        let (seen_tx, seen_rx) = std::sync::mpsc::channel();
+        let provider = Arc::new(ScriptedProvider::new(probe_round()));
+        let registry = registry_with(Arc::new(Gate(
+            std::sync::Mutex::new(go_rx),
+            std::sync::Mutex::new(seen_tx),
+        )));
+        let rx = spawn_agent_turn(provider, registry, None, &[], 4);
+        for event in rx.iter() {
+            if matches!(event, Event::ToolCall(_)) {
+                break;
+            }
+        }
+        drop(rx);
+        go_tx.send(()).unwrap();
+        assert!(
+            !seen_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap(),
+            "the probe must report the dropped receiver"
+        );
+    }
+
+    #[test]
+    fn a_provider_heartbeat_is_swallowed_not_forwarded() {
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            Event::TurnStart,
+            Event::Heartbeat,
+            Event::Token("hi".into()),
+            Event::Heartbeat,
+            Event::TurnEnd,
+        ]]));
+        let events = collect(spawn_agent_turn(
+            provider,
+            Arc::new(ToolRegistry::new()),
+            None,
+            &[],
+            4,
+        ));
+        assert_eq!(
+            events,
+            vec![Event::TurnStart, Event::Token("hi".into()), Event::TurnEnd]
+        );
     }
 }

@@ -66,6 +66,11 @@ impl FakeApi {
             .unwrap_or_default()
     }
 
+    /// How many requests have arrived so far.
+    pub fn request_count(&self) -> usize {
+        self.requests.lock().unwrap().len()
+    }
+
     /// The `index`-th recorded request (0-based), if it happened.
     pub fn request(&self, index: usize) -> Option<String> {
         self.requests.lock().unwrap().get(index).cloned()
@@ -183,6 +188,36 @@ impl Provider for ScriptedProvider {
                 return;
             }
         }
+    }
+}
+
+/// Probes its liveness `probes` times via `execute_with_probe` and
+/// reports how many probes saw a live consumer (#170) — the way tests
+/// make `Event::Heartbeat`s reach a real consumer.
+pub(crate) struct ProbeTool {
+    pub probes: usize,
+}
+
+impl crate::tool::Tool for ProbeTool {
+    fn name(&self) -> &str {
+        "probe"
+    }
+    fn description(&self) -> &str {
+        "probes liveness"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    fn execute(&self, _arguments: &str) -> Result<String, String> {
+        Err("the loop must call execute_with_probe".into())
+    }
+    fn execute_with_probe(
+        &self,
+        _arguments: &str,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<crate::tool::ToolOutput, String> {
+        let live = (0..self.probes).filter(|_| alive()).count();
+        Ok(format!("alive {live}/{}", self.probes).into())
     }
 }
 

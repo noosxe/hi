@@ -34,6 +34,7 @@ per frame (event_loop polls keys with 50ms timeout):
             ├─ ToolCall(c)   → flush pending text as Assistant, push ToolCall
             ├─ ToolResult(r) → push ToolResult
             ├─ Error(m)      → turn.error = Some(m)
+            ├─ Heartbeat     → ignored (liveness probe, #170)
             └─ TurnEnd       → finalize (below)
 
 finalize:
@@ -71,9 +72,19 @@ into the scrollback above the viewport exactly once
   send and everything unwinds.
 - Subagents (#4) ride this contract one level down: a subagent is an
   in-flight tool call, so a cancelled turn abandons its thread exactly as
-  it abandons a running `bash`; the abandoned subagent then self-stops at
-  its *own* next `send` — the same dropped-`Receiver` contract, no new
-  cancellation primitive.
+  it abandons a running `bash` (a tool already running may finish). But
+  the subagent does **not** self-stop on its own: `SubagentRunner::run`
+  owns and drains the subagent's `Receiver`, so its sends keep succeeding,
+  and the parent loop is blocked inside the tool and sends nothing (#170).
+  So the dropped `Receiver` stays the only cancellation signal, probed by
+  sending: `Event::Heartbeat` (no content; every consumer ignores it) is
+  sent on the parent's channel via `Tool::execute_with_probe`'s
+  `alive: &dyn Fn() -> bool`. The runner drains with `recv_timeout`
+  (250ms) and probes on every quiet interval and at least once per
+  interval under a steady stream. A failed probe flushes the completed
+  transcript, drops the subagent's `Receiver` and returns `Err`; the
+  subagent's loop then stops at its next send — no further provider
+  round, no further tool call.
 
 ## Cancellation (Esc)
 

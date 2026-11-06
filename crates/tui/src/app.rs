@@ -2555,6 +2555,7 @@ keeping the old provider until you /model"
         while let Ok(event) = turn.rx.try_recv() {
             match event {
                 Event::TurnStart => {} // nothing to do yet — tokens follow
+                Event::Heartbeat => {} // liveness probe (#170): no state change
                 Event::Token(token) => {
                     hi_core::message::AssistantBlock::push_text(&mut turn.blocks, &token);
                 }
@@ -5456,5 +5457,44 @@ mod tests {
         assert_eq!(roles, ["user", "assistant", "tool", "user"], "{body}");
         assert_eq!(body["messages"][2]["tool_call_id"], "call_1");
         assert_eq!(body["messages"][3]["content"], "next");
+    }
+
+    #[test]
+    fn a_heartbeat_changes_nothing_in_the_pump() {
+        // #170: a probing tool's Heartbeats must be invisible.
+        let mut app = test_app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.turn = Some(Turn {
+            blocks: vec![hi_core::message::AssistantBlock::Text("so far".into())],
+            error: None,
+            started_at: Instant::now(),
+            rx,
+        });
+        let label = app
+            .activity_label()
+            .map(|l| l.replace(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'], ""));
+        let before = (app.messages.clone(), app.usage, app.queued.clone());
+        for _ in 0..3 {
+            tx.send(Event::Heartbeat).unwrap();
+        }
+        app.pump();
+        let turn = app
+            .turn
+            .as_ref()
+            .expect("a heartbeat never finalizes the turn");
+        assert_eq!(
+            turn.blocks,
+            vec![hi_core::message::AssistantBlock::Text("so far".into())]
+        );
+        assert_eq!(turn.error, None);
+        assert_eq!(
+            (app.messages.clone(), app.usage, app.queued.clone()),
+            before
+        );
+        assert_eq!(
+            app.activity_label()
+                .map(|l| l.replace(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'], "")),
+            label
+        );
     }
 }

@@ -61,11 +61,16 @@ the pre-thinking plain string (upgraded to one `Text` block on replay).
 
 ## event.rs — the turn event stream
 
-`enum Event { TurnStart, Token(String), ToolCall(ToolCall), ToolResult(ToolResult), TurnEnd, Error(String) }`,
+`enum Event { TurnStart, Token(String), Thinking{..}, ToolCall(ToolCall), ToolResult(ToolResult), Usage(Usage), TurnEnd, Error(String), Heartbeat }`,
 `Clone + PartialEq`. This is how a turn in progress talks to the UI.
 **Invariants (the single finalization path)**
 - A turn always emits `TurnStart` first and exactly one `TurnEnd` last.
 - `Token`s arrive in order; concatenating them reproduces the full reply.
+- `Heartbeat` (#170) carries no content: a liveness probe a long-running
+  tool sends on the consumer's channel to detect a dropped `Receiver`.
+  Every consumer (TUI `pump`, headless, the subagent drain, the agent
+  loop for provider events) ignores it; it never reaches a transcript or
+  session file.
 - On failure: partial `Token`s still stand, then exactly one `Error`, then
   `TurnEnd`. Producers: see `OpenAiCompatProvider::respond`. Consumers
   therefore need exactly one finalize code path (`App::pump` is the reference
@@ -89,7 +94,9 @@ the pre-thinking plain string (upgraded to one `Text` block on replay).
   ran, `serde(default)` + skipped when empty so pre-image session files load unchanged.
 - Image-producing tools override `execute_with_images -> ToolOutput { content, images }`;
   the default wraps `execute` with no images, so image support stays opt-in per tool and the
-  loop calls only the image-aware path.
+  loop calls only the image-aware path — specifically `Tool::execute_with_probe(args,
+  alive)`, whose default forwards to `execute_with_images` and ignores the liveness probe;
+  only `subagent` overrides it (#170).
 - The interception seam: `ToolGate = dyn Fn(&ToolCall) -> ToolDecision`, with
   `ToolDecision::{ Allow, Deny(reason), Mutate(arguments) }`. A plain function type on purpose —
   the extension host (#6) backs this seam from outside core, so core stays runtime-free.
@@ -200,7 +207,11 @@ findable without hunting. The `settings.subagents` master switch
 not erroring — and is startup policy. The `subagent` tool
 (`tools/subagent.rs`) is the model
 surface: `{prompt, provider?, model?, thinking?, tools?, max_rounds?}`,
-result plus an up/down token line; in `coding`/`all` only.
+result plus an up/down token line; in `coding`/`all` only. `run_probed`
+(#170) probes the parent's liveness every 250ms (see turn-lifecycle.md): a
+cancelled parent flushes the transcript, drops the subagent's `Receiver`
+and returns `Err`, so no further round or tool call starts; a tool already
+running inside may finish. `run` is `run_probed` with an always-true probe.
 
 ## tasks.rs — work that outlives a turn (#5)
 
