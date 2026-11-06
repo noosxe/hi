@@ -734,7 +734,7 @@ fn open_session(
     // hint headlessly — never silently appended to.
     if let Some(arg) = cli.session.as_deref() {
         return match hi_core::session::resolve(cwd, arg)? {
-            hi_core::session::SessionRef::Local(path) => open_resumed(&path).map(Some),
+            hi_core::session::SessionRef::Local(path) => open_session_file(&path).map(Some),
             hi_core::session::SessionRef::Global { path, cwd: other } => {
                 if !interactive {
                     Err(format!(
@@ -773,12 +773,12 @@ fn open_session(
             return Err("no previous sessions in this directory".into());
         }
         return match hi_tui::pick_session(&summaries) {
-            Some(path) => open_resumed(&path).map(Some),
+            Some(path) => open_session_file(&path).map(Some),
             None => Ok(None),
         };
     }
     if cli.continue_last {
-        return Ok(Some(open_resumed(cwd).unwrap_or_else(|warning| {
+        return Ok(Some(open_latest(cwd).unwrap_or_else(|warning| {
             eprintln!("hi: {warning}");
             OpenedSession::fresh()
         })));
@@ -812,10 +812,21 @@ fn confirm(question: &str) -> Result<bool, String> {
     Ok(matches!(answer.trim().to_lowercase().as_str(), "y" | "yes"))
 }
 
-/// Reopen the newest session file for `cwd` and prepare it for
-/// continued appending. A system note marks the seam in the transcript.
-fn open_resumed(cwd: &std::path::Path) -> Result<OpenedSession, String> {
+/// Reopen the newest session file for `cwd` — the `--continue` half.
+fn open_latest(cwd: &Path) -> Result<OpenedSession, String> {
     let loaded = hi_core::session::latest(cwd)?.ok_or("no previous session in this directory")?;
+    resume_loaded(loaded)
+}
+
+/// Reopen exactly the session file at `path` (`--session`, `--resume`
+/// picker rows) — never the newest one in some directory.
+fn open_session_file(path: &Path) -> Result<OpenedSession, String> {
+    resume_loaded(hi_core::session::load(path)?)
+}
+
+/// Prepare a loaded session for continued appending. A system note
+/// marks the seam in the transcript.
+fn resume_loaded(loaded: hi_core::session::LoadedSession) -> Result<OpenedSession, String> {
     let session = Session::resume(&loaded.path)?;
     let count = loaded.messages.len();
     let mut messages = loaded.messages;
