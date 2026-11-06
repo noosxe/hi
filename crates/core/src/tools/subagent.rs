@@ -5,7 +5,7 @@
 
 use crate::subagent::{SUBAGENT_HIGH_TOKEN_USE, SubagentRunner, SubagentSpec};
 use crate::thinking::ThinkingLevel;
-use crate::tool::{Tool, ToolAnnotations};
+use crate::tool::{Tool, ToolAnnotations, ToolOutput};
 
 use super::{args_object, opt_str, opt_usize};
 
@@ -90,6 +90,20 @@ impl Tool for SubagentTool {
     }
 
     fn execute(&self, arguments: &str) -> Result<String, String> {
+        self.run(arguments, &|| true)
+    }
+
+    fn execute_with_probe(
+        &self,
+        arguments: &str,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<ToolOutput, String> {
+        self.run(arguments, alive).map(ToolOutput::from)
+    }
+}
+
+impl SubagentTool {
+    fn run(&self, arguments: &str, alive: &dyn Fn() -> bool) -> Result<String, String> {
         let args = args_object(arguments)?;
         let Some(prompt) = opt_str(&args, "prompt")? else {
             return Err("subagent needs `prompt`".into());
@@ -112,7 +126,7 @@ impl Tool for SubagentTool {
             tools,
             max_tool_rounds: opt_usize(&args, "max_rounds")?,
         };
-        let result = self.runner.run(&spec)?;
+        let result = self.runner.run_probed(&spec, alive)?;
         let mut line = format!(
             "(subagent: ↑{} ↓{} tokens, {} tool round(s)",
             result.usage.prompt_tokens, result.usage.completion_tokens, result.rounds
@@ -270,5 +284,69 @@ mod tests {
             .execute(r#"{"prompt":"x","provider":"ghost"}"#)
             .unwrap_err();
         assert!(err.contains("ghost"), "{err}");
+    }
+
+    #[test]
+    fn a_cancelled_parent_stops_the_subagent() {
+        // #170, inverted from the repro: the parent's Receiver is
+        // dropped during the subagent's first bash; the second bash
+        // must never run and no further provider request is made.
+        use crate::tools::{ImageGate, ToolBundle};
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+        let dir = std::env::temp_dir().join(format!("hi-sub-esc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        let tc = |id: &str, name: &str, args: &str| {
+            let frag = serde_json::json!({"choices":[{"delta":{"tool_calls":[
+                {"index":0,"id":id,"function":{"name":name,"arguments":args}}]}}]});
+            sse_response(&[&frag.to_string(), "[DONE]"])
+        };
+        let api = FakeApi::start_sequence(vec![
+            tc("p1", "subagent", r#"{"prompt":"dig"}"#),
+            tc(
+                "s1",
+                "bash",
+                &format!(r#"{{"command":"sleep 1; touch {}"}}"#, a.display()),
+            ),
+            tc(
+                "s2",
+                "bash",
+                &format!(r#"{{"command":"touch {}"}}"#, b.display()),
+            ),
+            reply("done"),
+        ]);
+        let run = runner(&api.base_url);
+        run.stamp("prov", "m");
+        let registry =
+            Arc::new(ToolBundle::Coding.registry(&dir, ImageGate::new(false), None, Some(run)));
+        let provider = Arc::new(
+            crate::OpenAiCompatProvider::new(api.base_url.clone(), None, "m")
+                .with_tools(Arc::clone(&registry)),
+        );
+        let rx = crate::spawn_agent_turn(
+            provider,
+            registry,
+            None,
+            &[crate::message::Message::User("u".into())],
+            8,
+        );
+        for event in rx.iter() {
+            if matches!(event, crate::event::Event::ToolCall(_)) {
+                break;
+            }
+        }
+        drop(rx); // Esc
+        // Wait until the in-flight bash has demonstrably finished…
+        let start = Instant::now();
+        while !a.exists() {
+            assert!(start.elapsed() < Duration::from_secs(15), "timed out");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // …plus a margin in which a (buggy) second round would run.
+        std::thread::sleep(Duration::from_millis(1000));
+        assert!(!b.exists(), "second bash ran after cancel");
+        assert_eq!(api.request_count(), 2, "provider rounds after cancel");
     }
 }

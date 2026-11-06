@@ -153,7 +153,8 @@ pub fn run_with(
     let mut bill: Option<Usage> = None;
     for event in rx {
         match event {
-            Event::TurnStart => {}
+            // Heartbeats (#170) are liveness probes, not output.
+            Event::TurnStart | Event::Heartbeat => {}
             Event::Token(token) => {
                 sink(&JsonRecord::Token {
                     delta: token.clone(),
@@ -681,6 +682,75 @@ mod tests {
                     reasoning_tokens: Some(100),
                 },
             }
+        );
+    }
+
+    #[test]
+    fn heartbeats_are_invisible_to_json_output_and_the_session_file() {
+        // #170: a probing tool sends Heartbeats into the consumer's
+        // stream; the JSON records and the session file must be
+        // identical to a run whose tool never probed.
+        fn run_probing(probes: usize) -> (Vec<String>, Vec<Message>) {
+            let root = std::env::temp_dir()
+                .join(format!("hi-headless-hb-{}-{probes}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            let session =
+                Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+            let path = session.path().to_path_buf();
+            let provider = Arc::new(ScriptedProvider::new(vec![
+                vec![
+                    Event::ToolCall(ToolCall {
+                        id: "p1".into(),
+                        name: "probe".into(),
+                        arguments: "{}".into(),
+                    }),
+                    Event::TurnEnd,
+                ],
+                vec![Event::Token("done".into()), Event::TurnEnd],
+            ]));
+            let mut registry = ToolRegistry::new();
+            registry
+                .register(Arc::new(crate::test_support::ProbeTool { probes }))
+                .unwrap();
+            let mut history = Vec::new();
+            let mut lines = Vec::new();
+            run_with(
+                provider,
+                Arc::new(registry),
+                None,
+                &mut history,
+                "go",
+                Some(session),
+                DEFAULT_MAX_TOOL_ROUNDS,
+                &mut |record| lines.push(serde_json::to_string(record).unwrap()),
+            )
+            .unwrap();
+            (lines, crate::session::load(&path).unwrap().messages)
+        }
+        let (quiet_lines, quiet_session) = run_probing(0);
+        let (loud_lines, loud_session) = run_probing(5);
+        // Only the tool's own text differs; skip the session header
+        // (ids, timestamps) and normalize that text.
+        let norm = |s: String| {
+            s.replace("alive 5/5", "alive")
+                .replace("alive 0/0", "alive")
+        };
+        assert!(loud_lines.iter().any(|l| l.contains("alive 5/5")));
+        assert_eq!(
+            quiet_lines[1..]
+                .iter()
+                .cloned()
+                .map(norm)
+                .collect::<Vec<_>>(),
+            loud_lines[1..]
+                .iter()
+                .cloned()
+                .map(norm)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            norm(format!("{quiet_session:?}")),
+            norm(format!("{loud_session:?}"))
         );
     }
 }

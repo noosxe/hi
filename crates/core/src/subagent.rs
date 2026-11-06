@@ -13,7 +13,9 @@
 //! parallelism stays task_run territory (#5).
 
 use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::ToolGate;
 use crate::agent::spawn_agent_turn;
@@ -33,6 +35,51 @@ use crate::tools::{ImageGate, ToolBundle};
 fn flush_transcript(transcript: &mut Option<Session>, buf: &mut [Message]) {
     if let Some(session) = transcript.as_mut().filter(|_| !buf.is_empty()) {
         let _ = session.append(buf);
+    }
+}
+
+/// How often the runner probes the parent's liveness (#170): on every
+/// quiet interval, and at least this often under a steady event stream.
+const PROBE_INTERVAL: Duration = Duration::from_millis(250);
+
+/// What [`next_event`] found.
+#[derive(Debug, PartialEq)]
+enum Next {
+    Event(Event),
+    /// The subagent's loop finished and closed its channel.
+    Closed,
+    /// The probe failed: the parent's consumer is gone.
+    Cancelled,
+}
+
+/// Receive the next event, probing `alive` on every quiet `interval`
+/// and — so a fast stream cannot starve the check — at least once per
+/// `interval` while events keep arriving (#170).
+fn next_event(
+    rx: &Receiver<Event>,
+    interval: Duration,
+    last_probe: &mut Instant,
+    alive: &dyn Fn() -> bool,
+) -> Next {
+    loop {
+        match rx.recv_timeout(interval) {
+            Ok(event) => {
+                if last_probe.elapsed() >= interval {
+                    *last_probe = Instant::now();
+                    if !alive() {
+                        return Next::Cancelled;
+                    }
+                }
+                return Next::Event(event);
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                *last_probe = Instant::now();
+                if !alive() {
+                    return Next::Cancelled;
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => return Next::Closed,
+        }
     }
 }
 
@@ -158,16 +205,35 @@ impl SubagentRunner {
         self.parent.lock().unwrap().clone()
     }
 
+    /// Run one subagent to completion with no cancellation probe.
+    /// See [`Self::run_probed`].
+    pub fn run(&self, spec: &SubagentSpec) -> Result<SubagentResult, String> {
+        self.run_probed(spec, &|| true)
+    }
+
     /// Run one subagent to completion. Blocking by ruling: the tool
     /// loop is sequential, and the shaped [`SubagentResult`] is all
     /// the caller ever sees — intermediate events are drained, not
     /// surfaced. An `Event::Error` (network, HTTP, the round cap)
     /// becomes `Err`; the events contract (TurnStart…TurnEnd,
-    /// dropped-`Receiver` cancellation) is untouched — a cancelled
-    /// parent abandons the in-flight tool thread exactly as it
-    /// abandons a running `bash`, and the abandoned subagent
-    /// self-stops at its own next send.
-    pub fn run(&self, spec: &SubagentSpec) -> Result<SubagentResult, String> {
+    /// dropped-`Receiver` cancellation) is untouched.
+    ///
+    /// Cancellation (#170): the parent loop is blocked in this call
+    /// and sends nothing, and this runner owns (and drains) the
+    /// subagent's `Receiver`, so the subagent's own sends keep
+    /// succeeding — it would never notice a cancelled parent. So the
+    /// drain probes `alive` (a send of `Event::Heartbeat` on the
+    /// parent's channel) every [`PROBE_INTERVAL`]. When it fails, the
+    /// completed transcript is flushed, the `Receiver` is dropped
+    /// (the subagent's loop stops at its next send — no further
+    /// provider round, no further tool call) and `Err` is returned. A
+    /// tool already running inside the subagent is abandoned, not
+    /// killed, exactly like a parent `bash`.
+    pub fn run_probed(
+        &self,
+        spec: &SubagentSpec,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<SubagentResult, String> {
         // Identity: inherit the stamp, or resolve the override. The
         // parent's provider Arc is never reused — the subagent gets a
         // provider wired to *its* registry, not the parent's toolset.
@@ -262,7 +328,17 @@ impl SubagentRunner {
         // order. `load()` of the file reproduces the run's working
         // history exactly.
         let mut tbuf: Vec<Message> = Vec::new();
-        for event in rx {
+        let mut last_probe = Instant::now();
+        loop {
+            let event = match next_event(&rx, PROBE_INTERVAL, &mut last_probe, alive) {
+                Next::Event(event) => event,
+                Next::Closed => break,
+                Next::Cancelled => {
+                    flush_transcript(&mut transcript, &mut tbuf);
+                    failure = Some("subagent cancelled: the parent turn is gone".to_string());
+                    break;
+                }
+            };
             match event {
                 Event::Token(t) => AssistantBlock::push_text(&mut blocks, &t),
                 Event::Thinking { delta, field } => {
@@ -747,5 +823,169 @@ mod tests {
             })
             .unwrap_err();
         assert!(!err.is_empty());
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::mpsc::channel;
+
+    #[test]
+    fn next_event_probes_on_a_quiet_timeout() {
+        // #170: no events at all — only the timeout branch can notice.
+        let (_tx, rx) = channel::<Event>();
+        let probes = AtomicUsize::new(0);
+        let mut last = Instant::now();
+        let next = next_event(&rx, Duration::from_millis(10), &mut last, &|| {
+            probes.fetch_add(1, Ordering::SeqCst) < 2
+        });
+        assert_eq!(next, Next::Cancelled);
+        assert_eq!(probes.load(Ordering::SeqCst), 3, "kept probing while quiet");
+    }
+
+    #[test]
+    fn next_event_probes_under_a_steady_stream() {
+        // #170: events arrive faster than the interval, so the timeout
+        // never fires; the elapsed check must still probe.
+        let (tx, rx) = channel();
+        let sender = std::thread::spawn(move || {
+            for _ in 0..200 {
+                if tx.send(Event::Token("x".into())).is_err() {
+                    return true; // receiver dropped: cancelled in time
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            false
+        });
+        let mut last = Instant::now();
+        let interval = Duration::from_millis(40);
+        let mut seen = 0;
+        let end = loop {
+            match next_event(&rx, interval, &mut last, &|| false) {
+                Next::Event(_) => seen += 1,
+                other => break other,
+            }
+        };
+        assert_eq!(end, Next::Cancelled);
+        assert!(
+            seen > 0 && seen < 100,
+            "events flowed, then the probe cut in"
+        );
+        drop(rx);
+        assert!(sender.join().unwrap(), "the stream saw the receiver drop");
+    }
+
+    #[test]
+    fn next_event_passes_events_and_reports_close_when_alive() {
+        let (tx, rx) = channel();
+        tx.send(Event::Token("a".into())).unwrap();
+        drop(tx);
+        let mut last = Instant::now();
+        let alive = || true;
+        let step = Duration::from_millis(10);
+        assert_eq!(
+            next_event(&rx, step, &mut last, &alive),
+            Next::Event(Event::Token("a".into()))
+        );
+        assert_eq!(next_event(&rx, step, &mut last, &alive), Next::Closed);
+    }
+
+    fn tc(id: &str, name: &str, args: &str) -> String {
+        let frag = serde_json::json!({"choices":[{"delta":{"tool_calls":[
+            {"index":0,"id":id,"function":{"name":name,"arguments":args}}]}}]});
+        sse_response(&[&frag.to_string(), "[DONE]"])
+    }
+
+    fn spec(prompt: &str) -> SubagentSpec {
+        SubagentSpec {
+            prompt: prompt.into(),
+            provider: None,
+            model: None,
+            thinking: None,
+            tools: None,
+            max_tool_rounds: None,
+        }
+    }
+
+    #[test]
+    fn a_cancelled_run_flushes_the_completed_transcript_and_stops() {
+        // #170: round 1 completes (`true`); round 2 marks itself and
+        // sleeps. The probe fails once the marker exists, i.e. after
+        // round 1's events were sent. The completed rounds must reach
+        // the transcript file, run returns Err, and no third round runs.
+        let dir = std::env::temp_dir().join(format!("hi-sub-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.join("sessions");
+        let marker = dir.join("marker");
+        let api = FakeApi::start_sequence(vec![
+            tc("s1", "bash", r#"{"command":"true"}"#),
+            tc(
+                "s2",
+                "bash",
+                &format!(r#"{{"command":"touch {}; sleep 1"}}"#, marker.display()),
+            ),
+            sse_response(&[
+                "{\"choices\":[{\"delta\":{\"content\":\"late\"}}]}",
+                "[DONE]",
+            ]),
+        ]);
+        let runner = runner_with(&api.base_url, &dir, Some(&root));
+        runner.stamp("prov", "m");
+        let err = runner
+            .run_probed(&spec("dig"), &|| !marker.exists())
+            .unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+        // The transcript holds the completed round.
+        let project = std::fs::read_dir(&root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let file = std::fs::read_dir(project)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let loaded = crate::session::load(&file).unwrap();
+        assert_eq!(loaded.messages[0], Message::Harness("dig".into()));
+        assert!(
+            loaded
+                .messages
+                .iter()
+                .any(|m| matches!(m, Message::ToolResult(r) if r.call_id == "s1")),
+            "completed round flushed: {:?}",
+            loaded.messages
+        );
+        // Let the abandoned bash finish plus a margin: no third round.
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(api.request_count(), 2, "no provider round after cancel");
+    }
+
+    #[test]
+    fn an_uncancelled_probed_run_matches_a_plain_run() {
+        let reply = |text: &str| {
+            sse_response(&[
+                &format!("{{\"choices\":[{{\"delta\":{{\"content\":\"{text}\"}}}}]}}"),
+                "{\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":2}}",
+                "[DONE]",
+            ])
+        };
+        let run = |probed: bool| {
+            let api = FakeApi::start_sequence(vec![tc("c", "nope", "{}"), reply("fine")]);
+            let runner = runner_with(&api.base_url, &std::env::temp_dir(), None);
+            runner.stamp("prov", "m");
+            let calls = AtomicUsize::new(0);
+            let result = if probed {
+                runner.run_probed(&spec("x"), &|| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    true
+                })
+            } else {
+                runner.run(&spec("x"))
+            };
+            result.unwrap()
+        };
+        assert_eq!(run(true), run(false));
     }
 }

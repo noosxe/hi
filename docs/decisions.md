@@ -315,7 +315,8 @@ exactly once, at startup, where both inputs exist:
 - **Magic-byte sniffing, never extensions**: a `.png` full of text is text.
   Hand-rolled (png/jpeg/webp/gif — the four formats the `image_url` wire
   accepts); the only new dependency is `base64` (canonical, zero-transitive).
-- **`execute_with_images` is the only execution path the loop calls**; the
+- **`execute_with_images` is the execution path the loop reaches** (via
+  `Tool::execute_with_probe`, whose default forwards to it, #170); the
   default wraps `execute` with no images, so the other ten tools are
   untouched and image support stays opt-in per tool.
 
@@ -1335,8 +1336,12 @@ implementation. The rulings:
 - **No transcript persistence in v1.** The result rides the caller's
   transcript as an ordinary tool result (spawn-echo precedent);
   recording subagent runs as their own session files is a filed
-  follow-up. Cancellation needs no new primitive — the abandoned
-  subagent self-stops at its own next send (turn-lifecycle.md).
+  follow-up. Cancellation (corrected by #170): the dropped
+  `Receiver` is still the only signal, but the subagent does not
+  notice it by itself (the runner drains its channel; the parent is
+  blocked in the tool). `Event::Heartbeat` + `Tool::execute_with_probe`
+  let the runner probe the parent's channel and drop the subagent's
+  `Receiver` on failure (turn-lifecycle.md).
 
 **AD-0040 addendum (2026-10-18, field feedback):** the first hi-on-hi
 audit sharpened three edges without amending a ruling. Cap failures are

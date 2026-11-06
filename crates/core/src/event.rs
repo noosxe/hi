@@ -43,6 +43,13 @@ pub enum Event {
     /// `TurnEnd` still follows, so consumers keep a single
     /// finalization path and just mark the reply as failed.
     Error(String),
+    /// A liveness probe (#170). Carries no content and means nothing to
+    /// any consumer: it exists only so a long-running tool (the
+    /// subagent) can `send` and learn whether the `Receiver` is still
+    /// alive, since `mpsc::Sender` has no other way to notice a
+    /// disconnect. Every consumer ignores it; it never reaches a
+    /// transcript or session file.
+    Heartbeat,
 }
 
 /// Token economics of one round, raw from the wire. Raw counts —

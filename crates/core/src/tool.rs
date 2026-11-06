@@ -152,6 +152,20 @@ pub trait Tool: Send + Sync {
     fn execute_with_images(&self, arguments: &str) -> Result<ToolOutput, String> {
         self.execute(arguments).map(ToolOutput::from)
     }
+    /// Run the tool with a liveness probe (#170). `alive()` returns
+    /// `false` once the turn's consumer is gone (the dropped-`Receiver`
+    /// cancellation), so a long-running tool can stop starting new
+    /// work. The agent loop calls only this. The default ignores the
+    /// probe and forwards to [`Self::execute_with_images`]; only tools
+    /// that spawn further work (the subagent) override it.
+    fn execute_with_probe(
+        &self,
+        arguments: &str,
+        alive: &dyn Fn() -> bool,
+    ) -> Result<ToolOutput, String> {
+        let _ = alive;
+        self.execute_with_images(arguments)
+    }
 }
 
 /// The UI-facing snapshot of one registered tool: its key, its
