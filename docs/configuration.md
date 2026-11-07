@@ -255,8 +255,14 @@ transcripts are generated data):
 ~/.local/share/hi/sessions/--Users-mechsoull-Projects-hi--/1760000000000_<uuid>.jsonl
 ```
 
-- The directory name is the cwd, pi-style (`/` → `-`, wrapped in `--`), so
-  resume is per-project by construction.
+- The directory name is the cwd, pi-style (`/` → `-`, wrapped in `--`).
+  That encoding is lossy and can collide (`/work/my-app` and
+  `/work/my/app` share `--work-my-app--`), so the directory is only a
+  candidate set: the header's `cwd` decides whose session a file is, and
+  resume (`--continue`, `--resume`, `/resume`, id matching) lists only
+  files whose header `cwd` is the current directory. Colliding projects
+  may share a directory; the encoding stays so existing directories keep
+  working.
 - Line 1 is the session header (`type:"session"`, camelCase: `id`,
   `createdAt`, `cwd`, `provider`, `model`, optional `thinking`, `version`).
   Every later line is one finalized message:

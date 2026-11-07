@@ -290,7 +290,16 @@ keeps the current value, a vanished model falls back with a warning
 (`selection::model_available` is the availability rule).
 
 One JSONL file per session under the data dir (`config::data_dir()` +
-`sessions/`), in a cwd-keyed project directory (pi-style encoding).
+`sessions/`), in a cwd-keyed project directory (pi-style encoding). The
+encoding can collide for different paths (`/work/my-app` vs
+`/work/my/app`), so the directory is a candidate set and the header's
+`cwd` decides: `sessions_in_root(root, cwd)` scans `project_key(cwd)` and
+keeps only summaries whose header `cwd` is the same path (compared via
+`to_string_lossy`, trailing slash ignored); `latest_in_root` and
+`resolve_in_root` build on it, so another project's id resolves to
+`Global`, not `Local`. `sessions_all_root` scans every directory
+unfiltered (private `scan_project_dir`, no path decoding), so colliding
+projects and cwds ending in `-` are all listed once.
 Creation is lazy (AD-0050): `Session::start*` plans the path and
 materializes nothing — the file appears on the first recorded record
 (`materialize()` forces it early; an empty `append` is a deliberate

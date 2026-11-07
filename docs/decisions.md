@@ -260,6 +260,17 @@ error (`--print`, pointing at `--fork`).
   `-n/--name`, mutually exclusive per pi's conflict matrix; `--name`
   pairs with fresh starts and forks only.
 
+**Addendum (2026-11-07, #179): the key can collide; the header's cwd
+decides.** `project_key` maps `/work/my-app` and `/work/my/app` to the
+same directory, and the listing used to trust the directory, so
+`--continue` could append to another project's transcript. The key stays:
+a new encoding would orphan every existing directory whose path contains
+`-` and need a migration. Instead `sessions_in` filters on the header's
+`cwd` (the truth, written at creation and by forks), and `sessions_all`
+scans each directory unfiltered rather than decoding the name back into a
+guessed path (which also lost cwds ending in `-`). Colliding projects
+share a directory; the header says whose file is whose.
+
 ---
 
 ## AD-0007 — wire identity: honest UA, opt-in telemetry, session-id cache affinity (2026-10-14)
