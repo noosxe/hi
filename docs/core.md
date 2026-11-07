@@ -253,6 +253,16 @@ running group. Threads, not tokio — the choice #6's Luau bridge
 inherits. No default timeout: long-lived work is the point; a cap of
 16 running tasks refuses beyond that with a readable error.
 
+**Lifetime (#174):** a task is `Running` until its whole process group is
+gone, not until the leader exits. `monitor` remembers the leader's exit
+state, keeps polling, and finishes (with the leader's state) once
+`group_alive` is false; `cancel` and the timeout stay honoured meanwhile,
+so `sleep 30 & exit 0` stays `Running` and `task_cancel` kills the
+survivor. The reader join is bounded (`READER_GRACE`, 500ms) and the
+handle then dropped, so a process that left the group (`setsid`,
+`set -m`) and holds the pipe cannot wedge the task; it is neither tracked
+nor killed, and its later output still reaches the log file.
+
 ## catalog.rs — the shipped metadata table
 
 Tier 3 of the metadata chain (AD-0044): `catalog.json` — an

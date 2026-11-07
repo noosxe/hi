@@ -856,6 +856,27 @@ The harness can hold work that outlives a turn: a `TaskManager` in core
   with a readable refusal, small monotonic ids (`#1`) the model can
   echo reliably, and a derived two-word name when none is given.
 
+**AD-0019 addendum (2026-11-07): #174, a task lives until its group is empty.**
+`monitor` used to stop at the leader's exit and block on the pipe reader,
+so a backgrounded grandchild (`sleep 30 & exit 0`) wedged the task in
+`Running` while the loop that honours `cancel` and the deadline was already
+gone: `task_cancel` reported success and did nothing. Now the process group
+is the unit of life as well as of death (R2): the leader's exit is
+remembered, polling continues, and the task finishes only when
+`group_alive(pid)` is false. `cancel` and the timeout stay honoured the
+whole time (`stop_tree` on an already-reaped leader works: `try_wait`
+caches the status and the pid stays a valid group id while members exist).
+This differs from `bash` (AD-0036 addendum) on purpose: `bash` returns and
+leaves survivors untracked, `task_run` is the tracked form, so a survivor
+keeps the task `Running`. The reported state is the *leader's* (`Failed {
+exit_code: 3 }` stays so), and `wall` covers the survivor. The reader join
+is bounded (500ms, like `DRAIN_GRACE`) and the handle dropped afterwards.
+Known limit: a process that left the group (`setsid`, `set -m`) is neither
+tracked nor killed by cancel, timeout or the shutdown sweep; it can hold the
+pipe, so the task finishes without waiting for it, and its later output
+keeps flowing to the log file (the detached reader drains to EOF so it
+never takes SIGPIPE) after the task is finished.
+
 ---
 
 ## AD-0020 — the composer breathes: one margin row above the input (2026-10-16)

@@ -57,6 +57,9 @@ pub const RING_BYTES: usize = 256 * 1024;
 pub const MAX_RUNNING: usize = 16;
 /// Child poll cadence — the bash tool's interval.
 const POLL: Duration = Duration::from_millis(50);
+/// How long the monitor waits for the reader to hit EOF once the task
+/// is over (the `DRAIN_GRACE` of the bash tool).
+const READER_GRACE: Duration = Duration::from_millis(500);
 
 /// Retention policy for the tasks dir (#74), applied once at manager
 /// construction: task logs are post-mortem artifacts with a bounded
@@ -564,7 +567,7 @@ fn monitor(
     // Unrepresentable timeout = no deadline (#172); `+` would panic the
     // monitor and leave the task `Running` forever.
     let deadline = timeout.and_then(|t| started.checked_add(t));
-    // Reader: pipe → ring + log file. Ends at EOF (child exit).
+    // Reader: pipe → ring + log file. Ends at EOF (every holder gone).
     let reader = std::thread::spawn(move || {
         let mut pipe = stdout;
         let mut file = std::fs::File::create(&log).ok();
@@ -582,11 +585,24 @@ fn monitor(
         }
     });
 
+    // A task lives until its whole group is gone (#174, AD-0019
+    // addendum): the leader's exit is remembered, not final. Cancel and
+    // the deadline stay honoured while any member survives.
+    let pid = child.id();
+    let mut leader: Option<TaskState> = None;
     let state = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break exit_state(status),
-            Ok(None) => {}
-            Err(_) => break TaskState::Failed { exit_code: -1 },
+        if leader.is_none() {
+            match child.try_wait() {
+                Ok(Some(status)) => leader = Some(exit_state(status)),
+                Ok(None) => {}
+                Err(_) => break TaskState::Failed { exit_code: -1 },
+            }
+        }
+        // The leader is reaped here, so a probe sees only live members.
+        if let Some(state) = leader
+            && !crate::process::group_alive(pid)
+        {
+            break state;
         }
         if cancel.load(Ordering::Relaxed) {
             stop_tree(&mut child);
@@ -598,7 +614,14 @@ fn monitor(
         }
         std::thread::sleep(POLL);
     };
-    let _ = reader.join();
+    // Bounded wait for the reader's EOF: something that left the group
+    // (`setsid`, `set -m`) can hold the pipe and must not wedge the
+    // task. A late reader is detached and keeps draining to EOF.
+    let grace_end = Instant::now() + READER_GRACE;
+    while !reader.is_finished() && Instant::now() < grace_end {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(reader);
     let wall = started.elapsed();
 
     if let Some(entry) = tasks.lock().unwrap().get_mut(&id) {
@@ -850,6 +873,186 @@ mod tests {
         until("process group to die", || group_dead(summary.pid));
         // Cancelling again is an honest refusal, not a panic.
         assert!(m.cancel(id).is_err());
+    }
+
+    /// Kills a process group on drop, so a failing assertion cannot
+    /// leave a survivor behind.
+    struct KillGroup(i32);
+    impl Drop for KillGroup {
+        fn drop(&mut self) {
+            unsafe { libc::kill(-self.0, libc::SIGKILL) };
+        }
+    }
+
+    fn read_pid(file: &Path) -> i32 {
+        let mut pid = 0;
+        until("pid file", || {
+            pid = std::fs::read_to_string(file)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0);
+            pid != 0
+        });
+        pid
+    }
+
+    fn pid_dead(pid: i32) -> bool {
+        // The survivor's parent is gone (reparented to init) or reaped
+        // by it; a zombie would still answer kill(0), so also accept it.
+        let gone = unsafe { libc::kill(pid, 0) != 0 };
+        gone || {
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
+                s.rsplit(')')
+                    .next()
+                    .is_some_and(|r| r.trim_start().starts_with('Z'))
+            })
+        }
+    }
+
+    fn spawn_script(m: &TaskManager, script: &str, timeout: Option<Duration>) -> u64 {
+        m.spawn(TaskSpec {
+            timeout,
+            ..TaskSpec::process(script, std::env::temp_dir())
+        })
+        .unwrap()
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("hi-174-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Script prefix: announce the background sleep, mark the exit.
+    fn survivor_script(dir: &Path, tail: &str) -> String {
+        format!(
+            "sleep 30 & echo $! > {p}; touch {m}; {tail}",
+            p = dir.join("pid").display(),
+            m = dir.join("marker").display(),
+        )
+    }
+
+    #[test]
+    fn a_background_child_keeps_the_task_running_until_cancelled() {
+        let (m, _d) = manager();
+        let dir = scratch("cancel");
+        let id = spawn_script(&m, &survivor_script(&dir, "exit 0"), None);
+        let pid = read_pid(&dir.join("pid"));
+        let _guard = KillGroup(m.status(id).unwrap().pid as i32);
+        until("leader to exit", || dir.join("marker").exists());
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(state_of(&m, id), TaskState::Running);
+        assert!(m.try_recv_completion().is_none());
+        let t = Instant::now();
+        m.cancel(id).unwrap();
+        until("cancel to land", || state_of(&m, id).finished());
+        assert_eq!(state_of(&m, id), TaskState::Killed);
+        assert!(t.elapsed() < Duration::from_secs(10));
+        until("survivor to die", || pid_dead(pid));
+    }
+
+    #[test]
+    fn a_background_child_is_killed_by_the_timeout_after_the_leader_exited() {
+        let (m, _d) = manager();
+        let dir = scratch("timeout");
+        let id = spawn_script(
+            &m,
+            &survivor_script(&dir, "exit 0"),
+            Some(Duration::from_millis(1500)),
+        );
+        let pid = read_pid(&dir.join("pid"));
+        let _guard = KillGroup(m.status(id).unwrap().pid as i32);
+        until("timeout to land", || state_of(&m, id).finished());
+        assert_eq!(state_of(&m, id), TaskState::TimedOut);
+        until("survivor to die", || pid_dead(pid));
+    }
+
+    #[test]
+    fn a_short_lived_survivor_finishes_the_task_with_the_leaders_state() {
+        let (m, _d) = manager();
+        let id = spawn_script(&m, "(sleep 1) & exit 3", None);
+        let _guard = KillGroup(m.status(id).unwrap().pid as i32);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(state_of(&m, id), TaskState::Running, "survivor still alive");
+        until("task to finish", || state_of(&m, id).finished());
+        assert_eq!(state_of(&m, id), TaskState::Failed { exit_code: 3 });
+        let c = m.try_recv_completion().unwrap();
+        assert_eq!((c.id, c.state), (id, TaskState::Failed { exit_code: 3 }));
+        assert!(c.wall >= Duration::from_millis(800), "wall {:?}", c.wall);
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(m.try_recv_completion().is_none(), "exactly one notice");
+    }
+
+    #[test]
+    fn a_survivors_output_after_the_leader_exited_reaches_ring_and_log() {
+        let (m, dir) = manager();
+        let id = spawn_script(&m, "(sleep 1; echo late-words) & exit 0", None);
+        let _guard = KillGroup(m.status(id).unwrap().pid as i32);
+        until("late output", || {
+            m.output_tail(id, 4096).unwrap().contains("late-words")
+        });
+        // The leader is long gone, yet the line arrived while Running or
+        // just as the group emptied; either way the log has it.
+        until("task to finish", || state_of(&m, id).finished());
+        assert_eq!(state_of(&m, id), TaskState::Succeeded { exit_code: 0 });
+        let log = std::fs::read_to_string(dir.join(format!("{id}.log"))).unwrap();
+        assert!(log.contains("late-words"), "log: {log}");
+    }
+
+    #[test]
+    fn a_process_that_left_the_group_cannot_wedge_the_task() {
+        let (m, _d) = manager();
+        let dir = scratch("escape");
+        // `set -m` gives background jobs their own process group.
+        let script = format!("set -m; {}", survivor_script(&dir, "exit 0"));
+        let id = spawn_script(&m, &script, None);
+        let pid = read_pid(&dir.join("pid"));
+        let _leader = KillGroup(m.status(id).unwrap().pid as i32);
+        let _escapee = KillGroup(pid);
+        let leader_pid = m.status(id).unwrap().pid as i32;
+        assert_eq!(unsafe { libc::getpgid(pid) }, pid, "own group");
+        assert_ne!(pid, leader_pid);
+        until("task to finish despite the held pipe", || {
+            state_of(&m, id).finished()
+        });
+        assert_eq!(state_of(&m, id), TaskState::Succeeded { exit_code: 0 });
+        // Not tracked, not killed.
+        assert!(!pid_dead(pid));
+    }
+
+    #[test]
+    fn a_task_holding_an_escaped_foreground_job_is_still_cancellable() {
+        let (m, _d) = manager();
+        let dir = scratch("escape-fg");
+        // The foreground job gets its own group too; the leader waits on it.
+        let script = format!(
+            "set -m; sh -c 'echo $$ > {p}; exec sleep 30'; echo after",
+            p = dir.join("pid").display()
+        );
+        let id = spawn_script(&m, &script, None);
+        let pid = read_pid(&dir.join("pid"));
+        let leader_pid = m.status(id).unwrap().pid as i32;
+        let _leader = KillGroup(leader_pid);
+        let _escapee = KillGroup(pid);
+        assert_eq!(unsafe { libc::getpgid(pid) }, pid, "own group");
+        assert_ne!(pid, leader_pid);
+        assert_eq!(state_of(&m, id), TaskState::Running);
+        m.cancel(id).unwrap();
+        until("cancel to land", || state_of(&m, id).finished());
+        assert_eq!(state_of(&m, id), TaskState::Killed);
+    }
+
+    #[test]
+    fn dropping_the_manager_sweeps_a_group_whose_leader_already_exited() {
+        let (m, _d) = manager();
+        let dir = scratch("drop");
+        let id = spawn_script(&m, &survivor_script(&dir, "exit 0"), None);
+        let pid = read_pid(&dir.join("pid"));
+        let _guard = KillGroup(m.status(id).unwrap().pid as i32);
+        until("leader to exit", || dir.join("marker").exists());
+        drop(m);
+        until("survivor to die", || pid_dead(pid));
     }
 
     #[test]
