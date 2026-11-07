@@ -1292,6 +1292,23 @@ own pid, the same proof shape the manager's tests use. Windows is
 unchanged until #31 (Job Objects): `own_group` and `kill_group`
 carry the `#[cfg]` halves, `stop_tree` keeps the manager's shape.
 
+**AD-0036 addendum (2026-11-07): #173, survivors live, the drain is bounded, `stop_tree` finishes the group.**
+`stop_tree` used to return the moment the leader died, so a TERM-immune
+group member was never KILLed and still held the pipe. It now TERMs, polls
+until the leader is reaped *and* `group_alive` (`kill(-pid, 0)` → ESRCH)
+says the group is empty, and KILLs whatever remains at the 2s deadline
+(a `try_wait` error falls through to KILL); a group that dies at TERM
+returns at once. Non-unix `group_alive` reports false until #31. `bash`
+reads output on detached threads and, after the leader exits or the
+timeout fires, waits at most `DRAIN_GRACE` (500ms) for both EOFs, then
+returns what it has — output is never lost and a pipe held by something
+that left the group (`setsid`, `set -m`) cannot hang the tool. Survivors of
+a *normal* exit are deliberately left alive (`server &` is a legitimate
+request); the readers keep draining so they never take SIGPIPE but discard
+everything after return, so a chatty survivor cannot grow memory. Known
+limit: a background child's output after the grace is not captured; the
+result carries a note (on every result shape) pointing at `task_run`.
+
 ---
 
 ## AD-0037 — SHA-pin the actions, keep the toolchain branch moving, let dependabot drive both (#24, 2026-10-16)

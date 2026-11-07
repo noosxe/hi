@@ -4,9 +4,18 @@
 //! tail-clamped (a failing command's diagnosis lives at the bottom). A
 //! non-zero exit is an **error result with the output inside it** — the
 //! model must see what went wrong to adapt. The optional `timeout` is
-//! seconds, with no default (pi-parity); on expiry the child is killed.
-//! Known v1 limitation (issue #30): grandchildren survive — there is no
-//! process-group kill.
+//! seconds, with no default (pi-parity); on expiry the whole process
+//! group is stopped (TERM, then KILL — `process::stop_tree`).
+//!
+//! Output is read by detached threads into shared buffers. After the
+//! leader exits (or the timeout fires) the tool waits at most
+//! `DRAIN_GRACE` for both pipes to reach EOF and returns what it has,
+//! so a background child (`server &`) that keeps the pipe open cannot
+//! hang the tool. Survivors of a normal exit stay alive (#173): the
+//! readers keep draining so they never take SIGPIPE, but discard
+//! everything after the tool returned. A result whose pipes were still
+//! open carries a note saying so. A child that left the group
+//! (`setsid`, `set -m`) is not killed by a timeout, but cannot hang it.
 
 use super::truncate;
 use super::{args_object, opt_str, opt_usize};
@@ -14,9 +23,60 @@ use crate::tool::{Tool, ToolAnnotations};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// How long to wait for the pipes to hit EOF once the leader is gone.
+const DRAIN_GRACE: Duration = Duration::from_millis(500);
+
+const BACKGROUND_NOTE: &str = "[note: a background process still holds the output pipes; \
+its later output is not captured. Use task_run for long-lived work.]";
+
+/// Output shared with a detached reader thread. After `detached` is
+/// set the reader discards what it reads (bounded memory).
+struct Capture {
+    buf: Mutex<Vec<u8>>,
+    detached: AtomicBool,
+}
+
+type Done = Arc<(Mutex<bool>, Condvar)>;
+
+fn spawn_reader<R: Read + Send + 'static>(mut pipe: R, cap: Arc<Capture>, done: Done) {
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if !cap.detached.load(Ordering::Relaxed) {
+                        cap.buf.lock().unwrap().extend_from_slice(&chunk[..n]);
+                    }
+                }
+            }
+        }
+        let (flag, cv) = &*done;
+        *flag.lock().unwrap() = true;
+        cv.notify_all();
+    });
+}
+
+/// Wait until every `done` flag is set or `until` passes; true if all set.
+fn wait_eof(dones: &[&Done], until: Instant) -> bool {
+    for done in dones {
+        let (flag, cv) = &***done;
+        let mut g = flag.lock().unwrap();
+        while !*g {
+            let now = Instant::now();
+            if now >= until {
+                return false;
+            }
+            g = cv.wait_timeout(g, until - now).unwrap().0;
+        }
+    }
+    true
+}
 
 pub struct BashTool {
     cwd: PathBuf,
@@ -37,7 +97,10 @@ impl Tool for BashTool {
         "Execute a bash command in the current working directory. Returns stdout and \
          stderr (labeled), tail-truncated to 2000 lines / 50KB. A non-zero exit comes \
          back as an error result with the output included. Optionally provide a \
-         timeout in seconds (no default — long-running commands run until finished)."
+         timeout in seconds (no default — long-running commands run until finished). \
+         A timeout stops the whole process group. Background processes (`cmd &`) are \
+         left running when the command exits, but the tool returns after at most a short \
+         drain and their later output is not captured; use task_run for long-lived work."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -86,40 +149,56 @@ impl Tool for BashTool {
         // tree — the task manager's rule, shared plumbing.
         crate::process::own_group(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("cannot spawn bash: {e}"))?;
-        let Some(mut out_pipe) = child.stdout.take() else {
+        let Some(out_pipe) = child.stdout.take() else {
             return Err("bash produced no stdout pipe".into());
         };
-        let Some(mut err_pipe) = child.stderr.take() else {
+        let Some(err_pipe) = child.stderr.take() else {
             return Err("bash produced no stderr pipe".into());
         };
 
-        let (out, err, status, timed_out) = std::thread::scope(|scope| {
-            let out_handle = scope.spawn(move || read_lossy(&mut out_pipe));
-            let err_handle = scope.spawn(move || read_lossy(&mut err_pipe));
-            // A timeout too large for `Instant` to represent is no deadline
-            // at all (#172): `checked_add`, never `+`, which panics.
-            let deadline = timeout
-                .and_then(|secs| Instant::now().checked_add(Duration::from_secs(secs as u64)));
-            let mut timed_out = false;
-            let status: Option<ExitStatus> = loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => break Some(status),
-                    Ok(None) => {}
-                    Err(_) => break None,
-                }
-                if let Some(deadline) = deadline
-                    && Instant::now() >= deadline
-                {
-                    crate::process::stop_tree(&mut child);
-                    timed_out = true;
-                    break None;
-                }
-                std::thread::sleep(POLL_INTERVAL);
-            };
-            let out = out_handle.join().unwrap_or_default();
-            let err = err_handle.join().unwrap_or_default();
-            (out, err, status, timed_out)
-        });
+        let new_cap = || {
+            Arc::new(Capture {
+                buf: Mutex::new(Vec::new()),
+                detached: AtomicBool::new(false),
+            })
+        };
+        let (out_cap, err_cap) = (new_cap(), new_cap());
+        let out_done: Done = Arc::new((Mutex::new(false), Condvar::new()));
+        let err_done: Done = Arc::new((Mutex::new(false), Condvar::new()));
+        spawn_reader(out_pipe, out_cap.clone(), out_done.clone());
+        spawn_reader(err_pipe, err_cap.clone(), err_done.clone());
+
+        // A timeout too large for `Instant` to represent is no deadline
+        // at all (#172): `checked_add`, never `+`, which panics.
+        let deadline =
+            timeout.and_then(|secs| Instant::now().checked_add(Duration::from_secs(secs as u64)));
+        let mut timed_out = false;
+        let status: Option<ExitStatus> = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) => {}
+                Err(_) => break None,
+            }
+            if let Some(deadline) = deadline
+                && Instant::now() >= deadline
+            {
+                crate::process::stop_tree(&mut child);
+                timed_out = true;
+                break None;
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        };
+        // Output is never lost, and the tool returns even if something
+        // still holds the pipes (#173).
+        let drained = wait_eof(&[&out_done, &err_done], Instant::now() + DRAIN_GRACE);
+        // Detach under the buffer locks so nothing lands after we snapshot.
+        let take = |cap: &Capture| {
+            let mut g = cap.buf.lock().unwrap();
+            cap.detached.store(true, Ordering::Relaxed);
+            String::from_utf8_lossy(&std::mem::take(&mut *g)).into_owned()
+        };
+        let out = take(&out_cap);
+        let err = take(&err_cap);
 
         let mut text = String::new();
         if !out.is_empty() {
@@ -140,6 +219,12 @@ impl Tool for BashTool {
             text.push('\n');
             text.push_str(&note);
         }
+        if !drained {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(BACKGROUND_NOTE);
+        }
 
         if timed_out {
             return Err(format!("timeout after {}s\n{text}", timeout.unwrap_or(0)));
@@ -159,12 +244,6 @@ impl Tool for BashTool {
             None => Err(format!("terminated by signal\n{text}")),
         }
     }
-}
-
-fn read_lossy<R: Read>(reader: &mut R) -> String {
-    let mut buf = Vec::new();
-    let _ = reader.read_to_end(&mut buf);
-    String::from_utf8_lossy(&buf).into_owned()
 }
 
 #[cfg(test)]
@@ -266,6 +345,188 @@ mod tests {
         }
         assert!(dead, "grandchild {pid} outlived the timeout kill");
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[cfg(unix)]
+    fn alive(pid: i32) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[cfg(unix)]
+    fn read_pid(file: &Path) -> i32 {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(10) {
+            if let Ok(s) = fs::read_to_string(file)
+                && let Ok(pid) = s.trim().parse()
+            {
+                return pid;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("pid file {} never appeared", file.display());
+    }
+
+    #[cfg(unix)]
+    fn wait_dead(pid: i32) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(5) {
+            if !alive(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    fn run(root: &Path, command: &str, timeout: Option<u64>) -> Result<String, String> {
+        let mut args = serde_json::json!({ "command": command });
+        if let Some(t) = timeout {
+            args["timeout"] = t.into();
+        }
+        tool(root).execute(&args.to_string())
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_background_survivor_does_not_hang_the_tool_and_stays_alive() {
+        let root = temp_root("bgsurvivor");
+        let pidf = root.join("pid");
+        let cmd = format!("sleep 30 & echo $! > {}; echo started", pidf.display());
+        let started = Instant::now();
+        let out = run(&root, &cmd, None).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(15), "hung");
+        assert!(out.contains("started"), "got: {out}");
+        assert!(out.contains("background process"), "got: {out}");
+        let pid = read_pid(&pidf);
+        let still = alive(pid);
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert!(still, "survivor was killed");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_survivor_writing_after_return_does_not_take_sigpipe() {
+        let root = temp_root("sigpipe");
+        let pidf = root.join("pid");
+        let outf = root.join("result");
+        // Writes after the tool returned (the sleep outlasts the
+        // grace), then records that it survived the write.
+        let cmd = format!(
+            "(echo $BASHPID > {p}; sleep 2; echo late; sleep 1; echo later; echo survived > {o}; sleep 30) & echo hi",
+            p = pidf.display(),
+            o = outf.display()
+        );
+        let out = run(&root, &cmd, None).unwrap();
+        assert!(out.contains("hi"), "got: {out}");
+        let pid = read_pid(&pidf);
+        let start = Instant::now();
+        while !outf.exists() && start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let survived = outf.exists() && alive(pid);
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert!(survived, "survivor died writing to the closed-out pipe");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_note_is_present_even_with_no_other_output() {
+        let root = temp_root("quietnote");
+        let pidf = root.join("pid");
+        let cmd = format!("sleep 30 > /dev/null 2>&1 & echo $! > {}", pidf.display());
+        // Redirected survivor holds no pipe: no note expected there.
+        let out = run(&root, &cmd, None).unwrap();
+        assert_eq!(out, "(no output)");
+        unsafe { libc::kill(read_pid(&pidf), libc::SIGKILL) };
+
+        let pidf = root.join("pid2");
+        let cmd = format!("sleep 30 & echo $! > {}", pidf.display());
+        let out = run(&root, &cmd, None).unwrap();
+        assert!(out.contains("background process"), "got: {out}");
+        assert!(!out.contains("(no output)"), "got: {out}");
+        unsafe { libc::kill(read_pid(&pidf), libc::SIGKILL) };
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_note_is_present_on_error_results() {
+        let root = temp_root("errnote");
+        let pidf = root.join("pid");
+        let cmd = format!("sleep 30 & echo $! > {}; exit 2", pidf.display());
+        let err = run(&root, &cmd, None).unwrap_err();
+        unsafe { libc::kill(read_pid(&pidf), libc::SIGKILL) };
+        assert!(err.starts_with("exit code 2"), "got: {err}");
+        assert!(err.contains("background process"), "got: {err}");
+    }
+
+    #[test]
+    fn a_normal_command_has_no_note() {
+        let root = temp_root("nonote");
+        let out = run(&root, "echo plain", None).unwrap();
+        assert!(!out.contains("background process"), "got: {out}");
+        let err = run(&root, "echo plain; exit 1", None).unwrap_err();
+        assert!(!err.contains("background process"), "got: {err}");
+    }
+
+    #[test]
+    fn foreground_output_over_the_pipe_buffer_is_captured_to_the_tail() {
+        let root = temp_root("bigout");
+        // ~600KB, far over the 64KB pipe buffer and the 50KB clamp.
+        let out = run(&root, "seq 1 100000; echo THE-END", None).unwrap();
+        assert!(out.contains("THE-END"), "tail lost");
+        assert!(out.contains("100000"), "tail lost");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_term_immune_child_cannot_defeat_the_timeout() {
+        let root = temp_root("immune");
+        let pidf = root.join("pid");
+        let ready = root.join("ready");
+        // The trap is live before the announce; the leader waits for
+        // the announce before arming anything, so the 1s timeout can
+        // only fire after the trap exists.
+        let cmd = format!(
+            "(trap '' TERM; echo $BASHPID > {p}; echo announced; sleep 30) & while [ ! -s {p} ]; do sleep 0.02; done; touch {r}; wait",
+            p = pidf.display(),
+            r = ready.display()
+        );
+        let started = Instant::now();
+        let err = run(&root, &cmd, Some(1)).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(15), "hung");
+        assert!(err.starts_with("timeout after 1s"), "got: {err}");
+        assert!(err.contains("announced"), "output lost: {err}");
+        let pid = read_pid(&pidf);
+        let dead = wait_dead(pid);
+        if !dead {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(dead, "TERM-immune child {pid} survived the timeout");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_child_that_left_the_group_cannot_hang_a_timeout() {
+        let root = temp_root("escapee");
+        let pidf = root.join("pid");
+        // `set -m` gives background jobs their own process group.
+        let cmd = format!(
+            "set -m; (echo $BASHPID > {p}; sleep 30) & while [ ! -s {p} ]; do sleep 0.02; done; echo before; sleep 30",
+            p = pidf.display()
+        );
+        let started = Instant::now();
+        let err = run(&root, &cmd, Some(1)).unwrap_err();
+        let pid = read_pid(&pidf);
+        let escaped = unsafe { libc::getpgid(pid) } == pid;
+        let was_alive = alive(pid);
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert!(started.elapsed() < Duration::from_secs(15), "hung");
+        assert!(err.starts_with("timeout after 1s"), "got: {err}");
+        assert!(err.contains("before"), "got: {err}");
+        assert!(
+            was_alive && escaped,
+            "set -m did not move the job to its own group"
+        );
     }
 
     #[test]

@@ -28,7 +28,7 @@ later.
 - Ctrl-V pastes from the clipboard: an image is staged at a temp file and its path lands in the input as plain text — nothing sends until Enter, and the image enters the conversation only when the model reads it
 - Built-in agent tools: the model can read, search, list, write, edit, and run commands — the `coding` bundle by default, `--tools read-only|none|all` to change; `coding` and `all` also carry `subagent`: the model runs nested agent sessions (fresh history, own provider/model/toolset choice, capped rounds, no recursion); the `all` bundle additionally adds tracked background tasks (`task_run`/`task_status`/`task_output`/`task_cancel`): the model spawns long jobs and polls without blocking a turn
 - A pi-style composer: `Ctrl-K`/`Ctrl-U`/`Ctrl-W` kill, `Ctrl-Y` yanks the newest kill back, `Alt-Y` cycles older kills; undo/redo (`Ctrl-Z`/`Alt-Z`); jump-to-char (`Ctrl+]` forward, `Ctrl+Alt+]` backward) — `/keybinds` prints the whole table on demand
-- 606 tests, including a fake HTTP server and a pty harness that drive the real binary
+- 616 tests, including a fake HTTP server and a pty harness that drive the real binary
 
 Not yet: extensions.
 The selection and settings layers are built so each slots in without
@@ -39,7 +39,7 @@ rework.
 ```sh
 nix develop          # Rust toolchain + cargo (or any Rust 1.85+, edition 2024)
 cargo run            # builds the `hi` binary; `hi --mock` needs no config
-cargo test           # 606 tests; no network needed
+cargo test           # 616 tests; no network needed
 nix run .            # run the app straight from the flake — no devshell needed
 nix profile install github:noosxe/hi   # or install the binary (flake = the package)
 ```
@@ -271,7 +271,7 @@ Design notes worth keeping in mind:
   the UI thread never does.
 - **Nothing outlives its session.** Every thread or child process hi
   spawns is born with a deadline — bounded DNS/connect on network
-  attempts, hard timeouts for bash child processes — a timeout kills the whole process group, not just the child — and dies
+  attempts, hard timeouts for bash child processes — a timeout kills the whole process group, not just the child, and a backgrounded child never hangs the tool (its later output is not captured) — and dies
   with the session: teardown sweeps children, so nothing orphans
   itself to the OS and burns a core for hours.
 - Errors are plain `String`s for now — descriptive and user-facing;
