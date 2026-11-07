@@ -346,8 +346,10 @@ pi-ai exactly" was too strong. pi-ai also defers images to after the run of
 consecutive tool results, but merges every image of the run into ONE user message
 with the text "Attached image(s) from tool result:" (and can insert an assistant
 "I have processed the tool results." filler for providers that need it). hi
-keeps one carrier per result, each naming its tool; merging is not needed for
-correctness here.
+keeps one carrier per result, each naming its tool. A carrier followed by
+another user message was already possible before this fix, so this fix does
+not introduce consecutive user messages. Neither that shape nor pi-ai's
+`requiresAssistantAfterToolResult` filler case was tested against a real API.
 
 ---
 
