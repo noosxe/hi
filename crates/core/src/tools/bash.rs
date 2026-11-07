@@ -23,7 +23,6 @@ use crate::tool::{Tool, ToolAnnotations};
 use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -34,12 +33,10 @@ const DRAIN_GRACE: Duration = Duration::from_millis(500);
 const BACKGROUND_NOTE: &str = "[note: a background process still holds the output pipes; \
 its later output is not captured. Use task_run for long-lived work.]";
 
-/// Output shared with a detached reader thread. After `detached` is
-/// set the reader discards what it reads (bounded memory).
-struct Capture {
-    buf: Mutex<Vec<u8>>,
-    detached: AtomicBool,
-}
+/// Output shared with a detached reader thread: `Some` while capturing,
+/// `None` once the main path has taken it (the reader then discards, so
+/// post-return growth is structurally impossible).
+type Capture = Mutex<Option<Vec<u8>>>;
 
 type Done = Arc<(Mutex<bool>, Condvar)>;
 
@@ -50,8 +47,8 @@ fn spawn_reader<R: Read + Send + 'static>(mut pipe: R, cap: Arc<Capture>, done: 
             match pipe.read(&mut chunk) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if !cap.detached.load(Ordering::Relaxed) {
-                        cap.buf.lock().unwrap().extend_from_slice(&chunk[..n]);
+                    if let Some(buf) = cap.lock().unwrap().as_mut() {
+                        buf.extend_from_slice(&chunk[..n]);
                     }
                 }
             }
@@ -156,12 +153,7 @@ impl Tool for BashTool {
             return Err("bash produced no stderr pipe".into());
         };
 
-        let new_cap = || {
-            Arc::new(Capture {
-                buf: Mutex::new(Vec::new()),
-                detached: AtomicBool::new(false),
-            })
-        };
+        let new_cap = || Arc::new(Mutex::new(Some(Vec::new())));
         let (out_cap, err_cap) = (new_cap(), new_cap());
         let out_done: Done = Arc::new((Mutex::new(false), Condvar::new()));
         let err_done: Done = Arc::new((Mutex::new(false), Condvar::new()));
@@ -188,14 +180,15 @@ impl Tool for BashTool {
             }
             std::thread::sleep(POLL_INTERVAL);
         };
-        // Output is never lost, and the tool returns even if something
-        // still holds the pipes (#173).
+        // A timeout no longer discards what was captured, and the tool
+        // returns at most `DRAIN_GRACE` after the leader is gone even if
+        // something still holds the pipes (#173); output arriving after
+        // the grace is not captured.
         let drained = wait_eof(&[&out_done, &err_done], Instant::now() + DRAIN_GRACE);
-        // Detach under the buffer locks so nothing lands after we snapshot.
+        // `take()` is both the snapshot and the detach.
         let take = |cap: &Capture| {
-            let mut g = cap.buf.lock().unwrap();
-            cap.detached.store(true, Ordering::Relaxed);
-            String::from_utf8_lossy(&std::mem::take(&mut *g)).into_owned()
+            let buf = cap.lock().unwrap().take().unwrap_or_default();
+            String::from_utf8_lossy(&buf).into_owned()
         };
         let out = take(&out_cap);
         let err = take(&err_cap);
@@ -353,6 +346,19 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn kill_group_of(pid: i32) {
+        // Kill the survivor's whole group (it shares the tool's group),
+        // plus the pid itself in case it left.
+        unsafe {
+            let pgid = libc::getpgid(pid);
+            if pgid > 0 {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+
+    #[cfg(unix)]
     fn read_pid(file: &Path) -> i32 {
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(10) {
@@ -424,7 +430,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         let survived = outf.exists() && alive(pid);
-        unsafe { libc::kill(pid, libc::SIGKILL) };
+        kill_group_of(pid);
         assert!(survived, "survivor died writing to the closed-out pipe");
     }
 
@@ -482,24 +488,21 @@ mod tests {
     fn a_term_immune_child_cannot_defeat_the_timeout() {
         let root = temp_root("immune");
         let pidf = root.join("pid");
-        let ready = root.join("ready");
-        // The trap is live before the announce; the leader waits for
-        // the announce before arming anything, so the 1s timeout can
-        // only fire after the trap exists.
+        // The trap is installed before the announce. The deadline runs
+        // from spawn, so the timeout is 2s to leave room for startup.
         let cmd = format!(
-            "(trap '' TERM; echo $BASHPID > {p}; echo announced; sleep 30) & while [ ! -s {p} ]; do sleep 0.02; done; touch {r}; wait",
-            p = pidf.display(),
-            r = ready.display()
+            "(trap '' TERM; echo $BASHPID > {p}; echo announced; sleep 30) & while [ ! -s {p} ]; do sleep 0.02; done; wait",
+            p = pidf.display()
         );
         let started = Instant::now();
-        let err = run(&root, &cmd, Some(1)).unwrap_err();
+        let err = run(&root, &cmd, Some(2)).unwrap_err();
         assert!(started.elapsed() < Duration::from_secs(15), "hung");
-        assert!(err.starts_with("timeout after 1s"), "got: {err}");
+        assert!(err.starts_with("timeout after 2s"), "got: {err}");
         assert!(err.contains("announced"), "output lost: {err}");
         let pid = read_pid(&pidf);
         let dead = wait_dead(pid);
         if !dead {
-            unsafe { libc::kill(pid, libc::SIGKILL) };
+            kill_group_of(pid);
         }
         assert!(dead, "TERM-immune child {pid} survived the timeout");
     }
@@ -519,7 +522,7 @@ mod tests {
         let pid = read_pid(&pidf);
         let escaped = unsafe { libc::getpgid(pid) } == pid;
         let was_alive = alive(pid);
-        unsafe { libc::kill(pid, libc::SIGKILL) };
+        unsafe { libc::kill(-pid, libc::SIGKILL) };
         assert!(started.elapsed() < Duration::from_secs(15), "hung");
         assert!(err.starts_with("timeout after 1s"), "got: {err}");
         assert!(err.contains("before"), "got: {err}");

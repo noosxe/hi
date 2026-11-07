@@ -140,7 +140,12 @@ mod tests {
         );
         let mut child = spawn(&script);
         let pid = wait_for_pid(&pidf);
+        let start = Instant::now();
         while !ready.exists() {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "leader never got ready"
+            );
             std::thread::sleep(Duration::from_millis(20));
         }
         stop_tree(&mut child);

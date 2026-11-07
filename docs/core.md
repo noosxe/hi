@@ -151,7 +151,8 @@ structural chunk-walk for the kitty renderer — AD-0010 — and
   inside; output is read by detached threads and the tool waits at most
   `DRAIN_GRACE` (500ms) for EOF after the leader exits, so `cmd &` cannot hang
   it — survivors stay alive, later output is discarded, and a note on the
-  result says so, #173), `edit` (`edits[]` matched
+  result says so; survivors are untracked and not swept at teardown —
+  `task_run` is the tracked form, #173), `edit` (`edits[]` matched
   against the ORIGINAL file, each exactly once, overlaps rejected),
   `write` (creates parents, full overwrite), `grep` (`regex` crate, rg-style
   rendering, `glob` filter, context), `find` (`globset`, .gitignore-aware),

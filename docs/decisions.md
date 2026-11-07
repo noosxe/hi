@@ -1301,12 +1301,15 @@ says the group is empty, and KILLs whatever remains at the 2s deadline
 returns at once. Non-unix `group_alive` reports false until #31. `bash`
 reads output on detached threads and, after the leader exits or the
 timeout fires, waits at most `DRAIN_GRACE` (500ms) for both EOFs, then
-returns what it has — output is never lost and a pipe held by something
+returns what it has — a timeout no longer discards what was captured, the tool
+returns at most `DRAIN_GRACE` after the leader is gone, and a pipe held by something
 that left the group (`setsid`, `set -m`) cannot hang the tool. Survivors of
 a *normal* exit are deliberately left alive (`server &` is a legitimate
 request); the readers keep draining so they never take SIGPIPE but discard
-everything after return, so a chatty survivor cannot grow memory. Known
-limit: a background child's output after the grace is not captured; the
+everything after return, so a chatty survivor cannot grow memory. Such
+survivors are not tracked: they are not swept at teardown (`task_run` is the
+tracked form). Known limit: output that arrives after the grace is not
+captured; the
 result carries a note (on every result shape) pointing at `task_run`.
 
 ---
