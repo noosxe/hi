@@ -14,20 +14,20 @@ cargo run            # hi --mock needs no config
 
 CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI). Third-party actions are SHA-pinned with a `# vX.Y.Z` comment; `dtolnay/rust-toolchain@stable` stays a moving branch ref on purpose — the compiler channel is pinned by `rust-toolchain.toml` (#24, AD-0037). Dependabot (`.github/dependabot.yml`) opens one grouped PR per ecosystem weekly (`cargo`, `github-actions`), ignoring Rust major bumps.
 
-Current count: **592 `#[test]` functions** (the README's count gets refreshed in passing;
-trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 89
-core: openai 48, session 34, settings 21, subagent 19, tasks 16, selection 15, read 13,
-agent 14, walk 11, headless 12, message 5, catalog 5, context_report 4, grep 8, image_util 7, truncate 7, edit 6,
-config 7, system_prompt 6, tasks-tool 6, bash 6, mod 6, image_resize 6, subagent-tool 10,
-find 4, write 3, ls 3, thinking 3, mock 2, event 1, tool 1. tui: app 114,
+Current count: **606 `#[test]` functions** (the README's count gets refreshed in passing;
+trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 91
+core: openai 48, session 34, settings 21, subagent 20, tasks 17, selection 15, read 13,
+agent 17, walk 11, headless 13, message 5, catalog 5, context_report 4, grep 8, image_util 7, truncate 7, edit 6,
+config 7, system_prompt 6, tasks-tool 6, bash 7, mod 6, image_resize 6, subagent-tool 10,
+find 5, write 3, ls 3, thinking 3, mock 2, event 1, tool 1. tui: app 118,
 ui 35, status 12, markdown 19, kitty 12, wrap 12, editor 9, picker 7, scroll 11,
-commands 4, clipboard 3, keybinds 3, theme 3, catalog 3. cli: 10 unit + 10 wire + 3 auto-print + 3 json-mode + 10 pty integration
+commands 4, clipboard 3, keybinds 3, theme 3, catalog 3, lib 1. cli: 10 unit + 10 wire + 3 auto-print + 3 json-mode + 11 pty integration
 (`tests/tui_pty.rs` — the real binary in a pseudo-terminal, its byte stream
 rendered by the avt emulator (asciinema's), and every wait a predicate over
 rendered frames — typed keys must echo in the composer, a settled turn must
 stop spinner-cell churn, the composer must remain the last content on screen
 and untinted, a full window must give its rows up to the flush, and `/exit`
-must exit cleanly; dev-only `portable-pty` and `avt`).
+must exit cleanly, and a model-reachable tool panic must leave raw mode on, print nothing and let the next request out; dev-only `portable-pty` and `avt`).
 ## The central tool: `FakeApi` (`crates/core/src/test_support.rs`, cfg(test))
 
 A minimal HTTP server on an ephemeral port:
@@ -117,6 +117,7 @@ because of the #20 bug class — the startup provider never attached
 | catalog flattening, empty catalog | `tui/catalog.rs` |
 | queueing, Esc-cancel + queue restore, completion keys, unknown commands, auto-trigger gating (`taskTurns` off/zero budget/Esc/toggled-off never fire) | `tui/app.rs` |
 | wrap width semantics, oversized-word hard split | `tui/wrap.rs` |
+| panics (#172): u64-max `bash`/`task_run` timeout and `find` limit; a panicking tool or gate (`&str`/`String` payloads) → error result and the turn continues; a panicking provider → `Error` + one `TurnEnd`; closed channel with no `TurnEnd` → failed turn in `pump` (partial kept, queue fires, Empty stays in flight, normal `TurnEnd` finalized once), headless `Failed`, subagent `Err`; the UI-thread-only panic hook; PTY: a real tool panic keeps raw mode, prints nothing, next request goes out | `core/agent.rs`, `core/tools/{bash,find}.rs`, `core/tasks.rs`, `core/headless.rs`, `core/subagent.rs`, `tui/app.rs`, `tui/lib.rs`, `cli/tests/tui_pty.rs` |
 
 Gaps to be aware of: `ui.rs` drawing has row-level tests (scrollback wrapping) but no pty/frame snapshots, `lib.rs` event loop is
 untested (needs a pty), CLI `main` is untested (thin by design).

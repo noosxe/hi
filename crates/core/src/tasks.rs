@@ -561,7 +561,9 @@ fn monitor(
     tx: Arc<Mutex<Sender<TaskCompletion>>>,
 ) {
     let started = Instant::now();
-    let deadline = timeout.map(|t| started + t);
+    // Unrepresentable timeout = no deadline (#172); `+` would panic the
+    // monitor and leave the task `Running` forever.
+    let deadline = timeout.and_then(|t| started.checked_add(t));
     // Reader: pipe → ring + log file. Ends at EOF (child exit).
     let reader = std::thread::spawn(move || {
         let mut pipe = stdout;
@@ -848,6 +850,21 @@ mod tests {
         until("process group to die", || group_dead(summary.pid));
         // Cancelling again is an honest refusal, not a panic.
         assert!(m.cancel(id).is_err());
+    }
+
+    #[test]
+    fn an_unrepresentable_timeout_means_no_deadline() {
+        // #172: `started + Duration::MAX` panicked the monitor thread
+        // and left the task `Running` forever. It must reach a final state.
+        let (m, _dir) = manager();
+        let id = m
+            .spawn(TaskSpec {
+                timeout: Some(Duration::from_secs(u64::MAX)),
+                ..TaskSpec::process("echo done", std::env::temp_dir())
+            })
+            .unwrap();
+        until("the task to finish", || state_of(&m, id).finished());
+        assert!(matches!(state_of(&m, id), TaskState::Succeeded { .. }));
     }
 
     #[test]

@@ -96,7 +96,10 @@ impl Tool for BashTool {
         let (out, err, status, timed_out) = std::thread::scope(|scope| {
             let out_handle = scope.spawn(move || read_lossy(&mut out_pipe));
             let err_handle = scope.spawn(move || read_lossy(&mut err_pipe));
-            let deadline = timeout.map(|secs| Instant::now() + Duration::from_secs(secs as u64));
+            // A timeout too large for `Instant` to represent is no deadline
+            // at all (#172): `checked_add`, never `+`, which panics.
+            let deadline = timeout
+                .and_then(|secs| Instant::now().checked_add(Duration::from_secs(secs as u64)));
             let mut timed_out = false;
             let status: Option<ExitStatus> = loop {
                 match child.try_wait() {
@@ -179,6 +182,17 @@ mod tests {
 
     fn tool(root: &Path) -> BashTool {
         BashTool::new(root)
+    }
+
+    #[test]
+    fn an_unrepresentable_timeout_means_no_deadline() {
+        // #172: u64::MAX seconds overflowed `Instant + Duration` and
+        // panicked the agent thread. It must simply run the command.
+        let root = temp_root("hugetimeout");
+        let out = tool(&root)
+            .execute(r#"{"command":"echo fine","timeout":18446744073709551615}"#)
+            .unwrap();
+        assert!(out.contains("fine"), "got: {out}");
     }
 
     #[test]

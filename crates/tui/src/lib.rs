@@ -113,6 +113,13 @@ pub fn run(
     // try_init_with_options: enables raw mode, skips the alternate
     // screen, and installs a panic hook that restores the terminal.
     let mut terminal = ratatui::try_init_with_options(options)?;
+    // ratatui's hook (ratatui 0.30.2 `init.rs`, `set_panic_hook`) runs
+    // `restore()` then the previous hook, on ANY thread. A tool panic on
+    // the agent thread is caught and becomes an error result (#172), but
+    // the hook fires before the catch: left alone it would turn raw mode
+    // off under a live TUI and print over the screen. Only the UI thread's
+    // panics may touch the terminal.
+    guard_panic_hook(std::thread::current().id());
     // Bracketed paste: without it the terminal sends a paste as raw
     // keystrokes, and every newline in the pasted text submits the
     // input mid-paste. With it, the whole paste arrives as one
@@ -155,6 +162,20 @@ pub fn run(
     // the try_restore() variant is the Result-returning one.
     ratatui::restore();
     result
+}
+
+/// Wrap the current panic hook (ratatui's, restore-then-print) so it
+/// only runs for panics on the `ui` thread. Panics anywhere else —
+/// agent, provider, task-monitor threads — neither restore the terminal
+/// nor write to it; their failures surface as error results / `Error`
+/// events instead (#172). Must be installed after ratatui's init.
+fn guard_panic_hook(ui: std::thread::ThreadId) {
+    let inner = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if std::thread::current().id() == ui {
+            inner(info);
+        }
+    }));
 }
 
 fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Result<()> {
@@ -205,4 +226,33 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn the_hook_runs_for_the_ui_thread_only() {
+        // Stand-in for ratatui's restore-then-print hook: counts calls.
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        let original = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+        }));
+        guard_panic_hook(std::thread::current().id());
+
+        let off_ui = std::thread::spawn(|| {
+            let _ = std::panic::catch_unwind(|| panic!("worker"));
+        });
+        off_ui.join().unwrap();
+        assert_eq!(CALLS.load(Ordering::SeqCst), 0, "worker panic is silent");
+
+        let _ = std::panic::catch_unwind(|| panic!("ui"));
+        assert_eq!(CALLS.load(Ordering::SeqCst), 1, "UI panic still restores");
+
+        let _ = std::panic::take_hook();
+        std::panic::set_hook(original);
+    }
 }

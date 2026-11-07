@@ -1740,3 +1740,16 @@ vanished model keeps the old provider running until the next
 same 10s-per-provider bound as startup; if that ever hurts, the
 escape hatch is incremental discovery, not a semantics change.
 
+**AD-0003 addendum (2026-11-07): #172, a panic is a result, a closed channel is a failure.**
+AD-0003 made tool failures error *results*; a tool *panic* was outside that and
+killed the agent thread with no `ToolResult` and no `TurnEnd`, hanging the TUI
+(`pump` read Disconnected as Empty), exiting 0 headless, and returning an empty
+success from a subagent. Now: the gate/validate/execute step is wrapped in
+`catch_unwind` (the gate inside on purpose — its panic is the same hazard); a
+provider round that closes without `TurnEnd` is an `Error` + `TurnEnd`; every
+consumer treats a closed channel without `TurnEnd` as a failed turn (a dropped
+`Receiver` stays the only cancellation signal and is never a failure). ratatui's
+panic hook restores the terminal on any thread, which would leave a running TUI
+in cooked mode after a *caught* panic, so `hi-tui` guards it to the UI thread
+(hook lives in `crates/tui`, never `crates/core`). Arithmetic on model numbers
+uses checked/saturating ops; an unrepresentable timeout means no deadline.

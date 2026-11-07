@@ -66,6 +66,10 @@ pub fn run(
     )
 }
 
+/// The failure reason when the event stream closes with no `TurnEnd`.
+const AGENT_THREAD_DIED: &str =
+    "agent thread ended unexpectedly (no TurnEnd); the reply is incomplete";
+
 /// One JSONL record of `--mode json` (#18, AD-0038): hi's own
 /// vocabulary, one tag per thing the agent loop actually does. The
 /// `Message` payload serializes exactly like a session-file line, so
@@ -125,7 +129,7 @@ pub fn run_with(
     gate: Option<Arc<ToolGate>>,
     history: &mut Vec<Message>,
     prompt: &str,
-    mut session: Option<Session>,
+    session: Option<Session>,
     max_tool_rounds: usize,
     sink: &mut dyn FnMut(&JsonRecord),
 ) -> Result<String, String> {
@@ -140,7 +144,19 @@ pub fn run_with(
         message: Message::User(prompt.to_string()),
     });
     let rx = spawn_agent_turn(provider, registry, gate, history, max_tool_rounds);
+    drain_turn(rx, history, added_from, session, sink)
+}
 
+/// Fold one turn's event stream into the transcript, the session file
+/// and the sink. Split out of [`run_with`] so the closed-channel path
+/// is testable without a live agent loop (#172).
+fn drain_turn(
+    rx: std::sync::mpsc::Receiver<Event>,
+    history: &mut Vec<Message>,
+    added_from: usize,
+    mut session: Option<Session>,
+    sink: &mut dyn FnMut(&JsonRecord),
+) -> Result<String, String> {
     // Mirrors the TUI pump's reconstruction rules (app.rs): tokens
     // accumulate; narration before a tool call is its own assistant
     // message; `Error` marks the reply failed but `TurnEnd` still
@@ -151,6 +167,7 @@ pub fn run_with(
     // The round's bill rides the session file even though headless
     // prints nothing (#85) — the front end that resumes shows totals.
     let mut bill: Option<Usage> = None;
+    let mut ended = false;
     for event in rx {
         match event {
             // Heartbeats (#170) are liveness probes, not output.
@@ -196,11 +213,20 @@ pub fn run_with(
                 bill = Some(recorded);
             }
             Event::Error(message) => error = Some(message),
-            Event::TurnEnd => break,
+            Event::TurnEnd => {
+                ended = true;
+                break;
+            }
         }
     }
-    // Defensive: a closed channel without `TurnEnd` still finalizes.
-    // Whatever accumulated since the last tool call is the final reply.
+    // Defensive: a closed channel without `TurnEnd` still finalizes,
+    // but as a *failure* (#172): the agent thread died, so the reply is
+    // incomplete and the run must not exit 0. A dropped receiver is not
+    // this path — headless never drops `rx` before the loop ends.
+    // Whatever accumulated since the last tool call is the partial reply.
+    if !ended && error.is_none() {
+        error = Some(AGENT_THREAD_DIED.into());
+    }
     let blocks = std::mem::take(&mut blocks);
     if !blocks.is_empty() {
         let message = Message::Assistant(blocks.clone());
@@ -270,6 +296,25 @@ mod tests {
     }
 
     #[test]
+    fn a_closed_channel_with_no_turn_end_is_a_failure() {
+        // #172: the agent thread died. The partial reply is kept, the
+        // run is `Failed` (so the CLI exits non-zero), never `Done`.
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Event::TurnStart).unwrap();
+        tx.send(Event::Token("part".into())).unwrap();
+        drop(tx);
+        let mut history = vec![Message::User("hi".into())];
+        let mut records = Vec::new();
+        let outcome = drain_turn(rx, &mut history, 0, None, &mut |r| records.push(r.clone()));
+        let reason = outcome.unwrap_err();
+        assert!(reason.contains("agent thread"), "{reason}");
+        assert!(matches!(records.last(), Some(JsonRecord::Failed { .. })));
+        assert!(!records.iter().any(|r| matches!(r, JsonRecord::Done { .. })));
+        assert!(matches!(history[1], Message::Assistant(_)), "partial kept");
+        assert!(matches!(history.last(), Some(Message::Error(_))));
+    }
+
+    #[test]
     fn combine_prompt_joins_stdin_and_argument() {
         let joined = combine_prompt(Some("diff body".into()), Some("review this".into())).unwrap();
         assert_eq!(joined, "diff body\nreview this");
@@ -319,6 +364,7 @@ mod tests {
             vec![
                 Event::Token("checking".into()),
                 Event::ToolCall(call("c1", "{\"x\":1}")),
+                Event::TurnEnd,
             ],
             vec![Event::Token("done".into()), Event::TurnEnd],
         ]));
@@ -517,6 +563,7 @@ mod tests {
             vec![
                 Event::Token("checking".into()),
                 Event::ToolCall(call("c1", "{\"x\":1}")),
+                Event::TurnEnd,
             ],
             vec![Event::Token("done".into()), Event::TurnEnd],
         ]));

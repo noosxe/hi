@@ -115,6 +115,16 @@ Cap exceeded ⇒ `Error("tool loop did not settle within N rounds")` + `TurnEnd`
 mutates the caller's history — consumers mirror the event stream (details in
 [turn-lifecycle.md](turn-lifecycle.md)).
 
+Panic safety (#172): `decide_and_execute` runs the gate, validation and the
+tool inside `catch_unwind` (`AssertUnwindSafe`); a panic becomes an error
+`ToolResult` carrying the message (`panic_message` reads `&str` and `String`
+payloads). `run_agent_turn` also tracks whether each provider round delivered
+its `TurnEnd`: a round that closes without it (provider thread panic) ends the
+turn with `Error` + `TurnEnd` instead of a clean settle. Model-supplied
+numbers (`opt_usize` callers) must use checked/saturating arithmetic: an
+unrepresentable `bash`/`task_run` timeout means no deadline, `find`'s `limit`
+saturates.
+
 ## tools/ — the built-in capabilities (#26)
 
 The harness ships tools, not just a loop. One file per tool under
@@ -212,6 +222,9 @@ result plus an up/down token line; in `coding`/`all` only. `run_probed`
 cancelled parent flushes the transcript, drops the subagent's `Receiver`
 and returns `Err`, so no further round or tool call starts; a tool already
 running inside may finish. `run` is `run_probed` with an always-true probe.
+The event drain is the free function `drain`; a stream that closes with no
+`TurnEnd` (and no error/cancel) is `Err` ("ended unexpectedly"), never an
+empty success (#172).
 
 ## tasks.rs — work that outlives a turn (#5)
 
@@ -323,7 +336,9 @@ terminal — the CLI only assembles the prompt, session, and exit code.
   session file is open), the user `Message`, `Token` deltas,
   transcript `Message`s as they finalize, `Usage`, and exactly one
   terminal record — `Done{text}` or, after the partial output and the
-  error line, `Failed{reason}`. `run` is `run_with` with a no-op
+  error line, `Failed{reason}`. A stream that closes without `TurnEnd`
+  (dead agent thread, #172) is a failure too — `Failed`, `Err`, non-zero
+  exit — with the partial output kept. The drain is `drain_turn`. `run` is `run_with` with a no-op
   sink; the session-file contract above is unchanged.
   `JsonRecord::to_line()` renders one JSONL line; the CLI's
   `--mode json` writes those lines to stdout.

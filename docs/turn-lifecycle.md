@@ -5,7 +5,7 @@ Files this doc describes: `crates/tui/src/app.rs` (`handle_key`, `pump`,
 `start_turn`, `activity_label`, `Turn`), `crates/core/src/provider.rs`
 (`spawn_turn`), `crates/core/src/tool.rs`, `crates/core/src/agent.rs`
 (`spawn_agent_turn`), `crates/core/src/openai.rs` (`respond`, `stream`),
-`crates/tui/src/lib.rs` (`event_loop`). Type contracts live in
+`crates/tui/src/lib.rs` (`event_loop`, `guard_panic_hook`). Type contracts live in
 [core.md](core.md); this doc is about the flow.
 
 ## The happy path
@@ -28,7 +28,10 @@ user presses Enter (no completion menu open)
 per frame (event_loop polls keys with 50ms timeout):
   └─ App::pump()
        ├─ tick += 1                      (drives the spinner)
-       └─ while try_recv():
+       └─ loop on try_recv():
+            ├─ Empty         → stop for this frame (turn stays in flight)
+            ├─ Disconnected  → agent thread died, no TurnEnd (#172): set
+            │                  turn.error, finalize (below)
             ├─ TurnStart     → no-op (tokens follow)
             ├─ Token(t)      → turn.text.push_str(t)     (rendered live)
             ├─ ToolCall(c)   → flush pending text as Assistant, push ToolCall
@@ -68,6 +71,27 @@ into the scrollback above the viewport exactly once
 - `Event::Error` still means the turn itself failed (wire error, or round
   cap: `"tool loop did not settle within N rounds"`), always immediately
   before `TurnEnd` — the single finalization path is unchanged.
+- Panics (#172). A tool (or the gate) that panics is caught around
+  `decide_and_execute` (`catch_unwind`) and becomes an `is_error`
+  `ToolResult` (`tool `x` panicked: <message>`; `&str` and `String`
+  payloads both read) — the model adapts and the turn continues. A provider
+  thread that panics closes its round's channel with no `TurnEnd`; the loop
+  tracks whether the round saw one and, if not (and no `Error` came), sends
+  `Error("provider thread ended without finishing the round …")` then
+  `TurnEnd` — never a clean settle. Calls from such a round are not
+  dispatched.
+- Closed channel, no `TurnEnd` (defence for an agent thread that died anyway):
+  every consumer treats it as a **failed turn**, never a success. `pump`
+  sets the turn error and finalizes (partial text kept, `Error` entry,
+  queued input fires); headless returns `Err`/`Failed` (non-zero exit); the
+  subagent drain returns `Err`. A *dropped* `Receiver` (Esc) is the other
+  direction and is never reported as a failure. Empty is not closed: an
+  open, quiet channel leaves the turn in flight.
+- The terminal side: ratatui's panic hook restores the terminal on any
+  thread, so `hi-tui` wraps it after init (`guard_panic_hook`) and lets it
+  run only for UI-thread panics. Worker-thread panics (tools, providers,
+  task monitors) neither restore nor print while the TUI runs; they surface
+  as results/errors. Headless keeps the default hook (stderr).
 - Cancellation is unchanged: dropping the `Receiver` fails the loop's next
   send and everything unwinds.
 - Subagents (#4) ride this contract one level down: a subagent is an
@@ -158,7 +182,9 @@ path: partial `Token`s stand, then one `Event::Error` (message built by
 
 ## Invariants recap (all tested somewhere)
 
-1. `TurnStart` first, exactly one `TurnEnd` last, always.
+1. `TurnStart` first, exactly one `TurnEnd` last, always (a dead agent
+   thread is the one case the consumer must synthesize it: `pump`'s
+   Disconnected arm).
 
 2. `Token`s concatenate to the exact reply; partial output survives errors
    and cancellation.

@@ -304,6 +304,14 @@ impl Tui {
         }
     }
 
+    /// Is the pty still in raw mode? crossterm's raw mode clears
+    /// `ICANON`; cooked mode (what a panic hook's `restore()` leaves
+    /// behind) has it set. Read from the line discipline itself.
+    fn is_raw(&self) -> bool {
+        let termios = self.master.get_termios().expect("termios of the pty");
+        !format!("{:?}", termios.local_flags).contains("ICANON")
+    }
+
     fn sees(&mut self, needle: &str) {
         self.until(needle, TEXT_TIMEOUT, |frame| frame.contains(needle));
     }
@@ -494,16 +502,27 @@ fn a_terminal_still_opens_the_tui_without_flags() {
 /// server for a one-turn TUI session — the pty counterpart of wire
 /// tests' FakeApi, minus the recording.
 fn fake_sse_endpoint(reply: &str) -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
     let body = format!(
         "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{reply}\"}}}}]}}\n\n\
          data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}}}\n\n\
          data: [DONE]\n\n"
     );
+    fake_sse_sequence(vec![body]).0
+}
+
+/// Like [`fake_sse_endpoint`] but each request consumes the next SSE
+/// body (the last repeats), and the count of requests received comes
+/// back too — the agent loop's multi-round conversations need
+/// round-specific answers and a way to see that a round arrived.
+fn fake_sse_sequence(bodies: Vec<String>) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&seen);
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            let body = body.clone();
+            let index = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let body = bodies[index.min(bodies.len() - 1)].clone();
             std::thread::spawn(move || {
                 let mut stream = stream;
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
@@ -547,7 +566,7 @@ fn fake_sse_endpoint(reply: &str) -> String {
             });
         }
     });
-    format!("http://127.0.0.1:{port}/v1")
+    (format!("http://127.0.0.1:{port}/v1"), seen)
 }
 
 /// The `needle in haystack` scan, byte-wise (no std helper for this).
@@ -886,4 +905,83 @@ fn resume_picker_reopens_the_chosen_older_session_and_appends_to_it() {
         newer_before,
         "the newest session must stay untouched"
     );
+}
+
+/// An SSE body asking for one tool call.
+fn tool_call_body(id: &str, name: &str, arguments: &str) -> String {
+    let frame = serde_json::json!({"choices":[{"delta":{"tool_calls":[
+        {"index":0,"id":id,"function":{"name":name,"arguments":arguments}}]}}]});
+    format!("data: {frame}\n\ndata: [DONE]\n\n")
+}
+
+#[test]
+fn a_panicking_tool_leaves_the_tui_alive_raw_and_clean() {
+    // #172 end to end. The tool call below panics on the agent thread
+    // in the real binary. Three things must hold: the turn survives
+    // (the model gets an error result and the next request goes out),
+    // the terminal stays in raw mode (ratatui's panic hook restores the
+    // terminal on ANY thread unless hi-tui guards it), and no panic text
+    // lands on the screen.
+    //
+    // The trigger: `grep` with `context` = u64::MAX overflows
+    // `m + context` in debug builds (the profile `cargo test` uses).
+    // That is a real, model-reachable tool panic that #172 deliberately
+    // does not fix (it lists, not fixes, panics outside bash/find/tasks);
+    // when grep is hardened, swap in whatever panics next — there is no
+    // test-only backdoor in the shipped binary to use instead.
+    let target = std::env::temp_dir().join(format!("hi-pty-panic-{}.txt", std::process::id()));
+    std::fs::write(&target, "needle\nneedle\n").unwrap();
+    let args = serde_json::json!({
+        "pattern": "needle",
+        "path": target.to_str().unwrap(),
+        "context": 18446744073709551615u64,
+    })
+    .to_string();
+    let settle = "data: {\"choices\":[{\"delta\":{\"content\":\"recovered after panic\"}}]}\n\n\
+                  data: [DONE]\n\n"
+        .to_string();
+    let (url, requests) = fake_sse_sequence(vec![tool_call_body("c1", "grep", &args), settle]);
+    let models = format!(
+        "{{\"providers\":{{\"fake\":{{\"baseUrl\":\"{url}\",\"apiKey\":\"k\",\"models\":[{{\"id\":\"fake-mini\"}}]}}}}}}"
+    );
+    // `--tools all`: grep is not in the default (coding) bundle.
+    let mut tui = Tui::spawn_configured(
+        &[
+            "--provider",
+            "fake",
+            "--model",
+            "fake-mini",
+            "--tools",
+            "all",
+        ],
+        &models,
+    );
+    tui.sees("\u{2500}");
+    assert!(tui.is_raw(), "raw mode before the turn");
+    tui.type_keys("go");
+    tui.write("\r");
+    // The next round only happens if the panic became an error result.
+    tui.settled_turn("recovered after panic");
+    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(tui.is_raw(), "a tool panic must not restore the terminal");
+    let everything = format!("{}\n{}", tui.frame(), tui.scrollback().join("\n"));
+    // The tool really panicked (this is not an unknown-tool refusal).
+    assert!(
+        everything.contains("tool `grep` panicked"),
+        "no panic error result on screen:\n{everything}"
+    );
+    for needle in ["panicked at", "RUST_BACKTRACE", "thread '"] {
+        assert!(
+            !everything.contains(needle),
+            "panic text {needle:?} reached the screen:\n{everything}"
+        );
+    }
+    // The error result is visible to the user as a tool result, and the
+    // session still takes input and runs another turn.
+    tui.type_keys("again");
+    tui.write("\r");
+    tui.until("a third request", TEXT_TIMEOUT, |_| {
+        requests.load(std::sync::atomic::Ordering::SeqCst) >= 3
+    });
+    assert!(tui.exits_cleanly(Duration::from_secs(20)));
 }

@@ -317,114 +317,137 @@ impl SubagentRunner {
             &history,
             max_rounds,
         );
-        let mut blocks: Vec<AssistantBlock> = Vec::new();
-        let mut narration = String::new();
-        let mut usage = Usage::default();
-        let mut rounds = 0usize;
-        let mut failure = None;
-        // The transcript mirror: the same reconstruction rule the loop
-        // documents for consumers — accumulate tokens, flush them as an
-        // Assistant message at each ToolCall, record ToolResults in
-        // order. `load()` of the file reproduces the run's working
-        // history exactly.
-        let mut tbuf: Vec<Message> = Vec::new();
-        let mut last_probe = Instant::now();
-        loop {
-            let event = match next_event(&rx, PROBE_INTERVAL, &mut last_probe, alive) {
-                Next::Event(event) => event,
-                Next::Closed => break,
-                Next::Cancelled => {
-                    flush_transcript(&mut transcript, &mut tbuf);
-                    failure = Some("subagent cancelled: the parent turn is gone".to_string());
-                    break;
+        drain(&rx, alive, transcript, recorded)
+    }
+}
+
+/// Drain a subagent's event stream into its shaped result. Split out of
+/// [`SubagentRunner::run_probed`] so the closed-channel path is testable
+/// without a live agent loop (#172).
+fn drain(
+    rx: &Receiver<Event>,
+    alive: &dyn Fn() -> bool,
+    mut transcript: Option<Session>,
+    recorded: Option<PathBuf>,
+) -> Result<SubagentResult, String> {
+    let mut blocks: Vec<AssistantBlock> = Vec::new();
+    let mut narration = String::new();
+    let mut usage = Usage::default();
+    let mut rounds = 0usize;
+    let mut failure = None;
+    let mut ended = false;
+    // The transcript mirror: the same reconstruction rule the loop
+    // documents for consumers — accumulate tokens, flush them as an
+    // Assistant message at each ToolCall, record ToolResults in
+    // order. `load()` of the file reproduces the run's working
+    // history exactly.
+    let mut tbuf: Vec<Message> = Vec::new();
+    let mut last_probe = Instant::now();
+    loop {
+        let event = match next_event(rx, PROBE_INTERVAL, &mut last_probe, alive) {
+            Next::Event(event) => event,
+            Next::Closed => break,
+            Next::Cancelled => {
+                flush_transcript(&mut transcript, &mut tbuf);
+                failure = Some("subagent cancelled: the parent turn is gone".to_string());
+                break;
+            }
+        };
+        match event {
+            Event::Token(t) => AssistantBlock::push_text(&mut blocks, &t),
+            Event::Thinking { delta, field } => {
+                AssistantBlock::push_thinking(&mut blocks, &delta, field);
+            }
+            Event::ToolCall(c) => {
+                rounds += 1;
+                // The reply that matters is the one after the last
+                // tool round; keep the pre-tool prose as the run's
+                // narration so a cap failure can return it.
+                let prose = AssistantBlock::text_of(&blocks);
+                if !prose.trim().is_empty() {
+                    narration = prose;
                 }
-            };
-            match event {
-                Event::Token(t) => AssistantBlock::push_text(&mut blocks, &t),
-                Event::Thinking { delta, field } => {
-                    AssistantBlock::push_thinking(&mut blocks, &delta, field);
-                }
-                Event::ToolCall(c) => {
-                    rounds += 1;
-                    // The reply that matters is the one after the last
-                    // tool round; keep the pre-tool prose as the run's
-                    // narration so a cap failure can return it.
-                    let prose = AssistantBlock::text_of(&blocks);
-                    if !prose.trim().is_empty() {
-                        narration = prose;
-                    }
-                    if transcript.is_some() {
-                        if !blocks.is_empty() {
-                            tbuf.push(Message::Assistant(blocks.clone()));
-                        }
-                        tbuf.push(Message::ToolCall(c.clone()));
-                    }
-                    blocks.clear();
-                }
-                Event::ToolResult(r) => {
-                    if transcript.is_some() {
-                        tbuf.push(Message::ToolResult(r));
-                    }
-                }
-                Event::Usage(u) => {
-                    usage.prompt_tokens += u.prompt_tokens;
-                    usage.completion_tokens += u.completion_tokens;
-                    if let Some(session) = transcript.as_mut() {
-                        let _ = session.append_usage(&u);
-                    }
-                }
-                Event::Error(e) => {
-                    // Record the rounds that completed; the pre-call
-                    // prose is already in the buffer as Assistant
-                    // messages, so nothing is lost to the cap.
-                    flush_transcript(&mut transcript, &mut tbuf);
-                    failure = Some(e);
-                    break; // dropping the receiver stops the loop at its next send
-                }
-                Event::TurnEnd => {
-                    // The settled reply is the buffer's last message.
+                if transcript.is_some() {
                     if !blocks.is_empty() {
                         tbuf.push(Message::Assistant(blocks.clone()));
                     }
-                    flush_transcript(&mut transcript, &mut tbuf);
+                    tbuf.push(Message::ToolCall(c.clone()));
                 }
-                _ => {}
+                blocks.clear();
             }
-        }
-        if let Some(e) = failure {
-            if e.contains(crate::agent::ROUND_CAP_MARKER) {
-                // Model-actionable, not opaque: name the cap, name the
-                // remedy, and hand back whatever the subagent had said.
-                let mut msg = format!(
-                    "subagent hit its tool-round cap: {e}. Retry with a \
-                     higher max_rounds, or split the task into smaller \
-                     subagent runs."
-                );
-                let partial = {
-                    let prose = AssistantBlock::text_of(&blocks);
-                    if !prose.trim().is_empty() {
-                        prose.trim().to_string()
-                    } else {
-                        narration.trim().to_string()
-                    }
-                };
-                if partial.is_empty() {
-                    msg.push_str(" (no partial output)");
-                } else {
-                    msg.push_str("\n\nPartial output before the cap:\n");
-                    msg.push_str(&partial);
+            Event::ToolResult(r) => {
+                if transcript.is_some() {
+                    tbuf.push(Message::ToolResult(r));
                 }
-                return Err(msg);
             }
-            return Err(e);
+            Event::Usage(u) => {
+                usage.prompt_tokens += u.prompt_tokens;
+                usage.completion_tokens += u.completion_tokens;
+                if let Some(session) = transcript.as_mut() {
+                    let _ = session.append_usage(&u);
+                }
+            }
+            Event::Error(e) => {
+                // Record the rounds that completed; the pre-call
+                // prose is already in the buffer as Assistant
+                // messages, so nothing is lost to the cap.
+                flush_transcript(&mut transcript, &mut tbuf);
+                failure = Some(e);
+                break; // dropping the receiver stops the loop at its next send
+            }
+            Event::TurnEnd => {
+                ended = true;
+                // The settled reply is the buffer's last message.
+                if !blocks.is_empty() {
+                    tbuf.push(Message::Assistant(blocks.clone()));
+                }
+                flush_transcript(&mut transcript, &mut tbuf);
+            }
+            _ => {}
         }
-        Ok(SubagentResult {
-            text: AssistantBlock::text_of(&blocks),
-            usage,
-            rounds,
-            recorded,
-        })
     }
+    if failure.is_none() && !ended {
+        // Closed with no `TurnEnd` (#172): the subagent's agent thread
+        // died. An empty success would hand the parent model a blank
+        // answer as if the subagent had finished.
+        flush_transcript(&mut transcript, &mut tbuf);
+        failure = Some(
+            "subagent ended unexpectedly: its event stream closed without finishing".to_string(),
+        );
+    }
+    if let Some(e) = failure {
+        if e.contains(crate::agent::ROUND_CAP_MARKER) {
+            // Model-actionable, not opaque: name the cap, name the
+            // remedy, and hand back whatever the subagent had said.
+            let mut msg = format!(
+                "subagent hit its tool-round cap: {e}. Retry with a \
+                 higher max_rounds, or split the task into smaller \
+                 subagent runs."
+            );
+            let partial = {
+                let prose = AssistantBlock::text_of(&blocks);
+                if !prose.trim().is_empty() {
+                    prose.trim().to_string()
+                } else {
+                    narration.trim().to_string()
+                }
+            };
+            if partial.is_empty() {
+                msg.push_str(" (no partial output)");
+            } else {
+                msg.push_str("\n\nPartial output before the cap:\n");
+                msg.push_str(&partial);
+            }
+            return Err(msg);
+        }
+        return Err(e);
+    }
+    Ok(SubagentResult {
+        text: AssistantBlock::text_of(&blocks),
+        usage,
+        rounds,
+        recorded,
+    })
 }
 
 #[cfg(test)]
@@ -827,6 +850,23 @@ mod tests {
 
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::channel;
+
+    #[test]
+    fn a_closed_stream_with_no_turn_end_is_an_error_not_an_empty_success() {
+        // #172: the subagent's agent thread died mid-run.
+        let (tx, rx) = channel::<Event>();
+        tx.send(Event::Token("half".into())).unwrap();
+        drop(tx);
+        let err = drain(&rx, &|| true, None, None).unwrap_err();
+        assert!(err.contains("ended unexpectedly"), "{err}");
+
+        // The healthy shape still succeeds.
+        let (tx, rx) = channel::<Event>();
+        tx.send(Event::Token("whole".into())).unwrap();
+        tx.send(Event::TurnEnd).unwrap();
+        drop(tx);
+        assert_eq!(drain(&rx, &|| true, None, None).unwrap().text, "whole");
+    }
 
     #[test]
     fn next_event_probes_on_a_quiet_timeout() {
