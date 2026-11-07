@@ -378,8 +378,13 @@ Construction chain:
 Images on the wire (AD-0008): `role: "tool"` is text-only in the OpenAI-compat
   protocol, so a result's images move into a **synthetic follow-up user message** —
   `{"role":"user","content":[{"type":"text","text":"Attached image(s) from read:"},
-  {"type":"image_url","image_url":{"url":"data:image/png;base64,…"}}]}` — pi-ai's exact
-  transformation. Wire-only: history keeps images on the result, every turn re-derives the
+  {"type":"image_url","image_url":{"url":"data:image/png;base64,…"}}]}` — modelled on
+  pi-ai (see the AD-0008 addendum for where it differs). Carriers are **deferred until the
+  run of tool results ends** (#171) so sibling `role: "tool"` messages stay contiguous after
+  their assistant message: real results, then synthesized orphan results, then one carrier
+  per image-bearing result in result order, then the next message (user/harness, a new
+  assistant message, or end of history; dropped `Error`/`System` entries don't end the run).
+  `settle` does the orphan-then-carrier emit. Wire-only: history keeps images on the result, every turn re-derives the
   carrier (deterministic base64, so the AD-0007 prefix invariant holds), an image-only
   result sends `(see attached image)` as its tool text.
 

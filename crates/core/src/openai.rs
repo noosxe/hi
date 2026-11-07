@@ -792,6 +792,12 @@ impl<'a> AssistantGroup<'a> {
 ///   (see `AssistantGroup`).
 /// - Each `ToolResult` follows as its own `role: "tool"` message,
 ///   pointing at its call via `tool_call_id`.
+/// - Image carriers (AD-0008) are deferred until the run of tool
+///   results ends, so sibling tool messages stay contiguous: real
+///   results, then synthesized orphan results, then the carriers, then
+///   the next message. The run ends at a `User`/`Harness` message, a
+///   new assistant message, or the end of the history; dropped
+///   `Error`/`System` entries do not end it.
 /// - A `ToolCall` with no recorded `ToolResult` (Esc, quit mid-turn, a
 ///   crash, an old session file) is answered by a synthesized
 ///   `role: "tool"` message, placed after the results that do exist for
@@ -807,11 +813,14 @@ pub(crate) fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
     };
     // (id, name) of the last assistant message's calls still unanswered.
     let mut pending: Vec<(&str, &str)> = Vec::new();
+    // Results with images whose carriers wait for the end of the run of
+    // tool results (see `settle`).
+    let mut carriers: Vec<&ToolResult> = Vec::new();
     for message in history {
         match message {
             Message::User(text) | Message::Harness(text) => {
-                flush_group(&mut group, &mut out, &mut pending);
-                settle(&mut out, &mut pending);
+                flush_group(&mut group, &mut out, &mut pending, &mut carriers);
+                settle(&mut out, &mut pending, &mut carriers);
                 out.push(WireMessage::text("user", text));
             }
             Message::Error(_) | Message::System(_) => {}
@@ -856,19 +865,19 @@ pub(crate) fn wire_messages(history: &[Message]) -> Vec<WireMessage<'_>> {
             Message::ToolResult(result) => {
                 // The assistant message carrying the calls must precede
                 // its results on the wire.
-                flush_group(&mut group, &mut out, &mut pending);
+                flush_group(&mut group, &mut out, &mut pending, &mut carriers);
                 if let Some(at) = pending.iter().position(|(id, _)| *id == result.call_id) {
                     pending.remove(at);
                 }
                 out.push(WireMessage::tool_result(result));
                 if !result.images.is_empty() {
-                    out.push(WireMessage::image_carrier(result));
+                    carriers.push(result);
                 }
             }
         }
     }
-    flush_group(&mut group, &mut out, &mut pending);
-    settle(&mut out, &mut pending);
+    flush_group(&mut group, &mut out, &mut pending, &mut carriers);
+    settle(&mut out, &mut pending, &mut carriers);
     out
 }
 
@@ -879,22 +888,31 @@ fn flush_group<'a>(
     group: &mut AssistantGroup<'a>,
     out: &mut Vec<WireMessage<'a>>,
     pending: &mut Vec<(&'a str, &'a str)>,
+    carriers: &mut Vec<&'a ToolResult>,
 ) {
     if group.text.is_none() && group.calls.is_empty() && group.reasoning.is_none() {
         return;
     }
-    settle(out, pending);
+    settle(out, pending, carriers);
     pending.extend(group.calls.iter().map(|c| (c.id, c.function.name)));
     group.flush(out);
 }
 
-/// Answer every still-pending call with a synthesized result.
-fn settle<'a>(out: &mut Vec<WireMessage<'a>>, pending: &mut Vec<(&'a str, &'a str)>) {
+/// End a run of tool results: answer every still-pending call with a
+/// synthesized result, then emit the deferred image carriers (one per
+/// result, in result order). Tool messages must stay contiguous after
+/// their assistant message, so carriers never sit between them.
+fn settle<'a>(
+    out: &mut Vec<WireMessage<'a>>,
+    pending: &mut Vec<(&'a str, &'a str)>,
+    carriers: &mut Vec<&'a ToolResult>,
+) {
     out.extend(
         pending
             .drain(..)
             .map(|(id, name)| WireMessage::orphan_result(id, name)),
     );
+    out.extend(carriers.drain(..).map(WireMessage::image_carrier));
 }
 
 /// One streamed chunk. `choices[0]` is all hi reads of a content
@@ -2122,6 +2140,192 @@ mod tests {
         // The real result keeps its text; only the missing ids are synthesized.
         let value = serde_json::to_value(wire_messages(&history)).unwrap();
         assert_eq!(value[2]["content"], "ok");
+    }
+
+    // ---- image carriers stay out of the middle of a run of tool results (#171) ----
+
+    fn image_res(id: &str) -> Message {
+        Message::ToolResult(crate::tool::ToolResult {
+            call_id: id.into(),
+            name: "read".into(),
+            content: "pic".into(),
+            is_error: false,
+            images: vec![crate::tool::ImageBlock {
+                data: format!("data-{id}"),
+                mime_type: "image/png".into(),
+            }],
+        })
+    }
+
+    /// Like `shape`, but an image carrier shows as `carrier:<base64>`
+    /// (its first image), so tests can tell which result it belongs to.
+    fn carrier_shape(history: &[Message]) -> Vec<String> {
+        let value = serde_json::to_value(wire_messages(history)).unwrap();
+        let plain = shape(history);
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(plain)
+            .map(|(m, label)| match m["content"].as_array() {
+                Some(parts) => format!(
+                    "carrier:{}",
+                    parts[1]["image_url"]["url"]
+                        .as_str()
+                        .unwrap()
+                        .rsplit(',')
+                        .next()
+                        .unwrap()
+                ),
+                None => label,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_image_on_the_first_of_two_parallel_results_waits_for_the_run_to_end() {
+        let history = [
+            Message::User("go".into()),
+            call("a", "read"),
+            call("b", "read"),
+            image_res("a"),
+            result("b", "read", "text"),
+        ];
+        assert_eq!(
+            carrier_shape(&history),
+            [
+                "user",
+                "assistant:calls:a,b",
+                "tool:a",
+                "tool:b",
+                "carrier:data-a"
+            ]
+        );
+    }
+
+    #[test]
+    fn images_on_both_results_keep_one_carrier_each_in_result_order() {
+        let history = [
+            call("a", "read"),
+            call("b", "read"),
+            image_res("a"),
+            image_res("b"),
+            Message::User("next".into()),
+        ];
+        assert_eq!(
+            carrier_shape(&history),
+            [
+                "assistant:calls:a,b",
+                "tool:a",
+                "tool:b",
+                "carrier:data-a",
+                "carrier:data-b",
+                "user"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_synthesized_result_comes_before_the_carrier() {
+        let history = [
+            call("a", "read"),
+            call("b", "read"),
+            image_res("a"),
+            Message::User("next".into()),
+        ];
+        assert_eq!(
+            carrier_shape(&history),
+            [
+                "assistant:calls:a,b",
+                "tool:a",
+                "tool:b",
+                "carrier:data-a",
+                "user"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_carrier_precedes_a_following_user_message() {
+        let history = [
+            call("a", "read"),
+            image_res("a"),
+            Message::Harness("h".into()),
+        ];
+        assert_eq!(
+            carrier_shape(&history),
+            ["assistant:calls:a", "tool:a", "carrier:data-a", "user"]
+        );
+    }
+
+    #[test]
+    fn a_carrier_precedes_a_following_assistant_message() {
+        let history = [
+            call("a", "read"),
+            call("b", "read"),
+            image_res("a"),
+            result("b", "read", "t"),
+            assistant("done"),
+        ];
+        assert_eq!(
+            carrier_shape(&history),
+            [
+                "assistant:calls:a,b",
+                "tool:a",
+                "tool:b",
+                "carrier:data-a",
+                "assistant"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_carrier_at_the_end_of_the_history_is_emitted() {
+        let history = [call("a", "read"), image_res("a")];
+        assert_eq!(
+            carrier_shape(&history),
+            ["assistant:calls:a", "tool:a", "carrier:data-a"]
+        );
+    }
+
+    #[test]
+    fn a_system_entry_between_results_does_not_end_the_run() {
+        let history = [
+            call("a", "read"),
+            call("b", "read"),
+            image_res("a"),
+            Message::System("note".into()),
+            Message::Error("boom".into()),
+            result("b", "read", "t"),
+        ];
+        assert_eq!(
+            carrier_shape(&history),
+            ["assistant:calls:a,b", "tool:a", "tool:b", "carrier:data-a"]
+        );
+    }
+
+    #[test]
+    fn completed_parallel_rounds_keep_a_stable_prefix_as_history_grows() {
+        // AD-0007: the wire of a finished round must not change when
+        // later messages are appended.
+        let base = vec![
+            Message::User("go".into()),
+            call("a", "read"),
+            call("b", "read"),
+            image_res("a"),
+            image_res("b"),
+        ];
+        let full = |h: &[Message]| serde_json::to_string(&wire_messages(h)).unwrap();
+        let at_rest = full(&base);
+        let mut grown = base.clone();
+        grown.push(assistant("seen"));
+        grown.push(Message::User("more".into()));
+        let after = full(&grown);
+        let closed = at_rest.trim_end_matches(']');
+        assert!(
+            after.starts_with(closed),
+            "prefix changed:\n{at_rest}\n{after}"
+        );
     }
 
     #[test]

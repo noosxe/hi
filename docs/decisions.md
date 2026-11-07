@@ -326,6 +326,29 @@ attachments (#41 — takes the `Message::User` enum churn this decision
 deliberately avoided), Anthropic-native content blocks (OpenRouter
 translates), sixel.
 
+**AD-0008 addendum (2026-11-07): #171, carriers wait for the end of the run.**
+The wire transform emitted each carrier straight after its own tool message,
+so two parallel calls with an image on the first produced `assistant(tool_calls),
+tool, user(image), tool` — a tool message no longer directly following its
+siblings. A public report (docker-agent #4608) ties this shape to HTTP 400 on
+DeepSeek; not verified against a real API by us. Now carriers are deferred and
+emitted when the run of tool results ends (before a user/harness message, before
+a new assistant message, at end of history), after real results *and* after the
+synthesized orphan results of a partly answered batch (`settle`), one carrier
+per image-bearing result in result order, text and parts unchanged. Dropped
+`Error`/`System` entries do not end the run. Single-result and image-free
+histories serialize exactly as before; AD-0007 prefix stability holds (a
+finished round's wire never changes as history grows). Old session files
+re-derive the new order on replay: at most one cache miss, only where a batch
+had a non-final image. **pi-ai comparison (checked against
+`packages/ai/src/api/openai-completions.ts` on `main`, 2026-11-07):** "mirrors
+pi-ai exactly" was too strong. pi-ai also defers images to after the run of
+consecutive tool results, but merges every image of the run into ONE user message
+with the text "Attached image(s) from tool result:" (and can insert an assistant
+"I have processed the tool results." filler for providers that need it). hi
+keeps one carrier per result, each naming its tool; merging is not needed for
+correctness here.
+
 ---
 
 ## AD-0009 — image resize follows pi: one universal budget, no per-model knowledge (2026-10-14)
