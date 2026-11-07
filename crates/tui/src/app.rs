@@ -20,11 +20,11 @@ use crate::editor;
 use crate::status::{Status, location_label, usage_line};
 use hi_core::event::Usage;
 
-/// Prompt-history ceiling (AD-0014).
 /// The turn error when the agent thread's channel closes with no
 /// `TurnEnd` (a panic that escaped every guard, #172).
 const AGENT_DIED: &str = "the agent thread ended unexpectedly; this turn is incomplete";
 
+/// Prompt-history ceiling (AD-0014).
 const HISTORY_CAP: usize = 100;
 
 /// Undo ceiling (#65): snapshot-per-unit of a few-KB composer is a
@@ -367,9 +367,6 @@ pub struct Turn {
 
 #[cfg(test)]
 impl Turn {
-    /// A turn mid-stream with fixed text — lets render tests place
-    /// the live region deterministically instead of racing the mock's
-    /// chunk timing.
     /// A fresh turn reading from `rx` — lets pump tests play the
     /// agent thread by hand (send events, drop the sender).
     pub(crate) fn with_rx(rx: Receiver<Event>) -> Turn {
@@ -381,6 +378,9 @@ impl Turn {
         }
     }
 
+    /// A turn mid-stream with fixed text — lets render tests place
+    /// the live region deterministically instead of racing the mock's
+    /// chunk timing.
     pub(crate) fn with_text(text: &str) -> Turn {
         Turn {
             blocks: vec![hi_core::message::AssistantBlock::Text(text.to_string())],
