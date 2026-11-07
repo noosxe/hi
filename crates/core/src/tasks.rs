@@ -11,6 +11,8 @@
 //!   cancel/timeout/shutdown kill the *group*, so grandchildren (a dev
 //!   server's watchers) die with it. This is deliberately stronger
 //!   than the `bash` tool, whose #30 grandchild limitation stands.
+//!   A task lives until its group is empty (#174), reports the
+//!   leader's state, and waits a bounded time for the reader's EOF.
 //! - **Merged output, total order.** The command runs under
 //!   `bash -c "exec 2>&1; …"`, so stdout and stderr interleave in one
 //!   pipe exactly as a terminal would show them — one reader thread,
@@ -884,6 +886,15 @@ mod tests {
         }
     }
 
+    /// Creates the release file on drop so a failing test frees its
+    /// polling survivor too.
+    struct ReleaseOnDrop(PathBuf);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, "");
+        }
+    }
+
     fn read_pid(file: &Path) -> i32 {
         let mut pid = 0;
         until("pid file", || {
@@ -971,15 +982,28 @@ mod tests {
     #[test]
     fn a_short_lived_survivor_finishes_the_task_with_the_leaders_state() {
         let (m, _d) = manager();
-        let id = spawn_script(&m, "(sleep 1) & exit 3", None);
+        let dir = scratch("short");
+        let release = dir.join("release");
+        let script = format!(
+            "(while [ ! -e {r} ]; do sleep 0.02; done) & touch {m}; exit 3",
+            r = release.display(),
+            m = dir.join("marker").display()
+        );
+        let spawned = Instant::now();
+        let id = spawn_script(&m, &script, None);
         let _guard = KillGroup(m.status(id).unwrap().pid as i32);
+        let _release = ReleaseOnDrop(release.clone());
+        until("leader to exit", || dir.join("marker").exists());
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(state_of(&m, id), TaskState::Running, "survivor still alive");
+        assert!(m.try_recv_completion().is_none());
+        let held = spawned.elapsed();
+        std::fs::write(&release, "").unwrap();
         until("task to finish", || state_of(&m, id).finished());
         assert_eq!(state_of(&m, id), TaskState::Failed { exit_code: 3 });
         let c = m.try_recv_completion().unwrap();
         assert_eq!((c.id, c.state), (id, TaskState::Failed { exit_code: 3 }));
-        assert!(c.wall >= Duration::from_millis(800), "wall {:?}", c.wall);
+        assert!(c.wall >= held, "wall {:?} < held {held:?}", c.wall);
         std::thread::sleep(Duration::from_millis(200));
         assert!(m.try_recv_completion().is_none(), "exactly one notice");
     }
@@ -987,17 +1011,27 @@ mod tests {
     #[test]
     fn a_survivors_output_after_the_leader_exited_reaches_ring_and_log() {
         let (m, dir) = manager();
-        let id = spawn_script(&m, "(sleep 1; echo late-words) & exit 0", None);
-        let _guard = KillGroup(m.status(id).unwrap().pid as i32);
-        until("late output", || {
-            m.output_tail(id, 4096).unwrap().contains("late-words")
-        });
-        // The leader is long gone, yet the line arrived while Running or
-        // just as the group emptied; either way the log has it.
+        let sdir = scratch("late");
+        let release = sdir.join("release");
+        let script = format!(
+            "(while [ ! -e {r} ]; do sleep 0.02; done; echo late-words) & exit 0",
+            r = release.display()
+        );
+        let id = spawn_script(&m, &script, None);
+        let leader = m.status(id).unwrap().pid as i32;
+        let _guard = KillGroup(leader);
+        let _release = ReleaseOnDrop(release.clone());
+        // Gone (reaped by the monitor) while the survivor still waits:
+        // the line below can only come from a task past its leader.
+        until("leader to be reaped", || pid_dead(leader));
+        assert_eq!(state_of(&m, id), TaskState::Running);
+        assert!(!m.output_tail(id, 4096).unwrap().contains("late-words"));
+        std::fs::write(&release, "").unwrap();
         until("task to finish", || state_of(&m, id).finished());
         assert_eq!(state_of(&m, id), TaskState::Succeeded { exit_code: 0 });
         let log = std::fs::read_to_string(dir.join(format!("{id}.log"))).unwrap();
         assert!(log.contains("late-words"), "log: {log}");
+        assert!(m.output_tail(id, 4096).unwrap().contains("late-words"));
     }
 
     #[test]
