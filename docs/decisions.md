@@ -861,7 +861,7 @@ The harness can hold work that outlives a turn: a `TaskManager` in core
 so a backgrounded grandchild (`sleep 30 & exit 0`) wedged the task in
 `Running` while the loop that honours `cancel` and the deadline was already
 gone: `task_cancel` reported success and did nothing. Now the process group
-is the unit of life as well as of death (R2): the leader's exit is
+is the unit of life as well as of death: the leader's exit is
 remembered, polling continues, and the task finishes only when
 `group_alive(pid)` is false. `cancel` and the timeout stay honoured the
 whole time (`stop_tree` on an already-reaped leader works: `try_wait`
@@ -876,6 +876,13 @@ tracked nor killed by cancel, timeout or the shutdown sweep; it can hold the
 pipe, so the task finishes without waiting for it, and its later output
 keeps flowing to the log file (the detached reader drains to EOF so it
 never takes SIGPIPE) after the task is finished.
+Second known limit: an unreaped zombie still counts as a group member
+(`group_alive`'s doc says so), so where PID 1 or a subreaper does not reap
+orphans (a container with no init, or `hi` itself as PID 1) a survivor's
+zombie keeps the task `Running` until cancel or timeout. Those still end
+it: `stop_tree` polls out its 2s deadline, KILLs, and returns (the leader
+is already reaped, `wait` returns the cached status), and `monitor` then
+reports `Killed` / `TimedOut`. No `/proc` probing; deliberately not handled.
 
 ---
 
