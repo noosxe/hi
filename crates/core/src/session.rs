@@ -1744,9 +1744,9 @@ mod tests {
 
     // ---- #179: colliding project keys share a directory ----
 
-    /// `/work/my-app` and `/work/my/app` encode to the same key; one
-    /// materialized session each, `dash` older than `slash` by
-    /// `dash_age_secs` more than... — callers set mtimes explicitly.
+    /// Start one materialized session for each of `/work/my-app` and
+    /// `/work/my/app` (same project key), assert they share a directory,
+    /// and return `(root, dash, slash)`. Mtimes are left to the caller.
     fn collide(tag: &str) -> (PathBuf, Session, Session) {
         let root = temp_root(tag);
         let mut dash =
@@ -1914,6 +1914,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(sessions_in_root(&root, cwd).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_cwd_matches_itself() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = temp_root("non-utf8");
+        let cwd = Path::new(std::ffi::OsStr::from_bytes(b"/tmp/hi-\xff"));
+        let mut session = Session::start_in(&root, cwd, "p", "m", None, None).unwrap();
+        session.materialize().unwrap();
+        assert_eq!(sessions_in_root(&root, cwd).unwrap().len(), 1);
+        let found = latest_in_root(&root, cwd).unwrap().unwrap();
+        assert_eq!(found.header.id, session.header().id);
         let _ = std::fs::remove_dir_all(&root);
     }
 }
