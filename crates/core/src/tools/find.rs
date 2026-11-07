@@ -78,7 +78,7 @@ impl Tool for FindTool {
             return Err(format!("not a directory: {}", root.display()));
         }
         // One extra fetch so an exact-limit result isn't mislabeled.
-        let mut rels = walk::collect(&root, Some(&filter), limit + 1);
+        let mut rels = walk::collect(&root, Some(&filter), limit.saturating_add(1));
         let hit_cap = rels.len() > limit;
         rels.truncate(limit);
 
@@ -121,6 +121,19 @@ mod tests {
         let path = root.join(rel);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "x").unwrap();
+    }
+
+    #[test]
+    fn a_u64_max_limit_does_not_overflow() {
+        // #172: `limit + 1` panicked in debug and wrapped to 0 in release.
+        let root = temp_root("hugelimit");
+        touch(&root, "a.rs");
+        touch(&root, "b.rs");
+        let out = FindTool::new(&root)
+            .execute(r#"{"pattern":"*.rs","limit":18446744073709551615}"#)
+            .unwrap();
+        assert!(out.contains("a.rs") && out.contains("b.rs"), "got: {out}");
+        assert!(!out.contains("[stopped"), "got: {out}");
     }
 
     #[test]

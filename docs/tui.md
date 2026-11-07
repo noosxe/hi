@@ -23,7 +23,12 @@ data), `status.rs` (status-bar facts), `ui.rs` (widgets/drawing),
   input. Native scroll/search/copy for free; same approach as pi's
   "regular mode".
 - `ratatui::try_init_with_options` enables raw mode and installs a panic hook
-  that restores the terminal; the welcome line seeds the transcript window
+  that restores the terminal (ratatui 0.30.2 `init.rs`, `set_panic_hook`:
+  `restore()` then the previous hook, on **any** thread). `run` wraps it right
+  after init with `guard_panic_hook(ui_thread_id)` so it fires only for
+  UI-thread panics; a caught tool panic on the agent thread must not turn raw
+  mode off or print over the screen (#172). `pump` treats a closed turn
+  channel without `TurnEnd` as a failed turn (`AGENT_DIED`); the welcome line seeds the transcript window
   (`Scroll::new`) and flushes into scrollback as the conversation grows.
 - `event_loop` = the frame clock: wait up to **50ms** for a key, then draw
   and `pump` either way. Loop exits when `app.quit`.

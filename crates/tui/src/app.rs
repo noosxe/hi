@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::Instant;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -21,6 +21,10 @@ use crate::status::{Status, location_label, usage_line};
 use hi_core::event::Usage;
 
 /// Prompt-history ceiling (AD-0014).
+/// The turn error when the agent thread's channel closes with no
+/// `TurnEnd` (a panic that escaped every guard, #172).
+const AGENT_DIED: &str = "the agent thread ended unexpectedly; this turn is incomplete";
+
 const HISTORY_CAP: usize = 100;
 
 /// Undo ceiling (#65): snapshot-per-unit of a few-KB composer is a
@@ -366,6 +370,17 @@ impl Turn {
     /// A turn mid-stream with fixed text — lets render tests place
     /// the live region deterministically instead of racing the mock's
     /// chunk timing.
+    /// A fresh turn reading from `rx` — lets pump tests play the
+    /// agent thread by hand (send events, drop the sender).
+    pub(crate) fn with_rx(rx: Receiver<Event>) -> Turn {
+        Turn {
+            blocks: Vec::new(),
+            error: None,
+            started_at: Instant::now(),
+            rx,
+        }
+    }
+
     pub(crate) fn with_text(text: &str) -> Turn {
         Turn {
             blocks: vec![hi_core::message::AssistantBlock::Text(text.to_string())],
@@ -2552,7 +2567,22 @@ keeping the old provider until you /model"
         // The round's bill (AD-0026): merged across rounds within one
         // pump, applied to `self` after the borrow ends.
         let mut round_bill: Option<Usage> = None;
-        while let Ok(event) = turn.rx.try_recv() {
+        loop {
+            let event = match turn.rx.try_recv() {
+                Ok(event) => event,
+                // Nothing more this frame; the turn is still in flight.
+                Err(TryRecvError::Empty) => break,
+                // The sender is gone and no `TurnEnd` came (a normal
+                // one breaks out below before the channel is read
+                // again): the agent thread died (#172). Fail the turn
+                // through the one finalize path — partial output is
+                // kept, the error shows, queued input fires.
+                Err(TryRecvError::Disconnected) => {
+                    turn.error.get_or_insert_with(|| AGENT_DIED.to_string());
+                    finished = true;
+                    break;
+                }
+            };
             match event {
                 Event::TurnStart => {} // nothing to do yet — tokens follow
                 Event::Heartbeat => {} // liveness probe (#170): no state change
@@ -4374,6 +4404,79 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, Message::User(text) if text == "follow up"))
         );
+    }
+
+    #[test]
+    fn a_dead_agent_thread_fails_the_turn_keeps_partials_and_fires_the_queue() {
+        // #172: the channel closes with no `TurnEnd`. The turn must
+        // finalize as failed, not hang in flight forever.
+        let mut app = app();
+        let (tx, rx) = std::sync::mpsc::channel::<Event>();
+        app.turn = Some(Turn::with_rx(rx));
+        app.queued = Some("next question".into());
+        tx.send(Event::TurnStart).unwrap();
+        tx.send(Event::Token("partial".into())).unwrap();
+        drop(tx);
+        app.pump();
+        assert!(app.queued.is_none(), "queued input fired");
+        let partial = app.messages.iter().position(
+            |m| matches!(m, Message::Assistant(b) if hi_core::message::AssistantBlock::text_of(b) == "partial"),
+        );
+        let error = app
+            .messages
+            .iter()
+            .position(|m| matches!(m, Message::Error(e) if e.contains("agent thread")));
+        let user = app
+            .messages
+            .iter()
+            .position(|m| matches!(m, Message::User(t) if t == "next question"));
+        let (partial, error, user) = (
+            partial.expect("partial text kept"),
+            error.expect("error shown"),
+            user.expect("queued message sent"),
+        );
+        assert!(partial < error && error < user, "{partial} {error} {user}");
+    }
+
+    #[test]
+    fn a_dead_agent_thread_with_nothing_queued_leaves_no_turn() {
+        let mut app = app();
+        let (tx, rx) = std::sync::mpsc::channel::<Event>();
+        app.turn = Some(Turn::with_rx(rx));
+        drop(tx);
+        app.pump();
+        assert!(app.turn.is_none());
+        assert!(matches!(app.messages.last(), Some(Message::Error(_))));
+    }
+
+    #[test]
+    fn an_open_empty_channel_leaves_the_turn_in_flight() {
+        let mut app = app();
+        let (tx, rx) = std::sync::mpsc::channel::<Event>();
+        app.turn = Some(Turn::with_rx(rx));
+        for _ in 0..5 {
+            app.pump();
+        }
+        assert!(app.turn.is_some());
+        assert!(app.messages.is_empty());
+        tx.send(Event::Token("x".into())).unwrap();
+        app.pump();
+        assert!(app.turn.is_some(), "events without TurnEnd keep it open");
+    }
+
+    #[test]
+    fn a_normal_turn_end_is_finalized_once_even_if_the_sender_drops() {
+        let mut app = app();
+        let (tx, rx) = std::sync::mpsc::channel::<Event>();
+        app.turn = Some(Turn::with_rx(rx));
+        tx.send(Event::Token("done".into())).unwrap();
+        tx.send(Event::TurnEnd).unwrap();
+        drop(tx);
+        app.pump();
+        app.pump();
+        assert!(app.turn.is_none());
+        assert_eq!(app.messages.len(), 1, "{:?}", app.messages);
+        assert!(matches!(app.messages[0], Message::Assistant(_)));
     }
 
     #[test]

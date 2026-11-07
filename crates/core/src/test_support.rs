@@ -268,3 +268,44 @@ impl crate::tool::Tool for EchoTool {
         Ok(format!("echo{arguments}"))
     }
 }
+
+/// A tool that panics when executed. `owned` picks the payload type:
+/// `false` → a `&'static str` (`panic!("literal")`), `true` → a
+/// `String` (`panic!("{}", ..)`) — the two shapes `catch_unwind`
+/// callers must both read (#172).
+pub(crate) struct PanicTool {
+    pub owned: bool,
+}
+
+impl crate::tool::Tool for PanicTool {
+    fn name(&self) -> &str {
+        "boom"
+    }
+    fn description(&self) -> &str {
+        "panics"
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    fn execute(&self, _arguments: &str) -> Result<String, String> {
+        if self.owned {
+            let detail = "owned";
+            panic!("kaboom {detail}");
+        }
+        panic!("kaboom literal");
+    }
+}
+
+/// A provider whose thread panics mid-round, after sending `before`.
+pub(crate) struct PanicProvider {
+    pub before: Vec<Event>,
+}
+
+impl Provider for PanicProvider {
+    fn respond(&self, _history: &[Message], tx: Sender<Event>) {
+        for event in &self.before {
+            let _ = tx.send(event.clone());
+        }
+        panic!("provider exploded");
+    }
+}

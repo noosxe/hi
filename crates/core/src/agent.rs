@@ -89,6 +89,11 @@ fn run_agent_turn(
         let mut round_blocks: Vec<AssistantBlock> = Vec::new();
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut failed = false;
+        // Did the round's own `TurnEnd` arrive? A provider thread that
+        // panics drops its sender mid-round: the channel closes with no
+        // `TurnEnd` and, without this flag, the loop would read "no
+        // calls" as "settled" and finish cleanly (#172).
+        let mut round_ended = false;
         for event in rx {
             match event {
                 // Round opener — the consumer already got the turn's
@@ -137,11 +142,20 @@ fn run_agent_turn(
                 // Round closer — swallowed. Only this loop knows when
                 // the turn truly ends: after a settled round, after a
                 // failed round, or at the round cap.
-                Event::TurnEnd => {}
+                Event::TurnEnd => round_ended = true,
                 // Providers never send probes; if one did, it is not
                 // content and is not forwarded.
                 Event::Heartbeat => {}
             }
+        }
+        if !round_ended && !failed {
+            // The stream closed without `TurnEnd` or `Error`: the
+            // provider thread died (panic). Report it on the single
+            // finalization path; whatever calls were collected are
+            // incomplete and never dispatched.
+            let _ = tx.send(Event::Error(PROVIDER_DIED.into()));
+            let _ = tx.send(Event::TurnEnd);
+            return;
         }
         if failed {
             // The round itself broke (network, HTTP status, malformed
@@ -186,11 +200,57 @@ fn run_agent_turn(
     let _ = tx.send(Event::TurnEnd);
 }
 
+/// The error for a round whose provider thread vanished mid-stream.
+const PROVIDER_DIED: &str = "provider thread ended without finishing the round (it panicked)";
+
+/// Best-effort text of a caught panic payload: `panic!("literal")`
+/// carries a `&str`, `panic!("{x}")` and `panic_any(String)` a `String`.
+pub(crate) fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "non-string panic payload".into()
+    }
+}
+
+/// [`run_call`] behind `catch_unwind`: a panicking tool (or gate) is an
+/// error *result* — the model sees the message and the turn goes on —
+/// not a dead agent thread with no `ToolResult` and no `TurnEnd` (#172).
+/// The gate runs inside the wrapper on purpose: a gate panic kills the
+/// thread exactly as a tool panic does. `AssertUnwindSafe` is sound
+/// because nothing the closure borrows is observed half-updated: the
+/// tool `&self` state is the tool's own problem (std `Mutex` poisoning
+/// still guards it) and the rest is read-only.
+fn decide_and_execute(
+    gate: Option<&ToolGate>,
+    registry: &ToolRegistry,
+    call: &ToolCall,
+    alive: &dyn Fn() -> bool,
+) -> ToolResult {
+    let run = std::panic::AssertUnwindSafe(|| run_call(gate, registry, call, alive));
+    match std::panic::catch_unwind(run) {
+        Ok(result) => result,
+        Err(payload) => ToolResult {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            content: format!(
+                "tool `{}` panicked: {}",
+                call.name,
+                panic_message(&*payload)
+            ),
+            is_error: true,
+            images: Vec::new(),
+        },
+    }
+}
+
 /// Consult the gate (if any), validate, execute — and always produce
 /// exactly one result. Every path through here is a `ToolResult`, never
 /// an `Event::Error`: a refused or failed call is a *conversation*
 /// step (the model sees why and can adapt), not a broken turn.
-fn decide_and_execute(
+fn run_call(
     gate: Option<&ToolGate>,
     registry: &ToolRegistry,
     call: &ToolCall,
@@ -241,7 +301,7 @@ fn decide_and_execute(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{EchoTool, ScriptedProvider};
+    use crate::test_support::{EchoTool, PanicProvider, PanicTool, ScriptedProvider};
     use crate::tool::{ImageBlock, Tool, ToolOutput};
 
     fn registry_with(tool: Arc<dyn Tool>) -> Arc<ToolRegistry> {
@@ -344,6 +404,110 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(25));
         };
         let _ = tail;
+    }
+
+    fn panicking_tool_rounds() -> Arc<ScriptedProvider> {
+        Arc::new(ScriptedProvider::new(vec![
+            vec![
+                Event::TurnStart,
+                Event::ToolCall(call("c1", "boom", "{}")),
+                Event::TurnEnd,
+            ],
+            vec![
+                Event::TurnStart,
+                Event::Token("recovered".into()),
+                Event::TurnEnd,
+            ],
+        ]))
+    }
+
+    #[test]
+    fn a_panicking_tool_becomes_an_error_result_and_the_turn_continues() {
+        // #172, both payload types (`&str` and `String`).
+        for (owned, message) in [(false, "kaboom literal"), (true, "kaboom owned")] {
+            let provider = panicking_tool_rounds();
+            let events = collect(spawn_agent_turn(
+                provider.clone(),
+                registry_with(Arc::new(PanicTool { owned })),
+                None,
+                &[Message::User("go".into())],
+                DEFAULT_MAX_TOOL_ROUNDS,
+            ));
+            let results = tool_results(&events);
+            assert_eq!(results.len(), 1, "{events:?}");
+            assert!(results[0].is_error);
+            assert_eq!(results[0].call_id, "c1");
+            assert!(
+                results[0].content.contains(message),
+                "{}",
+                results[0].content
+            );
+            assert!(
+                results[0].content.contains("panicked"),
+                "{}",
+                results[0].content
+            );
+            // The next round ran and saw the error result.
+            assert_eq!(provider.received.lock().unwrap().len(), 2);
+            assert!(events.contains(&Event::Token("recovered".into())));
+            let ends = events.iter().filter(|e| **e == Event::TurnEnd).count();
+            assert_eq!(ends, 1);
+            assert_eq!(events.last(), Some(&Event::TurnEnd));
+            assert!(!events.iter().any(|e| matches!(e, Event::Error(_))));
+        }
+    }
+
+    #[test]
+    fn a_panicking_gate_becomes_an_error_result_too() {
+        let gate: Arc<ToolGate> = Arc::new(|_call: &ToolCall| -> ToolDecision {
+            panic!("gate exploded");
+        });
+        let events = collect(spawn_agent_turn(
+            panicking_tool_rounds(),
+            registry_with(Arc::new(PanicTool { owned: false })),
+            Some(gate),
+            &[Message::User("go".into())],
+            DEFAULT_MAX_TOOL_ROUNDS,
+        ));
+        let results = tool_results(&events);
+        assert_eq!(results.len(), 1, "{events:?}");
+        assert!(results[0].is_error);
+        assert!(results[0].content.contains("gate exploded"));
+        assert_eq!(events.last(), Some(&Event::TurnEnd));
+    }
+
+    #[test]
+    fn a_panicking_provider_reports_an_error_then_one_turn_end() {
+        // #172: the provider thread dies mid-round, with and without
+        // partial output and a collected (incomplete) call.
+        for before in [
+            vec![Event::TurnStart],
+            vec![
+                Event::TurnStart,
+                Event::Token("part".into()),
+                Event::ToolCall(call("c1", "echo", "{}")),
+            ],
+        ] {
+            let had_call = before.iter().any(|e| matches!(e, Event::ToolCall(_)));
+            let events = collect(spawn_agent_turn(
+                Arc::new(PanicProvider { before }),
+                registry_with(Arc::new(EchoTool)),
+                None,
+                &[Message::User("go".into())],
+                DEFAULT_MAX_TOOL_ROUNDS,
+            ));
+            let n = events.len();
+            assert!(n >= 3, "{events:?}");
+            assert!(
+                matches!(&events[n - 2], Event::Error(e) if e.contains("provider")),
+                "{events:?}"
+            );
+            assert_eq!(events[n - 1], Event::TurnEnd);
+            assert_eq!(events.iter().filter(|e| **e == Event::TurnEnd).count(), 1);
+            assert_eq!(events.iter().filter(|e| **e == Event::TurnStart).count(), 1);
+            // An incomplete round never dispatches its calls.
+            assert!(tool_results(&events).is_empty(), "had_call={had_call}");
+        }
     }
 
     #[test]
