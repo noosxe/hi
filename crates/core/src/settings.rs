@@ -1,10 +1,11 @@
 //! `settings.json` — saved preferences, pi-style.
 //!
-//! Currently one key: `defaultModel` (`"provider/model"`). Written by
-//! the model picker (Ctrl-S), read at startup between CLI flags and
-//! autopick. Unknown fields are ignored; a *missing file is normal* —
-//! saving a preference must not require creating it by hand first,
-//! which is the difference from `models.json`.
+//! Saved preferences (`defaultModel`, `thinking`, `images`, ...). Written
+//! by the model picker and `/settings` (Ctrl-S) and `/thinking`, read at
+//! startup between CLI flags and autopick. Unknown fields are ignored
+//! on read and preserved on the `persist_*` write path; a *missing file
+//! is normal* — saving a preference must not require creating it by
+//! hand first, which is the difference from `models.json`.
 
 use std::path::{Path, PathBuf};
 
@@ -46,11 +47,12 @@ pub struct Settings {
     /// complete without a keystroke. Defaults to off — in v1 only the
     /// human spends turns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_turns: Option<bool>,
     /// The `subagents` master switch (AD-0043): off removes the
     /// nested-agent tool from the registry — absent beats erroring.
     /// Startup policy only, not `/settings`-flippable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagents: Option<bool>,
-    pub task_turns: Option<bool>,
     /// Opt-in session retention (#23): delete session files older than
     /// this many days at startup, before any session opens. Absent
     /// means never prune — sessions are user history, and pi-parity
@@ -108,21 +110,25 @@ impl Settings {
     /// The path-independent half of `load`, so tests can use temp files.
     fn load_from(path: &Path) -> Result<Self, String> {
         match std::fs::read_to_string(path) {
-            Ok(raw) => {
-                let settings: Settings = serde_json::from_str(&raw)
-                    .map_err(|err| format!("cannot parse {}: {err}", path.display()))?;
-                if settings.max_tool_rounds == Some(0) {
-                    return Err(format!(
-                        "cannot parse {}: maxToolRounds must be at least 1",
-                        path.display()
-                    ));
-                }
-                Ok(settings)
-            }
+            Ok(raw) => Self::parse(&raw, path),
             // A missing settings file is the normal first-run state.
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(err) => Err(format!("cannot read {}: {err}", path.display())),
         }
+    }
+
+    /// Parse and validate file text (shared by `load_from` and
+    /// `persist_with`, so both apply identical rules).
+    fn parse(raw: &str, path: &Path) -> Result<Self, String> {
+        let settings: Settings = serde_json::from_str(raw)
+            .map_err(|err| format!("cannot parse {}: {err}", path.display()))?;
+        if settings.max_tool_rounds == Some(0) {
+            return Err(format!(
+                "cannot parse {}: maxToolRounds must be at least 1",
+                path.display()
+            ));
+        }
+        Ok(settings)
     }
 
     /// The effective telemetry choice for this configuration, with
@@ -219,17 +225,52 @@ impl Settings {
         Self::persist_with(path, |settings| settings.images = Some(enabled))
     }
 
-    /// The shared Ctrl-S shape (#45): load, mutate one field, save.
-    /// One construction path so a new board row can never grow a
-    /// bespoke persistence dialect.
+    /// The shared Ctrl-S shape (#45): read the file once, mutate one
+    /// field on the typed view, and merge only what the mutation changed
+    /// back into the file's raw JSON object. Keys `hi` does not know
+    /// (and known keys the mutation did not touch) stay exactly as they
+    /// were; a key the mutation cleared is removed. An unparseable file,
+    /// or one whose top level is not an object, is refused untouched.
     fn persist_with(path: &Path, mutate: impl FnOnce(&mut Settings)) -> Result<(), String> {
-        let mut settings = Self::load_from(path)?;
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => "{}".to_string(),
+            Err(err) => return Err(format!("cannot read {}: {err}", path.display())),
+        };
+        let mut settings = Self::parse(&raw, path)?;
+        // serde's struct deserializer can accept `[]`; require an object.
+        let mut map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&raw)
+            .map_err(|err| format!("cannot parse {}: {err}", path.display()))?;
+
+        let before = settings.to_object()?;
         mutate(&mut settings);
-        settings.save_to(path)
+        let after = settings.to_object()?;
+
+        for key in before.keys().filter(|k| !after.contains_key(*k)) {
+            map.remove(key);
+        }
+        for (key, value) in after {
+            if before.get(&key) != Some(&value) {
+                map.insert(key, value);
+            }
+        }
+        write_json(path, &serde_json::Value::Object(map))
+    }
+
+    /// The known keys as a JSON object (`None` fields are omitted).
+    fn to_object(&self) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+        match serde_json::to_value(self) {
+            Ok(serde_json::Value::Object(map)) => Ok(map),
+            Ok(_) => Err("cannot serialize settings: not an object".to_string()),
+            Err(err) => Err(format!("cannot serialize settings: {err}")),
+        }
     }
 
     /// Persist to `<config-dir>/settings.json` (pretty-printed, so
-    /// hand edits and tool writes stay compatible).
+    /// hand edits and tool writes stay compatible). Writes only the
+    /// known keys: anything else in an existing file is lost. The
+    /// `persist_*` functions are the path that preserves the rest of
+    /// the file.
     pub fn save(&self) -> Result<(), String> {
         let path = settings_path().ok_or("could not determine config directory")?;
         self.save_to(&path)
@@ -237,15 +278,23 @@ impl Settings {
 
     /// The path-independent half of `save`, so tests can use temp files.
     fn save_to(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
-        }
-        let pretty = serde_json::to_string_pretty(self)
+        let value = serde_json::to_value(self)
             .map_err(|err| format!("cannot serialize settings: {err}"))?;
-        std::fs::write(path, pretty + "\n")
-            .map_err(|err| format!("cannot write {}: {err}", path.display()))
+        write_json(path, &value)
     }
+}
+
+/// Create the parent directory and write `value` pretty-printed with a
+/// trailing newline.
+fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
+    }
+    let pretty = serde_json::to_string_pretty(value)
+        .map_err(|err| format!("cannot serialize settings: {err}"))?;
+    std::fs::write(path, pretty + "\n")
+        .map_err(|err| format!("cannot write {}: {err}", path.display()))
 }
 
 #[cfg(test)]
@@ -536,5 +585,142 @@ mod tests {
         // An unset-looking or malformed value is off, not an error.
         assert!(!resolve_telemetry(Some(true), Some("")));
         assert!(!resolve_telemetry(Some(true), Some("sure?")));
+    }
+
+    fn tmp(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hi-settings-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn read_json(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn every_persist_path_keeps_unknown_keys() {
+        use serde_json::json;
+        let dir = tmp("unknown");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let seed = json!({
+            "futureThing": {"a": [1, 2], "b": {"c": null}},
+            "count": 7,
+            "flag": true,
+            "defaultTools": "all",
+        });
+        std::fs::write(&path, seed.to_string()).unwrap();
+
+        let check = |expect_key: &str, expect: serde_json::Value| {
+            let v = read_json(&path);
+            for k in ["futureThing", "count", "flag", "defaultTools"] {
+                assert_eq!(v[k], seed[k], "{k} changed after {expect_key}");
+            }
+            assert_eq!(v[expect_key], expect);
+        };
+        Settings::persist_default_model_to(&path, "a/b").unwrap();
+        check("defaultModel", json!("a/b"));
+        Settings::persist_task_turns_to(&path, true).unwrap();
+        check("taskTurns", json!(true));
+        Settings::persist_thinking_to(&path, Some(ThinkingLevel::High)).unwrap();
+        check("thinking", json!("high"));
+        Settings::persist_images_to(&path, false).unwrap();
+        check("images", json!(false));
+        // Earlier mutations are not disturbed by later ones.
+        let v = read_json(&path);
+        assert_eq!(v["defaultModel"], json!("a/b"));
+        assert_eq!(v["taskTurns"], json!(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clearing_thinking_removes_the_key_and_keeps_unknown_keys() {
+        let dir = tmp("clear");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"thinking": "high", "x": {"y": 1}}"#).unwrap();
+        Settings::persist_thinking_to(&path, None).unwrap();
+        let v = read_json(&path);
+        assert!(v.get("thinking").is_none(), "{v}");
+        assert_eq!(v["x"]["y"], 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_never_adds_task_turns_when_absent() {
+        assert_eq!(serde_json::to_string(&Settings::default()).unwrap(), "{}");
+        let dir = tmp("notaskturns");
+        let path = dir.join("settings.json");
+        // Missing file (and missing parent directory).
+        Settings::persist_images_to(&path, true).unwrap();
+        assert_eq!(read_json(&path), serde_json::json!({"images": true}));
+        // Existing file without the key.
+        Settings::persist_default_model_to(&path, "m").unwrap();
+        assert!(read_json(&path).get("taskTurns").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_leaves_untouched_null_known_key_alone() {
+        let dir = tmp("nullkeep");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"taskTurns": null}"#).unwrap();
+        Settings::persist_images_to(&path, true).unwrap();
+        let v = read_json(&path);
+        assert_eq!(v["taskTurns"], serde_json::Value::Null);
+        assert_eq!(v["images"], true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_refuses_a_non_object_top_level() {
+        let dir = tmp("array");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, "[]").unwrap();
+        let err = Settings::persist_images_to(&path, true).unwrap_err();
+        assert!(err.contains("cannot parse"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[]");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_refuses_zero_max_tool_rounds_untouched() {
+        let dir = tmp("zerorounds");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let body = r#"{"maxToolRounds": 0, "x": 1}"#;
+        std::fs::write(&path, body).unwrap();
+        let err = Settings::persist_images_to(&path, true).unwrap_err();
+        assert!(err.contains("maxToolRounds must be at least 1"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_creates_missing_parent_directory() {
+        let dir = tmp("mkparent");
+        let path = dir.join("a/b/settings.json");
+        Settings::persist_default_model_to(&path, "m").unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().ends_with('\n'));
+        assert_eq!(read_json(&path)["defaultModel"], "m");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn persist_output_key_order() {
+        let dir = tmp("order");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, r#"{"zeta": 1, "alpha": 2, "images": false}"#).unwrap();
+        Settings::persist_default_model_to(&path, "m").unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let keys: Vec<&str> = raw
+            .lines()
+            .filter_map(|l| l.trim().split('"').nth(1))
+            .collect();
+        assert_eq!(keys, ["alpha", "defaultModel", "images", "zeta"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

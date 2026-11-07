@@ -112,6 +112,9 @@ is turning the knob back off; hi never guesses and does not retry a
 }
 ```
 
+- Keys `hi` doesn't know survive saves made by `hi` (Ctrl-S, `/thinking`,
+  `/settings`); only the key being saved changes. Key order may change:
+  the file is rewritten with keys sorted alphabetically.
 - Missing file = defaults (normal first-run state). Unparseable file = error
   (surfaced, not ignored) — only `models.json` gets the
   "create one" startup hint.
