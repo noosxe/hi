@@ -90,7 +90,9 @@ impl Tool for TaskRunTool {
     fn description(&self) -> &str {
         "Start a long-lived background command (dev server, watcher, test suite, build) \
          in its own process group and return immediately with a task id. It keeps running \
-         across turns. Poll with task_status, read output with task_output (tail), stop \
+         across turns, and stays running until every process it started has exited — \
+         a background child (`cmd &`) keeps the task running even after the main command \
+         returns. Poll with task_status, read output with task_output (tail), stop \
          with task_cancel. Optionally provide a timeout in seconds (no default — \
          background work is expected to be long-lived), a different working directory \
          (cwd), and extra environment variables (env, merged over the inherited \
