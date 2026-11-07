@@ -146,8 +146,12 @@ structural chunk-walk for the kitty renderer — AD-0010 — and
   image files — png/jpeg/webp/gif, magic-byte sniffed, never extension-guessed — are
   base64-attached for the model when the startup image policy allows, after the
   `image_resize` ladder fits them to a universal budget; notes always say what happened)
-  `bash` (optional `timeout` seconds, no default; tail-kept output; non-zero
-  exit is an error result with the output inside), `edit` (`edits[]` matched
+  `bash` (optional `timeout` seconds, no default, stops the whole process
+  group; tail-kept output; non-zero exit is an error result with the output
+  inside; output is read by detached threads and the tool waits at most
+  `DRAIN_GRACE` (500ms) for EOF after the leader exits, so `cmd &` cannot hang
+  it — survivors stay alive, later output is discarded, and a note on the
+  result says so, #173), `edit` (`edits[]` matched
   against the ORIGINAL file, each exactly once, overlaps rejected),
   `write` (creates parents, full overwrite), `grep` (`regex` crate, rg-style
   rendering, `glob` filter, context), `find` (`globset`, .gitignore-aware),
@@ -240,7 +244,8 @@ into a 256 KiB ring (instant tails) plus a full log file under
 (`Running → Succeeded/Failed/Killed/TimedOut`). Unix tasks get their own
 process group, so cancel/timeout/shutdown kill grandchildren too —
 and since #30 the `bash` tool shares the plumbing (`process.rs`:
-`own_group` at spawn, `stop_tree` TERM → grace → KILL at timeout),
+`own_group` at spawn, `stop_tree` TERM → poll until the leader is reaped
+and the group is empty (`group_alive`) → KILL at the 2s grace),
 so a timed-out command cannot leave orphans behind either. Completion is one `TaskCompletion` into a channel
 the front end drains per frame; dropping the last handle kills every
 running group. Threads, not tokio — the choice #6's Luau bridge
