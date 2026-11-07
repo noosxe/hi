@@ -546,13 +546,27 @@ exists — the split is ours, the total is the provider's.
 
 ## settings.rs — `settings.json`
 
-`Settings { default_model, thinking, default_tools, telemetry, images }` — all
-`Option<_>`, camelCase, unknown fields ignored. Path: next to `models.json`
+`Settings { default_model, thinking, default_tools, telemetry, images,
+task_turns, subagents, session_retention, max_tool_rounds,
+subagent_transcripts }` — all `Option<_>`, camelCase, unknown fields ignored
+on read (`None` fields are skipped on serialize). Path: next to `models.json`
 (`settings_path()`). See [configuration.md](configuration.md) for what each means.
 
 - Missing file = `Settings::default()` (normal first-run state; tested).
 - Unparseable file = `Err` (surfaced, not silently ignored; tested).
-- `save()` creates parent dirs, writes pretty JSON + trailing newline.
+- `save()` creates parent dirs, writes pretty JSON + trailing newline. It
+  writes **only the known keys**; the `persist_*` functions
+  (`persist_default_model`, `persist_task_turns`, `persist_thinking`,
+  `persist_images`) are the path that preserves the rest of the file.
+- `persist_with` (the one shared persist path) reads the file once, parses it
+  as typed `Settings` (same validation as `load_from`, incl. `maxToolRounds`
+  ≥ 1) and as a raw `serde_json::Map`, then diffs the `Settings` JSON before
+  vs. after the mutation: removed keys are deleted from the raw map, changed
+  keys inserted, everything else (unknown keys, untouched known keys even if
+  `null`) stays as it was. Unparseable files and non-object top levels
+  (`[]`) are refused with `cannot parse` and left untouched. Without
+  serde_json's `preserve_order`, the written file's keys come out sorted
+  alphabetically.
 
 ## thinking.rs — reasoning effort levels
 

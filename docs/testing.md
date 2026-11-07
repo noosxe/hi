@@ -14,9 +14,9 @@ cargo run            # hi --mock needs no config
 
 CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI). Third-party actions are SHA-pinned with a `# vX.Y.Z` comment; `dtolnay/rust-toolchain@stable` stays a moving branch ref on purpose — the compiler channel is pinned by `rust-toolchain.toml` (#24, AD-0037). Dependabot (`.github/dependabot.yml`) opens one grouped PR per ecosystem weekly (`cargo`, `github-actions`), ignoring Rust major bumps.
 
-Current count: **624 `#[test]` functions** (the README's count gets refreshed in passing;
+Current count: **632 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 91
-core: openai 48, session 34, settings 21, subagent 20, tasks 24, selection 15, read 13,
+core: openai 48, session 34, settings 29, subagent 20, tasks 24, selection 15, read 13,
 agent 17, walk 11, headless 13, message 5, catalog 5, context_report 4, grep 8, image_util 7, truncate 7, edit 6,
 config 7, system_prompt 6, tasks-tool 6, bash 16, process 2, mod 6, image_resize 6, subagent-tool 10,
 find 5, write 3, ls 3, thinking 3, mock 2, event 1, tool 1. tui: app 118,
@@ -91,7 +91,7 @@ because of the #20 bug class — the startup provider never attached
 |---|---|
 | models.json parsing, camelCase, unknown fields, XDG paths, env interpolation | `config.rs` |
 | selection precedence (5 rules), autopick, listing errors | `selection.rs` |
-| settings round-trip, missing/junk file, camelCase | `settings.rs` |
+| settings round-trip, missing/junk file, camelCase, persist merge (unknown keys survive, cleared key removed, non-object/zero-rounds refused untouched, no stray `taskTurns`) | `settings.rs` |
 | thinking level parse/serde | `thinking.rs` |
 | system prompt chain, whitespace-only files | `system_prompt.rs` |
 | tool registry rules, gate decisions (deny/mutate), loop rounds + cap, scripted replay | `agent.rs`, `tool.rs` |
