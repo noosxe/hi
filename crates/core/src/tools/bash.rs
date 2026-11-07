@@ -455,6 +455,25 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn a_survivor_holding_only_one_pipe_still_gets_the_note() {
+        let root = temp_root("onepipe");
+        // `> /dev/null` leaves the survivor holding only stderr;
+        // `2> /dev/null` only stdout. Either pipe alone must count.
+        for (tag, redirect) in [("stderr-only", ">"), ("stdout-only", "2>")] {
+            let pidf = root.join(format!("pid-{tag}"));
+            let cmd = format!(
+                "sleep 30 {redirect} /dev/null & echo $! > {}",
+                pidf.display()
+            );
+            let out = run(&root, &cmd, None).unwrap();
+            let pid = read_pid(&pidf);
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            assert!(out.contains("background process"), "{tag}: got: {out}");
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn the_note_is_present_on_error_results() {
         let root = temp_root("errnote");
         let pidf = root.join("pid");
@@ -512,17 +531,26 @@ mod tests {
     fn a_child_that_left_the_group_cannot_hang_a_timeout() {
         let root = temp_root("escapee");
         let pidf = root.join("pid");
-        // `set -m` gives background jobs their own process group.
+        let fgf = root.join("fg");
+        // `set -m` gives every job, the foreground one too, its own
+        // process group, so neither stop_tree nor the group kill reaches
+        // them: the test records and kills both.
         let cmd = format!(
-            "set -m; (echo $BASHPID > {p}; sleep 30) & while [ ! -s {p} ]; do sleep 0.02; done; echo before; sleep 30",
-            p = pidf.display()
+            "set -m; (echo $BASHPID > {p}; sleep 30) & while [ ! -s {p} ]; do sleep 0.02; done; echo before; sleep 30 & echo $! > {f}; wait",
+            p = pidf.display(),
+            f = fgf.display()
         );
         let started = Instant::now();
         let err = run(&root, &cmd, Some(1)).unwrap_err();
         let pid = read_pid(&pidf);
+        let fg = read_pid(&fgf);
         let escaped = unsafe { libc::getpgid(pid) } == pid;
         let was_alive = alive(pid);
-        unsafe { libc::kill(-pid, libc::SIGKILL) };
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+            libc::kill(-fg, libc::SIGKILL);
+            libc::kill(fg, libc::SIGKILL);
+        }
         assert!(started.elapsed() < Duration::from_secs(15), "hung");
         assert!(err.starts_with("timeout after 1s"), "got: {err}");
         assert!(err.contains("before"), "got: {err}");
