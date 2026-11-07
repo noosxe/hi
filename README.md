@@ -273,7 +273,9 @@ Design notes worth keeping in mind:
   spawns is born with a deadline — bounded DNS/connect on network
   attempts, hard timeouts for bash child processes — a timeout kills the whole process group, not just the child, and a backgrounded child never hangs the tool (its later output is not captured) — and dies
   with the session: teardown sweeps children, so nothing orphans
-  itself to the OS and burns a core for hours.
+  itself to the OS and burns a core for hours. One deliberate exception:
+  a child the model backgrounds with `bash` (`cmd &`) is left running and
+  is not swept at teardown; `task_run` is the tracked form.
 - Errors are plain `String`s for now — descriptive and user-facing;
   a dedicated error type arrives when it earns its keep.
 
