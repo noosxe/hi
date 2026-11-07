@@ -16,9 +16,11 @@
 //! Everything is camelCase with unknown fields ignored, matching the
 //! config files' forward-compatibility rule.
 //!
-//! Files are keyed by project directory because resume is a *project*
-//! gesture: "continue what I was doing here". Cross-project resume is a
-//! deliberate non-goal for now.
+//! Files are grouped by project directory because resume is a *project*
+//! gesture: "continue what I was doing here". The directory name is a
+//! lossy encoding that can collide for different paths, so listings
+//! filter on the header's `cwd`. Cross-project resume is a deliberate
+//! non-goal for now.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -490,10 +492,26 @@ pub fn sessions_in(cwd: &Path) -> Result<Vec<SessionSummary>, String> {
 }
 
 /// The root-parameterized half of [`sessions_in`].
+///
+/// `project_key` can collide (`/work/my-app` and `/work/my/app` share a
+/// directory), so the directory is only a candidate set: a session is
+/// this project's when its header `cwd` is the same path as `cwd`.
 pub fn sessions_in_root(root: &Path, cwd: &Path) -> Result<Vec<SessionSummary>, String> {
-    let dir = root.join(project_key(cwd));
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Ok(Vec::new()); // no directory yet — no sessions, not an error
+    // Headers store `cwd.to_string_lossy()`; compare the same way so
+    // non-UTF-8 paths match themselves. `Path` equality ignores a
+    // trailing slash.
+    let wanted = cwd.to_string_lossy();
+    let wanted = Path::new(&*wanted);
+    let mut summaries = scan_project_dir(&root.join(project_key(cwd)));
+    summaries.retain(|summary| Path::new(&summary.header.cwd) == wanted);
+    Ok(summaries)
+}
+
+/// Every readable session in one project directory, unfiltered, newest
+/// first. A missing directory is an empty list, not an error.
+fn scan_project_dir(dir: &Path) -> Vec<SessionSummary> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
     };
     let mut summaries: Vec<SessionSummary> = entries
         .filter_map(|entry| {
@@ -510,7 +528,7 @@ pub fn sessions_in_root(root: &Path, cwd: &Path) -> Result<Vec<SessionSummary>, 
         })
         .collect();
     summaries.sort_by_key(|summary| std::cmp::Reverse(summary.modified));
-    Ok(summaries)
+    summaries
 }
 
 /// List every project's sessions, newest first — the global half of
@@ -528,7 +546,7 @@ pub fn sessions_all_root(root: &Path) -> Result<Vec<SessionSummary>, String> {
     let mut summaries = Vec::new();
     for entry in entries.flatten() {
         if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
-            summaries.extend(sessions_in_root(root, &project_dir_of(&entry.path()))?);
+            summaries.extend(scan_project_dir(&entry.path()));
         }
     }
     summaries.sort_by_key(|summary| std::cmp::Reverse(summary.modified));
@@ -575,16 +593,6 @@ pub fn prune_sessions(root: &Path, max_age: Duration) -> usize {
         }
     }
     removed
-}
-
-/// Invert [`project_key`]: the encoded directory component back to the
-/// path it names (best-effort — a decoded cwd is display information).
-fn project_dir_of(dir: &Path) -> PathBuf {
-    let text = dir
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    PathBuf::from(text.trim_matches('-').replace('-', "/"))
 }
 
 /// Where a `--session` / `--fork` argument points. Path-shaped
@@ -721,9 +729,13 @@ pub fn sessions_dir() -> Option<PathBuf> {
 
 /// pi-style project key: `/Users/x/Projects/hi` → `--Users-x-Projects-hi--`.
 ///
-/// Encoded into one filesystem-safe component (no nested directories),
-/// unique per absolute path, and stable across machines with the same
-/// layout — which is exactly what a synced home directory needs.
+/// Encoded into one filesystem-safe component (no nested directories)
+/// and stable across machines with the same layout — which is exactly
+/// what a synced home directory needs. It is **not** unique per path:
+/// `/work/my-app` and `/work/my/app` share a key. Colliding projects may
+/// share a directory; the session header's `cwd` decides whose a file is
+/// (see [`sessions_in_root`]). The encoding stays so existing session
+/// directories keep working.
 pub fn project_key(cwd: &Path) -> String {
     let text = cwd.to_string_lossy();
     let trimmed = text.strip_prefix('/').unwrap_or(&text);
@@ -1728,5 +1740,180 @@ mod tests {
         std::fs::write(session.path(), "occupied").unwrap();
         let err = session.append(&[Message::User("hi".into())]).unwrap_err();
         assert!(err.contains("cannot create"), "{err}");
+    }
+
+    // ---- #179: colliding project keys share a directory ----
+
+    /// `/work/my-app` and `/work/my/app` encode to the same key; one
+    /// materialized session each, `dash` older than `slash` by
+    /// `dash_age_secs` more than... — callers set mtimes explicitly.
+    fn collide(tag: &str) -> (PathBuf, Session, Session) {
+        let root = temp_root(tag);
+        let mut dash =
+            Session::start_in(&root, Path::new("/work/my-app"), "p", "dash", None, None).unwrap();
+        dash.materialize().unwrap();
+        let mut slash =
+            Session::start_in(&root, Path::new("/work/my/app"), "p", "slash", None, None).unwrap();
+        slash.materialize().unwrap();
+        assert_eq!(
+            dash.path().parent(),
+            slash.path().parent(),
+            "the premise: one shared directory"
+        );
+        (root, dash, slash)
+    }
+
+    fn age(path: &Path, secs: u64) {
+        backdate(path, Duration::from_secs(secs));
+    }
+
+    #[test]
+    fn project_key_collides_so_the_header_cwd_decides() {
+        assert_eq!(
+            project_key(Path::new("/work/my-app")),
+            project_key(Path::new("/work/my/app"))
+        );
+    }
+
+    #[test]
+    fn latest_ignores_a_colliding_projects_session() {
+        let root = temp_root("collide-none");
+        let mut other =
+            Session::start_in(&root, Path::new("/work/my-app"), "p", "m", None, None).unwrap();
+        other.append(&[Message::User("theirs".into())]).unwrap();
+        assert!(
+            latest_in_root(&root, Path::new("/work/my/app"))
+                .unwrap()
+                .is_none()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn latest_picks_its_own_session_whichever_is_newer() {
+        let (root, dash, slash) = collide("collide-latest");
+        let cwd = Path::new("/work/my/app");
+        age(dash.path(), 10); // the other project's is newer
+        age(slash.path(), 100);
+        let found = latest_in_root(&root, cwd).unwrap().unwrap();
+        assert_eq!(found.header.id, slash.header().id);
+        age(dash.path(), 100); // now ours is newer
+        age(slash.path(), 10);
+        let found = latest_in_root(&root, cwd).unwrap().unwrap();
+        assert_eq!(found.header.id, slash.header().id);
+        let found = latest_in_root(&root, Path::new("/work/my-app"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.header.id, dash.header().id);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sessions_in_lists_only_the_matching_project() {
+        let (root, dash, slash) = collide("collide-list");
+        let listed = sessions_in_root(&root, Path::new("/work/my-app")).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].header.id, dash.header().id);
+        let listed = sessions_in_root(&root, Path::new("/work/my/app")).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].header.id, slash.header().id);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_treats_a_colliding_projects_id_as_global() {
+        let (root, dash, slash) = collide("collide-resolve");
+        let cwd = Path::new("/work/my/app");
+        let dash_id = dash.header().id.clone();
+        assert_eq!(
+            resolve_in_root(&root, cwd, &dash_id),
+            Ok(SessionRef::Global {
+                path: dash.path().to_path_buf(),
+                cwd: "/work/my-app".into(),
+            })
+        );
+        assert_eq!(
+            resolve_in_root(&root, cwd, &dash_id[..8]),
+            Ok(SessionRef::Global {
+                path: dash.path().to_path_buf(),
+                cwd: "/work/my-app".into(),
+            })
+        );
+        // Our own id and prefix stay local.
+        let own_id = slash.header().id.clone();
+        assert_eq!(
+            resolve_in_root(&root, cwd, &own_id),
+            Ok(SessionRef::Local(slash.path().to_path_buf()))
+        );
+        assert_eq!(
+            resolve_in_root(&root, cwd, &own_id[..8]),
+            Ok(SessionRef::Local(slash.path().to_path_buf()))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sessions_all_finds_both_colliding_projects_once() {
+        let (root, dash, slash) = collide("collide-all");
+        let all = sessions_all_root(&root).unwrap();
+        assert_eq!(all.len(), 2, "no duplicates, none hidden");
+        let ids: Vec<&str> = all.iter().map(|s| s.header.id.as_str()).collect();
+        assert!(ids.contains(&dash.header().id.as_str()));
+        assert!(ids.contains(&slash.header().id.as_str()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sessions_all_finds_a_cwd_ending_in_a_dash() {
+        // `/foo-` is stored in `--foo---`; decoding the name back to a
+        // path used to lose it.
+        let root = temp_root("dash-tail");
+        let mut session =
+            Session::start_in(&root, Path::new("/foo-"), "p", "m", None, None).unwrap();
+        session.materialize().unwrap();
+        assert_eq!(project_key(Path::new("/foo-")), "--foo---");
+        let all = sessions_all_root(&root).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].header.cwd, "/foo-");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_fork_into_a_colliding_directory_is_found_from_its_own_cwd() {
+        let (root, dash, slash) = collide("collide-fork");
+        age(dash.path(), 100);
+        age(slash.path(), 200);
+        let mut fork =
+            Session::fork_from_in(&root, dash.path(), Path::new("/work/my/app"), None).unwrap();
+        fork.materialize().unwrap(); // the source has no messages to copy
+        let found = latest_in_root(&root, Path::new("/work/my/app"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.header.id, fork.header().id);
+        assert_eq!(found.header.cwd, "/work/my/app");
+        let listed = sessions_in_root(&root, Path::new("/work/my/app")).unwrap();
+        assert_eq!(listed.len(), 2, "the fork and the older slash session");
+        let listed = sessions_in_root(&root, Path::new("/work/my-app")).unwrap();
+        assert_eq!(listed.len(), 1, "the source stays with its own project");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_trailing_slash_cwd_still_matches_its_own_sessions() {
+        let root = temp_root("collide-slash");
+        let cwd = Path::new("/work/dir/");
+        let mut session = Session::start_in(&root, cwd, "p", "m", None, None).unwrap();
+        session.materialize().unwrap();
+        assert_eq!(sessions_in_root(&root, cwd).unwrap().len(), 1);
+        // A header written without the slash is the same path.
+        let dir = root.join(project_key(cwd));
+        let raw = std::fs::read_to_string(session.path()).unwrap();
+        std::fs::write(
+            dir.join("plain.jsonl"),
+            raw.replace("\"/work/dir/\"", "\"/work/dir\""),
+        )
+        .unwrap();
+        assert_eq!(sessions_in_root(&root, cwd).unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
