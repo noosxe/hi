@@ -31,7 +31,13 @@ data), `status.rs` (status-bar facts), `ui.rs` (widgets/drawing),
   channel without `TurnEnd` as a failed turn (`AGENT_DIED`); the welcome line seeds the transcript window
   (`Scroll::new`) and flushes into scrollback as the conversation grows.
 - `event_loop` = the frame clock: wait up to **50ms** for a key, then draw
-  and `pump` either way. Loop exits when `app.quit`.
+  and `pump` either way. Loop exits when `app.quit`. `draw` (whose
+  `autoresize` re-anchors the inline viewport with a cursor query when the
+  size changed) runs through `retry_lost_cursor_reply` (#223):
+  crossterm 0.29's edge-triggered event source drops a cursor reply that
+  becomes ready in the same wakeup as a SIGWINCH, then errors after its 2s
+  wait ("The cursor position could not be read…"); the op is retried (bounded)
+  instead of ending the session.
 - Teardown order: `terminal.clear()` (wipe managed region) →
   `ratatui::restore()` (raw mode off). Quitting mid-turn is safe: dropping
   `app` drops the turn's `Receiver`, which stops the provider thread (see
