@@ -255,8 +255,8 @@ impl Session {
         self.rewrite_header_line()
     }
 
-    /// Rewrite line one from the live header: read, replace, write,
-    /// reopen the append handle. The header is always line one
+    /// Rewrite line one from the live header: read, replace, write
+    /// atomically (temp file + rename), reopen the append handle. The header is always line one
     /// (`create` wrote it); an empty file means something external
     /// truncated it — fail loudly.
     fn rewrite_header_line(&mut self) -> Result<(), String> {
@@ -277,7 +277,9 @@ impl Session {
         out.push('\n');
         out.push_str(rest);
         let path = self.path.display().to_string();
-        std::fs::write(&path, out).map_err(|err| format!("cannot write {path}: {err}"))?;
+        // Atomic (#205): a crash mid-rewrite must leave the old
+        // transcript, not a truncated file.
+        crate::settings::write_atomic(&self.path, out.as_bytes())?;
         self.file = Some(
             std::fs::OpenOptions::new()
                 .append(true)
@@ -1109,6 +1111,36 @@ mod tests {
         session.set_thinking(None).unwrap();
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.header.thinking, None);
+        assert_eq!(loaded.messages.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_header_restamp_replaces_the_file_atomically() {
+        use std::os::unix::fs::MetadataExt;
+        // #205: the rewrite goes through a temp file and a rename, so a
+        // crash mid-write can never truncate the transcript in place.
+        // A rename gives the path a new inode; an in-place write keeps it.
+        let root = temp_root("restamp-atomic");
+        let mut session =
+            Session::start_in(&root, Path::new("/p"), "zai", "glm-5.3", Some("high"), None)
+                .unwrap();
+        session.append(&[Message::User("turn one".into())]).unwrap();
+        let path = session.path().to_path_buf();
+        let before = std::fs::metadata(&path).unwrap().ino();
+
+        session.set_thinking(Some("low")).unwrap();
+        assert_ne!(std::fs::metadata(&path).unwrap().ino(), before);
+        let leftovers = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0, "no temp file stays behind");
+        // The append handle follows the new file.
+        session.append(&[Message::User("turn two".into())]).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.header.thinking.as_deref(), Some("low"));
         assert_eq!(loaded.messages.len(), 2);
     }
 
