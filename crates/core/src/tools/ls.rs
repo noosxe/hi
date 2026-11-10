@@ -87,8 +87,12 @@ impl Tool for LsTool {
             truncate::MAX_LINES,
             truncate::MAX_BYTES,
         );
+        // Whichever clamp bit — `limit` or the line/byte cap — the note
+        // reports what is shown against the real total; the byte/line
+        // cap alone used to drop entries silently (#199).
+        let shown = clip.kept_lines;
         let note =
-            (total > limit).then(|| format!("[truncated: showing first {limit} of {total} lines]"));
+            (shown < total).then(|| format!("[truncated: showing first {shown} of {total} lines]"));
         let mut text = clip.text;
         if let Some(note) = note {
             if !text.is_empty() {
@@ -134,6 +138,24 @@ mod tests {
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 3); // 2 entries + note
         assert!(out.contains("[truncated: showing first 2 of 5 lines]"));
+    }
+
+    #[test]
+    fn the_output_clamp_notes_what_it_dropped_even_below_the_limit() {
+        // #199: 2100 entries with limit 5000 hit the 2000-line cap and
+        // said nothing.
+        let root = temp_root("clamp");
+        for i in 0..2100 {
+            fs::write(root.join(format!("f{i:05}")), "").unwrap();
+        }
+        let out = LsTool::new(root.clone())
+            .execute(r#"{"limit":5000}"#)
+            .unwrap();
+        assert_eq!(out.lines().count(), 2001);
+        assert_eq!(
+            out.lines().last().unwrap(),
+            "[truncated: showing first 2000 of 2100 lines]"
+        );
     }
 
     #[test]

@@ -167,7 +167,7 @@ structural chunk-walk for the kitty renderer — AD-0010 — and
   overlapping edits rejected),
   `write` (creates parents, full overwrite), `grep` (`regex` crate, rg-style
   rendering, `glob` filter, context), `find` (`globset`, .gitignore-aware),
-  `ls` (sorted, `/` suffix for dirs, dotfiles), `subagent` (one nested
+  `ls` (sorted, `/` suffix for dirs, dotfiles, a `[truncated: …]` note whenever `limit` or the output cap dropped entries), `subagent` (one nested
   agent run per call — fresh history, own provider/model/thinking/toolset,
   the runner in `subagent.rs`; registered in `coding`/`all` only when the
   front end hands the registry a runner).
