@@ -76,3 +76,87 @@ fn text_print_mode_still_prints_only_the_reply() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert_eq!(stdout, format!("{REPLY}\n"));
 }
+
+/// #200: the reader going away (`hi --mode json … | head`) used to
+/// panic `println!` (exit 101) before the turn was recorded.
+#[test]
+fn a_closed_stdout_pipe_does_not_panic_or_lose_the_session() {
+    let root = std::env::temp_dir().join(format!("hi-json-pipe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hi"))
+        .args(["--mock", "--mode", "json", "say something"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .env("XDG_DATA_HOME", &root)
+        .env("XDG_CONFIG_HOME", &root)
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take()); // the reader leaves before any output
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+    // The turn still ran to the end and was recorded.
+    let mut recorded = String::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "jsonl") {
+                recorded.push_str(&std::fs::read_to_string(path).unwrap());
+            }
+        }
+    }
+    assert!(recorded.contains(REPLY), "session file: {recorded}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// #200 review: a failed write that is not a closed pipe loses output,
+/// so it must not look like success — but the turn still finishes and
+/// is recorded. `/dev/full` fails every write with ENOSPC (Linux).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_disk_on_stdout_fails_loudly_but_records_the_turn() {
+    let root = std::env::temp_dir().join(format!("hi-json-full-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_hi"))
+        .args(["--mock", "--mode", "json", "say something"])
+        .stdin(std::process::Stdio::null())
+        .stdout(full)
+        .stderr(std::process::Stdio::piped())
+        .env("XDG_DATA_HOME", &root)
+        .env("XDG_CONFIG_HOME", &root)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("hi: cannot write output:"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(stderr.matches("cannot write output").count(), 1, "{stderr}");
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+    let mut recorded = String::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "jsonl") {
+                recorded.push_str(&std::fs::read_to_string(path).unwrap());
+            }
+        }
+    }
+    assert!(recorded.contains(REPLY), "session file: {recorded}");
+    let _ = std::fs::remove_dir_all(&root);
+}
