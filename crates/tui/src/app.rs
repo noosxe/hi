@@ -913,6 +913,11 @@ impl App {
                     && !turn.blocks.is_empty()
                 {
                     self.messages.push(Message::Assistant(turn.blocks));
+                    // Persist NOW (#181): key handling runs before the
+                    // frame pump captures `added_from`, so this push is
+                    // outside every later append range — without this
+                    // the partial shows on screen but is gone on resume.
+                    self.persist_last();
                 }
                 // A cancelled turn's arm must not outlive it and fire
                 // after the next unrelated human turn.
@@ -4462,6 +4467,97 @@ mod tests {
         tx.send(Event::Token("x".into())).unwrap();
         app.pump();
         assert!(app.turn.is_some(), "events without TurnEnd keep it open");
+    }
+
+    /// An app with a fresh on-disk session in a unique temp root, a
+    /// persisted user message, and a live hand-driven turn.
+    fn esc_app(tag: &str) -> (App, std::path::PathBuf, std::sync::mpsc::Sender<Event>) {
+        let root = std::env::temp_dir().join(format!("hi-esc-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = test_app();
+        let session = hi_core::Session::start_in(
+            &root,
+            std::path::Path::new("/p"),
+            "mock",
+            "mock",
+            None,
+            None,
+        )
+        .unwrap();
+        app.session = Some(session);
+        app.messages.push(Message::User("hello".into()));
+        app.persist_last();
+        let (tx, rx) = std::sync::mpsc::channel::<Event>();
+        app.turn = Some(Turn::with_rx(rx));
+        (app, root, tx)
+    }
+
+    fn assistant_text(message: &Message) -> String {
+        match message {
+            Message::Assistant(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    hi_core::message::AssistantBlock::Text(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect(),
+            other => panic!("expected an assistant message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esc_persists_the_partial_reply_after_the_user_message() {
+        let (mut app, root, tx) = esc_app("partial");
+        tx.send(Event::Token("partial answer".into())).unwrap();
+        app.pump();
+        app.handle_key(key(KeyCode::Esc));
+        for _ in 0..3 {
+            app.pump();
+        }
+        let path = app.session.as_ref().unwrap().path().to_path_buf();
+        let disk = hi_core::session::load(&path).unwrap().messages;
+        assert_eq!(disk.len(), 2, "{disk:?}");
+        assert!(matches!(&disk[0], Message::User(u) if u == "hello"));
+        assert_eq!(assistant_text(&disk[1]), "partial answer");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn esc_with_nothing_streamed_persists_no_assistant_message() {
+        let (mut app, root, _tx) = esc_app("empty");
+        app.handle_key(key(KeyCode::Esc));
+        app.pump();
+        let path = app.session.as_ref().unwrap().path().to_path_buf();
+        let disk = hi_core::session::load(&path).unwrap().messages;
+        assert_eq!(disk.len(), 1, "{disk:?}");
+        assert!(matches!(&disk[0], Message::User(_)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_cancelled_partial_is_written_once_across_the_next_turn() {
+        let (mut app, root, tx) = esc_app("order");
+        tx.send(Event::Token("partial answer".into())).unwrap();
+        app.pump();
+        app.handle_key(key(KeyCode::Esc));
+        // A second exchange: the frame pump's own append range must not
+        // re-append the partial.
+        app.messages.push(Message::User("again".into()));
+        app.persist_last();
+        let (tx2, rx2) = std::sync::mpsc::channel::<Event>();
+        app.turn = Some(Turn::with_rx(rx2));
+        tx2.send(Event::Token("full answer".into())).unwrap();
+        tx2.send(Event::TurnEnd).unwrap();
+        app.pump();
+        assert!(app.turn.is_none());
+        let path = app.session.as_ref().unwrap().path().to_path_buf();
+        let disk = hi_core::session::load(&path).unwrap().messages;
+        assert_eq!(disk.len(), 4, "{disk:?}");
+        assert!(matches!(&disk[0], Message::User(u) if u == "hello"));
+        assert_eq!(assistant_text(&disk[1]), "partial answer");
+        assert!(matches!(&disk[2], Message::User(u) if u == "again"));
+        assert_eq!(assistant_text(&disk[3]), "full answer");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

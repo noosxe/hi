@@ -114,9 +114,14 @@ into the scrollback above the viewport exactly once
 
 - `handle_key(Esc)` while a turn is in flight drops the `Turn` (which owns
   the `Receiver`). The provider thread's next `send` fails → it returns.
-  Partial output already pumped into `turn.text` is **kept**: finalization
-  still pushes the partial `Assistant` message (plus `Error` if one was
-  received).
+  Partial output already pumped into `turn.blocks` is **kept**: `handle_key`
+  itself pushes the partial `Assistant` message (only when there are blocks)
+  and appends it to the session file at once via `persist_last` (#181) — key
+  handling runs before `pump` captures its `added_from` marker, so no later
+  frame append would ever cover it. Esc before any token persists nothing.
+  `/new` and `/resume` are refused mid-turn (esc first), so they never see a
+  partial; quitting mid-turn (Ctrl-C) drops the unfinished reply with the
+  process, unrecorded.
 - Esc can land after a `ToolCall` was pushed (and persisted) but before
   its `ToolResult`, leaving an orphan call. Nothing is written to history
   or the session file for it; instead `wire_messages` repairs every

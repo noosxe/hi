@@ -90,7 +90,9 @@ Behaviors (each pinned by a test in `app.rs`):
   both pickers wrap their navigation.
   the typed text; unknown commands report instead of sending.
 - Enter mid-turn queues; Esc mid-turn cancels **and** restores the queue
-  into the input box.
+  into the input box. Esc keeps the partial reply in the transcript *and*
+  persists it (`persist_last`, #181), so a resume shows it too; an Esc before
+  any token writes nothing.
 - `activity_label()` builds the input's top-rule title while busy:
   spinner frame + elapsed seconds + `· N queued` + `esc to cancel`. New
   busy states (compaction, tool runs) become arms of this method.
