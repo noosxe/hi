@@ -16,9 +16,17 @@
 //! everything after the tool returned. A result whose pipes were still
 //! open carries a note saying so. A child that left the group
 //! (`setsid`, `set -m`) is not killed by a timeout, but cannot hang it.
+//!
+//! Exit (#175): each call registers its process group in a
+//! [`BashGroups`] registry for the child's lifetime (RAII, so every
+//! return path unregisters). `BashTool::new` uses the process-wide
+//! registry, which `exit::shutdown` kills on the way out — a call
+//! abandoned by Ctrl-C (or by Esc, then a quit) does not outlive `hi`.
+//! Esc alone does not kill the call; the guarantee covers exits.
 
 use super::truncate;
 use super::{args_object, opt_str, opt_usize};
+use crate::process::BashGroups;
 use crate::tool::{Tool, ToolAnnotations};
 use std::io::Read;
 use std::path::PathBuf;
@@ -77,11 +85,21 @@ fn wait_eof(dones: &[&Done], until: Instant) -> bool {
 
 pub struct BashTool {
     cwd: PathBuf,
+    groups: BashGroups,
 }
 
 impl BashTool {
+    /// Registers its groups in the process-wide [`BashGroups`].
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
-        Self { cwd: cwd.into() }
+        Self::with_groups(cwd, BashGroups::global())
+    }
+
+    /// Like [`BashTool::new`] with an injected registry (tests).
+    pub fn with_groups(cwd: impl Into<PathBuf>, groups: BashGroups) -> Self {
+        Self {
+            cwd: cwd.into(),
+            groups,
+        }
     }
 }
 
@@ -146,6 +164,8 @@ impl Tool for BashTool {
         // tree — the task manager's rule, shared plumbing.
         crate::process::own_group(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("cannot spawn bash: {e}"))?;
+        // Registered for the child's lifetime; dropped on every return.
+        let _registered = self.groups.register(child.id());
         let Some(out_pipe) = child.stdout.take() else {
             return Err("bash produced no stdout pipe".into());
         };
@@ -558,6 +578,67 @@ mod tests {
             was_alive && escaped,
             "set -m did not move the job to its own group"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_running_call_is_registered_and_unregisters_after_it_returns() {
+        let root = temp_root("registry");
+        let groups = BashGroups::new();
+        let t = BashTool::with_groups(&root, groups.clone());
+        assert!(groups.is_empty());
+        let seen = std::thread::scope(|s| {
+            let h = s.spawn(|| t.execute(r#"{"command":"sleep 1; echo done"}"#));
+            let start = Instant::now();
+            while groups.is_empty() && start.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let seen = groups.len();
+            assert!(h.join().unwrap().unwrap().contains("done"));
+            seen
+        });
+        assert_eq!(seen, 1, "the running call was not registered");
+        assert!(groups.is_empty(), "group left registered after success");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn groups_unregister_on_timeout_and_on_error() {
+        let root = temp_root("registry-err");
+        let groups = BashGroups::new();
+        let t = BashTool::with_groups(&root, groups.clone());
+        let err = t
+            .execute(r#"{"command":"sleep 30","timeout":1}"#)
+            .unwrap_err();
+        assert!(err.starts_with("timeout after 1s"), "got: {err}");
+        assert!(groups.is_empty(), "group left registered after timeout");
+        let err = t.execute(r#"{"command":"exit 3"}"#).unwrap_err();
+        assert!(err.starts_with("exit code 3"), "got: {err}");
+        assert!(groups.is_empty(), "group left registered after error");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn kill_all_stops_an_in_flight_call_and_its_children() {
+        let root = temp_root("killall");
+        let pidf = root.join("pid");
+        let groups = BashGroups::new();
+        let t = BashTool::with_groups(&root, groups.clone());
+        let cmd = serde_json::json!({
+            "command": format!("sleep 60 & echo $! > {}; wait", pidf.display())
+        })
+        .to_string();
+        std::thread::scope(|s| {
+            let h = s.spawn(|| t.execute(&cmd));
+            let pid = read_pid(&pidf);
+            groups.kill_all();
+            let dead = wait_dead(pid);
+            if !dead {
+                kill_group_of(pid);
+            }
+            let _ = h.join();
+            assert!(dead, "background child {pid} survived kill_all");
+        });
     }
 
     #[test]

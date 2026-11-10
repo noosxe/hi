@@ -103,6 +103,18 @@ whenever the `/model` picker rebuilds it.
   message printed as `hi: <message>` on stderr (`fail()`), so scripts
   can tell success from failure
 
+## Exit sweep (#175)
+
+`launch` (TUI) and `print_mode` (headless, text and JSON) each hold a
+`hi_core::exit::ExitGuard` built from the target's `TaskManager`. It runs
+`hi_core::exit::shutdown` on drop — after `hi_tui::run` restored the
+terminal, and on success, `fail()` and early-return paths alike — killing
+running `task_run` groups and live foreground `bash` groups (TERM, short
+grace, KILL). There is no `std::process::exit` in the binary; `main`
+returns an `ExitCode`. Esc alone does not kill an abandoned `bash` call;
+the guarantee covers exits. Covered by the pty test
+`ctrl_c_mid_turn_leaves_no_task_or_bash_process_behind`.
+
 ## Headless mode (`--print`)
 
 `--print` runs exactly one turn and exits — the scripting interface.

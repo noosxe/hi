@@ -35,7 +35,12 @@ data), `status.rs` (status-bar facts), `ui.rs` (widgets/drawing),
 - Teardown order: `terminal.clear()` (wipe managed region) →
   `ratatui::restore()` (raw mode off). Quitting mid-turn is safe: dropping
   `app` drops the turn's `Receiver`, which stops the provider thread (see
-  [turn-lifecycle.md](turn-lifecycle.md)).
+  [turn-lifecycle.md](turn-lifecycle.md)). The *process* sweep (#175) is not
+  the TUI's job: `hi_tui::run` returns after the terminal is restored and the
+  CLI's `ExitGuard` (in `launch`) then runs `hi_core::exit::shutdown`, killing
+  running tasks and live foreground `bash` groups on every exit — `/exit`,
+  Ctrl-C idle or mid-turn, quit after Esc. Esc alone does not kill an
+  abandoned `bash` call. The wait therefore never happens in raw mode.
 
 ## app.rs — all state, one struct
 

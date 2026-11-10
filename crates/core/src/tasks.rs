@@ -35,6 +35,12 @@
 //!   the last [`TaskManager`] handle kills every running group, so a
 //!   clean `/exit` orphans nothing (a crash can — the OS is the
 //!   boundary, the same trust stance as every tool).
+//! - **Exit is explicit (#175).** [`TaskManager::shutdown`] kills every
+//!   running group (TERM, grace, KILL) whatever the handle count is —
+//!   the in-flight turn's worker thread holds a registry clone at a
+//!   mid-turn quit, so a last-handle `Drop` alone never fires there.
+//!   Idempotent; `Drop` reuses it under the last-handle condition.
+//!   `exit::shutdown` calls it on every way out of `hi`.
 //!
 //! The manager tracks *life and output*; what the worker is, is a
 //! [`TaskKind`]. `Process` is the v1 kind; `Agent` arrives with #4 and
@@ -48,7 +54,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
-use crate::process::{kill_group, stop_tree};
+use crate::process::stop_tree;
 use std::time::{Duration, Instant};
 
 /// In-memory output kept for instant tail reads. The full stream goes
@@ -336,10 +342,14 @@ struct Inner {
     tx: Arc<Mutex<Sender<TaskCompletion>>>,
     completions: Mutex<Receiver<TaskCompletion>>,
     logs_dir: PathBuf,
+    /// Ids already swept by `shutdown`: a second sweep skips them, so
+    /// it does no extra signalling or waiting while workers are still
+    /// reaping the groups the first one killed.
+    swept: Mutex<std::collections::HashSet<u64>>,
 }
 
-/// A cloneable handle to the background task manager. Drop the last
-/// handle and every running task's process group is killed.
+/// A cloneable handle to the background task manager. `shutdown` (or
+/// dropping the last handle) kills every running task's process group.
 #[derive(Clone)]
 pub struct TaskManager(Arc<Inner>);
 
@@ -369,6 +379,7 @@ impl TaskManager {
             tx: Arc::new(Mutex::new(tx)),
             completions: Mutex::new(rx),
             logs_dir,
+            swept: Mutex::new(Default::default()),
         }))
     }
 
@@ -506,30 +517,39 @@ impl TaskManager {
     }
 }
 
-impl Drop for TaskManager {
-    fn drop(&mut self) {
-        // Last handle out kills the lights: every running group, TERM
-        // then KILL. Workers may still be polling; they observe the
-        // exit and finish on their own. Their completion sends land in
-        // a channel nobody reads — fine, the process is leaving.
-        if Arc::strong_count(&self.0) != 1 {
-            return;
-        }
-        let running: Vec<u32> = self
+impl TaskManager {
+    /// Kill every running task's process group — TERM, a grace beat,
+    /// KILL — regardless of how many handles exist (#175). Idempotent:
+    /// groups an earlier call already swept are skipped, and with
+    /// nothing to sweep it returns at once without sleeping. Workers
+    /// may still be polling; they observe the exit and finish on their
+    /// own, and their completion sends land in a channel nobody reads.
+    pub fn shutdown(&self) {
+        let running: Vec<(u64, u32)> = self
             .0
             .tasks
             .lock()
             .unwrap()
-            .values()
-            .filter(|e| !e.state.finished())
-            .map(|e| e.pid)
+            .iter()
+            .filter(|(_, e)| !e.state.finished())
+            .map(|(id, e)| (*id, e.pid))
             .collect();
-        for pid in &running {
-            kill_group(*pid, libc::SIGTERM);
-        }
-        std::thread::sleep(Duration::from_millis(250));
-        for pid in &running {
-            kill_group(*pid, libc::SIGKILL);
+        let mut swept = self.0.swept.lock().unwrap();
+        let pids: Vec<u32> = running
+            .into_iter()
+            .filter(|(id, _)| swept.insert(*id))
+            .map(|(_, pid)| pid)
+            .collect();
+        drop(swept);
+        crate::process::terminate_groups(&pids, crate::process::EXIT_GRACE);
+    }
+}
+
+impl Drop for TaskManager {
+    fn drop(&mut self) {
+        // Last handle out kills the lights.
+        if Arc::strong_count(&self.0) == 1 {
+            self.shutdown();
         }
     }
 }
@@ -1174,6 +1194,38 @@ mod tests {
         for pid in pids {
             until("group to die on drop", || group_dead(pid));
         }
+    }
+
+    #[test]
+    fn shutdown_kills_running_tasks_while_another_handle_lives() {
+        let (m, _dir) = manager();
+        let other = m.clone(); // a worker thread's clone at a mid-turn quit
+        let id = m
+            .spawn(TaskSpec::process("sleep 30", std::env::temp_dir()))
+            .unwrap();
+        let pid = m.status(id).unwrap().pid;
+        drop(m);
+        assert!(!group_dead(pid), "a non-last drop must not kill");
+        other.shutdown();
+        until("group to die on shutdown", || group_dead(pid));
+    }
+
+    #[test]
+    fn shutdown_is_idempotent_and_free_when_nothing_runs() {
+        let (m, _dir) = manager();
+        let started = Instant::now();
+        m.shutdown(); // nothing running: no sleep
+        assert!(started.elapsed() < Duration::from_millis(100));
+        let id = m
+            .spawn(TaskSpec::process("sleep 30", std::env::temp_dir()))
+            .unwrap();
+        let pid = m.status(id).unwrap().pid;
+        m.shutdown();
+        until("group to die", || group_dead(pid));
+        let started = Instant::now();
+        m.shutdown();
+        drop(m); // Drop after shutdown: still nothing to do
+        assert!(started.elapsed() < Duration::from_millis(100));
     }
 
     #[test]

@@ -248,10 +248,20 @@ and since #30 the `bash` tool shares the plumbing (`process.rs`:
 `own_group` at spawn, `stop_tree` TERM → poll until the leader is reaped
 and the group is empty (`group_alive`) → KILL at the 2s grace),
 so a timed-out command cannot leave orphans behind either. Completion is one `TaskCompletion` into a channel
-the front end drains per frame; dropping the last handle kills every
-running group. Threads, not tokio — the choice #6's Luau bridge
+the front end drains per frame; `TaskManager::shutdown` (also run by
+dropping the last handle) kills every running group whatever the handle
+count (#175). Threads, not tokio — the choice #6's Luau bridge
 inherits. No default timeout: long-lived work is the point; a cap of
 16 running tasks refuses beyond that with a readable error.
+
+**Exit (#175):** `exit::shutdown(tasks)` is the one sweep every front end
+runs on every way out: `TaskManager::shutdown` plus `BashGroups::kill_all`
+on the process-wide registry (`BashGroups::global`, used by
+`BashTool::new`; `BashTool::with_groups` injects one for tests, which must
+never `kill_all` the global one). The `bash` tool registers its child's
+group for the call's lifetime (RAII). `exit::ExitGuard` runs the sweep on
+drop. Esc alone does not kill an abandoned `bash` call; the guarantee
+covers exits. `process::terminate_groups` is the shared TERM, grace, KILL.
 
 **Lifetime (#174):** a task is `Running` until its whole process group is
 gone, not until the leader exits. `monitor` remembers the leader's exit

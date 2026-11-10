@@ -556,6 +556,10 @@ fn print_mode(cli: &Cli, json: bool) -> ExitCode {
             },
         )
     };
+    // Headless exits (success, error, early `fail`) sweep tasks and
+    // `bash` groups too (#175); declared before anything runs so it
+    // drops last.
+    let _exit = hi_core::exit::ExitGuard::new(target.as_ref().and_then(|t| t.tasks.clone()));
     let (status, thinking, tools) = match &target {
         Some(target) => (
             target.status.clone(),
@@ -854,6 +858,11 @@ fn launch(
     init: SessionInit,
     telemetry: bool,
 ) -> ExitCode {
+    // Every way out of the TUI (/exit, Ctrl-C idle or mid-turn, quit
+    // after Esc, an error from `run`) ends here; the guard drops after
+    // `run` restored the terminal and sweeps tasks and `bash` groups
+    // (#175).
+    let _exit = hi_core::exit::ExitGuard::new(init.tasks.clone());
     match run(provider, status, catalog, config, init, telemetry) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => fail(&err.to_string()),
