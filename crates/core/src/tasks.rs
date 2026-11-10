@@ -352,6 +352,9 @@ struct TaskEntry {
     state: TaskState,
     pid: u32,
     started: Instant,
+    /// Total runtime, fixed when the task leaves `Running` — a
+    /// finished task's wall must stop growing.
+    finished_wall: Option<Duration>,
     ring: Ring,
     /// Set by `cancel`; the worker's poll loop observes it.
     cancel: Arc<std::sync::atomic::AtomicBool>,
@@ -493,6 +496,7 @@ impl TaskManager {
             state: TaskState::Running,
             pid: child.id(),
             started: Instant::now(),
+            finished_wall: None,
             ring: ring.clone(),
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -725,6 +729,7 @@ fn monitor(
 
     if let Some(entry) = tasks.lock().unwrap().get_mut(&id) {
         entry.state = state;
+        entry.finished_wall = Some(wall);
     }
     // A dead receiver just means nobody is listening (shutdown) — the
     // registry row above is the durable fact.
@@ -753,7 +758,9 @@ fn summary(id: u64, entry: &TaskEntry) -> TaskSummary {
         command: entry.command.clone(),
         state: entry.state,
         pid: entry.pid,
-        wall: entry.started.elapsed(),
+        wall: entry
+            .finished_wall
+            .unwrap_or_else(|| entry.started.elapsed()),
     }
 }
 
@@ -797,6 +804,17 @@ mod tests {
     /// True when nothing in the process group `pid` is alive.
     fn group_dead(pid: u32) -> bool {
         unsafe { libc::kill(-(pid as i32), 0) != 0 }
+    }
+
+    #[test]
+    fn a_finished_tasks_wall_stops_growing() {
+        let (m, _dir) = manager();
+        let id = spawn_script(&m, "true", None);
+        until("task to finish", || state_of(&m, id).finished());
+        let first = m.status(id).unwrap().wall;
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(m.status(id).unwrap().wall, first, "wall of a finished task");
+        assert_eq!(m.list()[0].wall, first);
     }
 
     #[test]
