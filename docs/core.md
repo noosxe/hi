@@ -365,8 +365,9 @@ prune (pi never deletes sessions either).
   `load()` of the file reproduces exactly what the subagent saw.
   Best-effort like every session write; recording never fails a run,
   and the parent transcript stays spawn-echo either way.
-- `session::latest(cwd)` — newest readable session for a project
-  (`--continue`); `session::load(path)` — full parse.
+- `session::latest(cwd)` — newest readable non-subagent session for a project
+  (`--continue`; `kind: "subagent"` headers are skipped, only that exact
+  kind, before `load`; `sessions_in_root` and the pickers still list them); `session::load(path)` — full parse.
 - `SessionHeader` is the flat first line (`camelCase`, `version` field for
   future migrations); `Message` serializes as externally-tagged camelCase
   (`{"toolCall":{…}}`), so tool traffic round-trips losslessly.

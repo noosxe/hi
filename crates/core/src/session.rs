@@ -474,15 +474,25 @@ impl Session {
 /// Files that fail to load are skipped rather than fatal: they may be
 /// mid-write from another process, and resume should pick the newest
 /// session it can actually read. `Ok(None)` means nothing resumable.
+///
+/// Subagent transcripts (`kind: "subagent"`, `subagentTranscripts`) are
+/// never picked: `--continue` means "my conversation", and a subagent
+/// that outlives an Esc keeps its file the newest. The pickers and
+/// `--session` can still open them explicitly.
 pub fn latest(cwd: &Path) -> Result<Option<LoadedSession>, String> {
     let root = sessions_dir().ok_or("could not determine data directory")?;
     latest_in_root(&root, cwd)
 }
 
 /// The root-parameterized half of [`latest`] (the `settings.rs` pattern).
+///
+/// Only the exact kind `"subagent"` is skipped, judged from the header
+/// the summary already carries (so such a file is never loaded); unknown
+/// future kinds stay eligible.
 pub fn latest_in_root(root: &Path, cwd: &Path) -> Result<Option<LoadedSession>, String> {
     Ok(sessions_in_root(root, cwd)?
         .into_iter()
+        .filter(|summary| summary.header.kind.as_deref() != Some("subagent"))
         .find_map(|summary| load(&summary.path).ok()))
 }
 
@@ -1361,6 +1371,65 @@ mod tests {
         let loaded = latest_in_root(&root, cwd).unwrap().unwrap();
         assert_eq!(loaded.header.model, "new");
         assert_eq!(loaded.messages, vec![Message::User("second".into())]);
+    }
+
+    /// A materialized session at `age` old: plain, or a subagent
+    /// transcript of `parent`.
+    fn aged_session(root: &Path, cwd: &Path, model: &str, subagent: bool, age: u64) -> PathBuf {
+        let mut session = if subagent {
+            Session::start_subagent_in(root, cwd, "p", model, None, Some("parent-1")).unwrap()
+        } else {
+            Session::start_in(root, cwd, "p", model, None, None).unwrap()
+        };
+        session.append(&[Message::User(model.into())]).unwrap();
+        backdate(session.path(), Duration::from_secs(age));
+        session.path().to_path_buf()
+    }
+
+    #[test]
+    fn latest_skips_a_newer_subagent_transcript() {
+        let root = temp_root("latest-skips-sub");
+        let cwd = Path::new("/tmp/proj");
+        aged_session(&root, cwd, "parent", false, 100);
+        aged_session(&root, cwd, "child", true, 10);
+        let loaded = latest_in_root(&root, cwd).unwrap().unwrap();
+        assert_eq!(loaded.header.model, "parent");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn latest_is_none_when_only_subagent_transcripts_exist() {
+        let root = temp_root("latest-only-sub");
+        let cwd = Path::new("/tmp/proj");
+        aged_session(&root, cwd, "child-a", true, 20);
+        aged_session(&root, cwd, "child-b", true, 10);
+        assert!(latest_in_root(&root, cwd).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn latest_picks_the_newest_plain_session_past_newer_subagents() {
+        let root = temp_root("latest-plain-newest");
+        let cwd = Path::new("/tmp/proj");
+        aged_session(&root, cwd, "old-parent", false, 300);
+        aged_session(&root, cwd, "child", true, 200);
+        aged_session(&root, cwd, "newest-plain", false, 100);
+        let loaded = latest_in_root(&root, cwd).unwrap().unwrap();
+        assert_eq!(loaded.header.model, "newest-plain");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sessions_in_still_lists_subagent_transcripts() {
+        let root = temp_root("list-keeps-sub");
+        let cwd = Path::new("/tmp/proj");
+        aged_session(&root, cwd, "parent", false, 100);
+        let child = aged_session(&root, cwd, "child", true, 10);
+        let listed = sessions_in_root(&root, cwd).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].path, child);
+        assert_eq!(listed[0].header.kind.as_deref(), Some("subagent"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

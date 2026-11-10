@@ -140,7 +140,9 @@ is turning the knob back off; hi never guesses and does not retry a
   true, every subagent run writes its own ordinary session file
   (`kind: "subagent"`, the parent session's id in the header) under
   this project's sessions directory — inspectable and resumable with
-  no special-casing, pruned by the same retention rules; the tool's
+  no special-casing, pruned by the same retention rules; `--continue`
+  never picks a subagent transcript (it reopens the newest non-subagent
+  session), while `--resume`, `/resume` and `--session` can still open one; the tool's
   result line names each recording (`recorded → <path>`). Off by
   default because a chatty parent turn can spawn many files. Startup
   policy only, not flippable from `/settings`.
@@ -278,6 +280,6 @@ transcripts are generated data):
   final newline is added; a healthy file is left untouched.
 - Unknown fields are ignored, like every hi file — newer sessions open in
   older builds.
-- `hi --continue` reopens the newest session for the current directory and
+- `hi --continue` reopens the newest non-subagent session for the current directory and
   keeps appending to the same file; the model/provider come from today's
   flags and config, not frozen from the header.
