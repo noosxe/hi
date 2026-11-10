@@ -87,7 +87,9 @@ the pre-thinking plain string (upgraded to one `Text` block on replay).
   `info()` snapshots `ToolInfo { name, description, annotations }` per tool (wire order) for UIs
   on the wire at all.
 - `ToolCall { id, name, arguments }` / `ToolResult { call_id, name, content, is_error, images }`:
-  `arguments` stays **raw JSON text** (the model's exact words; the tool owns its schema).
+  `arguments` stays **raw JSON text** (the model's exact words; the tool owns its schema) — except that the
+  OpenAI stream layer turns empty or whitespace-only arguments into `{}` (pi's rule, #204), since a
+  no-arg call may stream none.
   `is_error` is harness-side only — the OpenAI wire has no such flag. `images`
   (`Vec<ImageBlock>`, base64 + mime type) carries what a tool produced **for the model to
   see** (v1: `read` on an image file) — facts on the result, policy applied before the tool
