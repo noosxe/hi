@@ -19,7 +19,8 @@
 //!   no interleaving races.
 //! - **Two-tier buffering.** A bounded ring (256 KiB) backs instant
 //!   `output_tail` reads; the full stream lands in a log file under
-//!   the tasks dir for post-mortems.
+//!   the tasks dir for post-mortems, one file per run and task
+//!   (`<run>-<id>.log`, #188).
 //! - **Logs are bounded on disk too (#74).** Manager construction
 //!   prunes the tasks dir best-effort: logs older than
 //!   [`TASK_LOG_MAX_AGE`] go, aged survivors beyond
@@ -95,7 +96,18 @@ pub const TASK_LOG_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 3600);
 pub const TASK_LOG_CEIL_BYTES: usize = 64 * 1024 * 1024;
 pub const TASK_LOG_CEIL_GRACE: Duration = Duration::from_secs(24 * 3600);
 
-/// Delete task logs per the retention policy: `<u64>.log` files older
+/// Whether `name` is one of our task logs: the legacy `<id>.log`, or
+/// `<pid>-<millis>-<seq>-<id>.log` (a per-run prefix, #188) — every
+/// part numeric. A user's stray `notes.log` never matches.
+fn is_task_log_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".log") else {
+        return false;
+    };
+    let parts: Vec<&str> = stem.split('-').collect();
+    matches!(parts.len(), 1 | 4) && parts.iter().all(|p| p.parse::<u64>().is_ok())
+}
+
+/// Delete task logs per the retention policy: task-log files older
 /// than `max_age`, then (among files older than `grace`) the oldest
 /// beyond a total of `ceil_bytes`, newest kept. Returns how many
 /// files were removed; every error is swallowed — pruning is
@@ -109,10 +121,12 @@ fn prune_logs(dir: &Path, max_age: Duration, ceil_bytes: usize, grace: Duration)
         .filter_map(|e| {
             let name = e.file_name();
             let name = name.to_string_lossy();
-            // Only our own logs: `<id>.log` with a numeric id. A
-            // user's stray notes.log is never touched.
-            let id = name.strip_suffix(".log")?;
-            id.parse::<u64>().ok()?;
+            // Only our own logs (legacy `<id>.log` or the per-run
+            // `<run>-<id>.log`). A user's stray notes.log is never
+            // touched.
+            if !is_task_log_name(&name) {
+                return None;
+            }
             let Ok(meta) = e.metadata() else {
                 return None;
             };
@@ -345,6 +359,11 @@ struct TaskEntry {
 
 struct Inner {
     next_id: AtomicU64,
+    /// This manager's log-file prefix, `<pid>-<millis>-<seq>`, fixed at
+    /// construction: every run (and every manager in one process) owns
+    /// its own files, so a second run never truncates this one's logs
+    /// (#188). Task ids stay 1, 2, 3 per manager.
+    run: String,
     tasks: Arc<Mutex<HashMap<u64, TaskEntry>>>,
     tx: Arc<Mutex<Sender<TaskCompletion>>>,
     completions: Mutex<Receiver<TaskCompletion>>,
@@ -364,7 +383,8 @@ struct Inner {
 pub struct TaskManager(Arc<Inner>);
 
 impl TaskManager {
-    /// Logs land in `logs_dir/<id>.log` (created on demand). A
+    /// Logs land in `logs_dir/<run>-<id>.log` (created on demand, with
+    /// `create_new`: a collision fails the spawn, never truncates). A
     /// best-effort retention prune (#74) runs first — before anything
     /// can spawn — and reports one stderr line only if it removed
     /// files; a failed unlink never blocks startup.
@@ -383,8 +403,19 @@ impl TaskManager {
             );
         }
         let (tx, rx) = channel();
+        static NEXT_RUN: AtomicU64 = AtomicU64::new(0);
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let run = format!(
+            "{}-{millis}-{}",
+            std::process::id(),
+            NEXT_RUN.fetch_add(1, Ordering::Relaxed)
+        );
         Self(Arc::new(Inner {
             next_id: AtomicU64::new(1),
+            run,
             tasks: Arc::new(Mutex::new(HashMap::new())),
             tx: Arc::new(Mutex::new(tx)),
             completions: Mutex::new(rx),
@@ -433,7 +464,27 @@ impl TaskManager {
             return Err("task produced no output pipe".into());
         };
         std::fs::create_dir_all(&self.0.logs_dir).ok();
-        let log = self.0.logs_dir.join(format!("{id}.log"));
+        let log_path = self.0.logs_dir.join(format!("{}-{id}.log", self.0.run));
+        // `create_new`: never truncate another run's log. Any other
+        // failure (read-only dir, …) keeps the old tolerance — the
+        // task still runs, ring-only.
+        let log = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&log_path)
+        {
+            Ok(file) => Some(file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                kill_group(child.id(), libc::SIGKILL);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "task log {} already exists — refusing to overwrite it",
+                    log_path.display()
+                ));
+            }
+            Err(_) => None,
+        };
 
         let ring = Ring::new();
         let entry = TaskEntry {
@@ -605,7 +656,7 @@ fn monitor(
     mut child: Child,
     stdout: std::process::ChildStdout,
     ring: Ring,
-    log: PathBuf,
+    log: Option<std::fs::File>,
     cancel: Arc<std::sync::atomic::AtomicBool>,
     timeout: Option<Duration>,
     tasks: Arc<Mutex<HashMap<u64, TaskEntry>>>,
@@ -618,7 +669,7 @@ fn monitor(
     // Reader: pipe → ring + log file. Ends at EOF (every holder gone).
     let reader = std::thread::spawn(move || {
         let mut pipe = stdout;
-        let mut file = std::fs::File::create(&log).ok();
+        let mut file = log;
         let mut buf = [0u8; 8192];
         loop {
             match pipe.read(&mut buf) {
@@ -766,6 +817,85 @@ mod tests {
         assert!(!dir.join("1.log").exists());
         assert!(dir.join("2.log").exists());
         assert!(dir.join("3.log").exists());
+    }
+
+    /// The logs in `dir` whose content equals `want` — poll-friendly.
+    fn logs_with(dir: &Path, want: &str) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| is_task_log_name(&e.file_name().to_string_lossy()))
+            .filter(|e| std::fs::read_to_string(e.path()).is_ok_and(|c| c.trim() == want))
+            .count()
+    }
+
+    #[test]
+    fn two_managers_on_one_dir_keep_their_own_logs() {
+        // #188 (r16): a second run used to truncate the first run's
+        // `1.log`. Both tasks get id 1; the files must not collide.
+        let (a, dir) = manager();
+        let b = TaskManager::new(dir.clone());
+        let id_a = a
+            .spawn(TaskSpec::process("echo from-run-a", std::env::temp_dir()))
+            .unwrap();
+        let id_b = b
+            .spawn(TaskSpec::process("echo from-run-b", std::env::temp_dir()))
+            .unwrap();
+        assert_eq!((id_a, id_b), (1, 1), "task ids stay per-run");
+        until("both logs", || {
+            logs_with(&dir, "from-run-a") == 1 && logs_with(&dir, "from-run-b") == 1
+        });
+        until("both finished", || {
+            state_of(&a, id_a).finished() && state_of(&b, id_b).finished()
+        });
+        assert_eq!(logs_with(&dir, "from-run-a"), 1);
+        assert_eq!(logs_with(&dir, "from-run-b"), 1);
+    }
+
+    #[test]
+    fn a_colliding_log_name_fails_the_spawn_and_is_not_truncated() {
+        let (m, dir) = manager();
+        let taken = dir.join(format!("{}-1.log", m.0.run));
+        std::fs::write(&taken, "precious").unwrap();
+        let err = m
+            .spawn(TaskSpec::process("echo x", std::env::temp_dir()))
+            .unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(std::fs::read_to_string(&taken).unwrap(), "precious");
+    }
+
+    #[test]
+    fn task_log_names_are_ours_only() {
+        assert!(is_task_log_name("7.log"));
+        assert!(is_task_log_name("123-1731200000000-0-4.log"));
+        assert!(!is_task_log_name("notes.log"));
+        assert!(!is_task_log_name("1-2.log"));
+        assert!(!is_task_log_name("123-1731200000000-0-x.log"));
+        assert!(!is_task_log_name("7.txt"));
+    }
+
+    #[test]
+    fn prune_removes_old_new_style_and_legacy_logs_only() {
+        let (manager, dir) = manager();
+        drop(manager);
+        let old = Duration::from_secs(8 * 24 * 3600);
+        for name in ["5.log", "10-20-0-1.log", "notes.log", "10-20-0-x.log"] {
+            std::fs::write(dir.join(name), "data").unwrap();
+            backdate(&dir.join(name), old);
+        }
+        std::fs::write(dir.join("10-20-0-2.log"), "fresh").unwrap();
+        let pruned = prune_logs(
+            &dir,
+            TASK_LOG_MAX_AGE,
+            TASK_LOG_CEIL_BYTES,
+            TASK_LOG_CEIL_GRACE,
+        );
+        assert_eq!(pruned, 2);
+        assert!(!dir.join("5.log").exists());
+        assert!(!dir.join("10-20-0-1.log").exists());
+        assert!(dir.join("10-20-0-2.log").exists());
+        assert!(dir.join("notes.log").exists());
+        assert!(dir.join("10-20-0-x.log").exists());
     }
 
     #[test]
@@ -1075,7 +1205,7 @@ mod tests {
         std::fs::write(&release, "").unwrap();
         until("task to finish", || state_of(&m, id).finished());
         assert_eq!(state_of(&m, id), TaskState::Succeeded { exit_code: 0 });
-        let log = std::fs::read_to_string(dir.join(format!("{id}.log"))).unwrap();
+        let log = std::fs::read_to_string(dir.join(format!("{}-{id}.log", m.0.run))).unwrap();
         assert!(log.contains("late-words"), "log: {log}");
         assert!(m.output_tail(id, 4096).unwrap().contains("late-words"));
     }
@@ -1178,7 +1308,7 @@ mod tests {
         let tail = m.output_tail(id, usize::MAX).unwrap();
         assert!(tail.len() <= RING_BYTES, "ring leaked: {}", tail.len());
         // The disk log holds the full million bytes.
-        let log = std::fs::read(dir.join(format!("{id}.log"))).unwrap();
+        let log = std::fs::read(dir.join(format!("{}-{id}.log", m.0.run))).unwrap();
         assert_eq!(log.len(), 1_000_000);
     }
 
