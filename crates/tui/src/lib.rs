@@ -223,10 +223,47 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io
 
         // Redraw the live region: the transcript window + streaming
         // tail above the input.
-        terminal.draw(|frame| ui::draw(frame, app))?;
+        retry_lost_cursor_reply(|| terminal.draw(|frame| ui::draw(frame, app)).map(|_| ()))?;
     }
 
     Ok(())
+}
+
+/// How many times a frame op is retried after crossterm loses a cursor
+/// reply before the error is allowed to end the session.
+const CURSOR_REPLY_RETRIES: usize = 3;
+
+/// Is this crossterm's "the terminal never answered `ESC [ 6 n`" error?
+fn is_cursor_reply_timeout(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::Other
+        && err
+            .to_string()
+            .contains("cursor position could not be read")
+}
+
+/// Run a frame op that may query the cursor position (ratatui's inline
+/// viewport queries it when the terminal size changes), retrying when crossterm
+/// reports the reply never came (#223).
+///
+/// crossterm 0.29's event source is edge-triggered (mio) and handles
+/// one readiness token at a time: when a SIGWINCH and the terminal's
+/// answer become ready in the same wakeup, it returns the resize first
+/// and drops the answer's notification. The answer sits unread in the
+/// tty and crossterm waits its full two seconds for a notification that
+/// never comes, then errors — which used to end the session
+/// (`hi: The cursor position could not be read within a normal
+/// duration`) when a resize landed while a query was in flight. A retry
+/// sends a fresh query, whose answer raises a fresh edge; the stale
+/// answer is swallowed as an internal event. The op failed before it
+/// drew anything, so repeating it is safe.
+fn retry_lost_cursor_reply<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    for _ in 0..CURSOR_REPLY_RETRIES {
+        match op() {
+            Err(err) if is_cursor_reply_timeout(&err) => continue,
+            other => return other,
+        }
+    }
+    op()
 }
 
 /// The panic hook is process-global: tests that swap it take this lock.
@@ -237,6 +274,38 @@ pub(crate) static HOOK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new((
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn a_lost_cursor_reply_is_retried_and_other_errors_are_not() {
+        let timeout = || {
+            std::io::Error::other("The cursor position could not be read within a normal duration")
+        };
+        let mut calls = 0;
+        let out = retry_lost_cursor_reply(|| {
+            calls += 1;
+            if calls < 3 { Err(timeout()) } else { Ok(calls) }
+        });
+        assert_eq!(out.unwrap(), 3, "two lost replies, then the frame lands");
+
+        // A reply that never comes still ends the session — after the
+        // bounded retries, not forever.
+        let mut calls = 0;
+        let out: std::io::Result<()> = retry_lost_cursor_reply(|| {
+            calls += 1;
+            Err(timeout())
+        });
+        assert!(out.is_err());
+        assert_eq!(calls, CURSOR_REPLY_RETRIES + 1);
+
+        // Any other failure surfaces at once.
+        let mut calls = 0;
+        let out: std::io::Result<()> = retry_lost_cursor_reply(|| {
+            calls += 1;
+            Err(std::io::Error::other("broken pipe"))
+        });
+        assert!(out.is_err());
+        assert_eq!(calls, 1);
+    }
 
     #[test]
     fn the_hook_runs_for_the_ui_thread_only() {
