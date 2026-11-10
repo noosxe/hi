@@ -985,3 +985,95 @@ fn a_panicking_tool_leaves_the_tui_alive_raw_and_clean() {
     });
     assert!(tui.exits_cleanly(Duration::from_secs(20)));
 }
+
+/// `kill -0`: is the pid still there? (The cli crate has no libc.)
+fn pid_exists(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn wait_for_pid_file(file: &std::path::Path) -> String {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
+        if let Ok(s) = std::fs::read_to_string(file)
+            && !s.trim().is_empty()
+            && s.trim().chars().all(|c| c.is_ascii_digit())
+        {
+            return s.trim().to_string();
+        }
+        std::thread::sleep(POLL);
+    }
+    panic!("pid file {} never appeared", file.display());
+}
+
+#[test]
+fn ctrl_c_mid_turn_leaves_no_task_or_bash_process_behind() {
+    // #175 end to end: round 1 starts a `task_run` process, round 2 is
+    // a foreground `bash` call that blocks the turn. Ctrl-C quits
+    // mid-turn while the agent thread still holds the registry — both
+    // processes must be gone once `hi` has exited.
+    let dir = std::env::temp_dir().join(format!("hi-pty-orphans-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let (task_pid_file, bash_pid_file) = (dir.join("task.pid"), dir.join("bash.pid"));
+    let write_and_sleep =
+        |f: &std::path::Path| format!("echo $$ > {}; exec sleep 120", f.display());
+    let task_args = serde_json::json!({ "command": write_and_sleep(&task_pid_file) }).to_string();
+    let bash_args = serde_json::json!({ "command": write_and_sleep(&bash_pid_file) }).to_string();
+    let (url, _requests) = fake_sse_sequence(vec![
+        tool_call_body("c1", "task_run", &task_args),
+        tool_call_body("c2", "bash", &bash_args),
+    ]);
+    let models = format!(
+        "{{\"providers\":{{\"fake\":{{\"baseUrl\":\"{url}\",\"apiKey\":\"k\",\"models\":[{{\"id\":\"fake-mini\"}}]}}}}}}"
+    );
+    let mut tui = Tui::spawn_configured(
+        &[
+            "--provider",
+            "fake",
+            "--model",
+            "fake-mini",
+            "--tools",
+            "all",
+        ],
+        &models,
+    );
+    tui.sees("\u{2500}");
+    tui.type_keys("go");
+    tui.write("\r");
+    let task_pid = wait_for_pid_file(&task_pid_file);
+    let bash_pid = wait_for_pid_file(&bash_pid_file);
+    assert!(pid_exists(&task_pid) && pid_exists(&bash_pid));
+
+    tui.write("\x03");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = tui.child.lock().unwrap().try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "hi never exited on Ctrl-C");
+        std::thread::sleep(POLL);
+    };
+    // Poll: the sweep finished before exit, but the OS may take a beat
+    // to reap the killed processes.
+    let gone_by = Instant::now() + Duration::from_secs(10);
+    while (pid_exists(&task_pid) || pid_exists(&bash_pid)) && Instant::now() < gone_by {
+        std::thread::sleep(POLL);
+    }
+    let (task_left, bash_left) = (pid_exists(&task_pid), pid_exists(&bash_pid));
+    for (left, pid) in [(task_left, &task_pid), (bash_left, &bash_pid)] {
+        if left {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", pid])
+                .status();
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(status.success(), "Ctrl-C exit: {status:?}");
+    assert!(!task_left, "task_run process {task_pid} outlived hi");
+    assert!(!bash_left, "bash process {bash_pid} outlived hi");
+}

@@ -2,8 +2,18 @@
 //! tool (#30): children spawn into a fresh group so one `killpg`
 //! takes the whole tree — TERM, a grace beat, KILL. Windows gets
 //! Job Objects in #31; until then only the group helpers are gated.
+//!
+//! Exit (#175): [`BashGroups`] is the registry of live foreground
+//! `bash` groups. The tool registers each group for the child's
+//! lifetime (RAII); [`BashGroups::kill_all`] takes them all down at
+//! exit, so a `bash` call abandoned mid-turn (Ctrl-C, or Esc followed
+//! by a quit) does not outlive `hi`. Esc itself does not kill the
+//! call — the guarantee covers exits only. [`terminate_groups`] is the
+//! TERM, grace, KILL sweep shared with `TaskManager::shutdown`.
 
+use std::collections::HashSet;
 use std::process::{Child, Command};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const POLL: Duration = Duration::from_millis(50);
@@ -77,6 +87,84 @@ pub(crate) fn stop_tree(child: &mut Child) {
     }
     kill_group(pid, libc::SIGKILL);
     let _ = child.wait();
+}
+
+/// How long an exit sweep waits for TERM to empty the groups before
+/// KILL.
+pub(crate) const EXIT_GRACE: Duration = Duration::from_millis(250);
+
+/// TERM every group, wait up to `grace` for them to empty, KILL what
+/// remains. No groups, no signals and no wait.
+pub(crate) fn terminate_groups(pids: &[u32], grace: Duration) {
+    if pids.is_empty() {
+        return;
+    }
+    for pid in pids {
+        kill_group(*pid, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline && pids.iter().any(|pid| group_alive(*pid)) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    for pid in pids {
+        kill_group(*pid, libc::SIGKILL);
+    }
+}
+
+/// The live foreground `bash` process groups (#175). Cloneable; the
+/// process-wide instance is [`BashGroups::global`], tests build their
+/// own with [`BashGroups::new`] and must never `kill_all` the global
+/// one (parallel tests would lose their children).
+#[derive(Clone, Default)]
+pub struct BashGroups(Arc<Mutex<HashSet<u32>>>);
+
+/// Unregisters its group on drop — every return path of the tool.
+pub(crate) struct GroupGuard {
+    groups: BashGroups,
+    pid: u32,
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        self.groups.0.lock().unwrap().remove(&self.pid);
+    }
+}
+
+impl BashGroups {
+    /// A fresh, empty registry (tests, injection).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The process-wide registry every `BashTool::new` uses.
+    pub fn global() -> Self {
+        static GLOBAL: OnceLock<BashGroups> = OnceLock::new();
+        GLOBAL.get_or_init(BashGroups::new).clone()
+    }
+
+    pub(crate) fn register(&self, pid: u32) -> GroupGuard {
+        self.0.lock().unwrap().insert(pid);
+        GroupGuard {
+            groups: self.clone(),
+            pid,
+        }
+    }
+
+    /// How many groups are registered right now.
+    pub fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// TERM every registered group, wait a grace beat, KILL what
+    /// remains. Idempotent; nothing registered means no wait.
+    pub fn kill_all(&self) {
+        let pids: Vec<u32> = self.0.lock().unwrap().iter().copied().collect();
+        terminate_groups(&pids, EXIT_GRACE);
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -154,6 +242,47 @@ mod tests {
             unsafe { libc::kill(pid, libc::SIGKILL) };
         }
         assert!(dead, "TERM-immune member {pid} survived stop_tree");
+    }
+
+    fn pid_alive(pid: i32) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[test]
+    fn kill_all_kills_a_registered_running_group() {
+        let dir = temp("killall");
+        let pidf = dir.join("pid");
+        let mut child = spawn(&format!("echo $$ > {}; sleep 60", pidf.display()));
+        let pid = wait_for_pid(&pidf);
+        let groups = BashGroups::new();
+        let guard = groups.register(child.id());
+        assert_eq!(groups.len(), 1);
+        groups.kill_all();
+        let _ = child.wait();
+        let dead = gone(pid);
+        if !dead {
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(dead, "registered group survived kill_all");
+        // Idempotent, and no wait when nothing is left registered.
+        drop(guard);
+        assert!(groups.is_empty());
+        let started = Instant::now();
+        groups.kill_all();
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn kill_all_ignores_unregistered_groups() {
+        let dir = temp("unreg");
+        let pidf = dir.join("pid");
+        let mut child = spawn(&format!("echo $$ > {}; sleep 60", pidf.display()));
+        let pid = wait_for_pid(&pidf);
+        BashGroups::new().kill_all();
+        let alive = pid_alive(pid);
+        unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+        let _ = child.wait();
+        assert!(alive, "an unregistered group was killed");
     }
 
     #[test]

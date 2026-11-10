@@ -895,6 +895,29 @@ it: `stop_tree` polls out its 2s deadline, KILLs, and returns (the leader
 is already reaped, `wait` returns the cached status), and `monitor` then
 reports `Killed` / `TimedOut`. No `/proc` probing; deliberately not handled.
 
+**AD-0019 addendum (2026-11-10): #175, exit is an explicit sweep, not a `Drop` side effect.**
+The "clean `/exit` orphans nothing" promise above held only for an idle
+quit. `Drop` kills only on the last `TaskManager` handle, and a mid-turn
+quit leaves a clone alive in the in-flight turn's worker thread (the tool
+registry `Arc`), so Ctrl-C during a turn left `task_run` processes
+running. A foreground `bash` call abandoned by Esc was never tracked at
+all. Now: `TaskManager::shutdown` kills every running group (TERM, a
+250ms grace polling `group_alive`, KILL) whatever the handle count, is
+idempotent (a swept-id set; nothing to sweep means no signal and no
+sleep), and `Drop` reuses it under the old last-handle condition.
+`process::BashGroups` is a registry of live foreground `bash` groups: the
+tool registers each child's group for its lifetime (RAII, so every return
+path unregisters), `BashTool::new` uses the process-wide instance and
+`with_groups` injects one (tests never call `kill_all` on the global
+registry, since parallel tests would lose their children). `exit::shutdown`
+does both sweeps and `exit::ExitGuard` runs it on drop; the CLI holds one
+in `launch` (TUI) and `print_mode` (headless), so `/exit`, Ctrl-C idle or
+mid-turn, quitting after Esc, the end of the TUI loop, `--print` /
+`--mode json` and error exits all converge on it after the terminal was
+restored. Not covered: Esc alone does not kill the abandoned `bash` call
+(it runs until it ends or `hi` exits), members that left the group
+(`setsid`), Windows (#31), and a crash or SIGKILL of `hi` itself.
+
 ---
 
 ## AD-0020 — the composer breathes: one margin row above the input (2026-10-16)
