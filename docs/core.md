@@ -322,7 +322,7 @@ persisted, appended and flushed at turn end; the reader tolerates a
 torn final line and rejects malformation anywhere else. `Session::resume`
 repairs the tail before returning the append handle (#178, private
 `repair_tail`, which reuses `parse_line`): an unparsable last non-empty
-line is cut off with `set_len` (blank lines after it go too), else a
+line (or one that is not valid UTF-8, e.g. a multibyte character cut in half) is cut off with `set_len` (blank lines after it go too), else a
 missing final `\n` is appended, else the file is not touched. A file
 whose only line is a torn header still fails in `read_header`, unrepaired.
 Every other append path goes through a resumed or freshly materialized
