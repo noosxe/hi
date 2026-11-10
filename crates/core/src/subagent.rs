@@ -134,7 +134,11 @@ pub struct SubagentResult {
 /// Cloneable; every clone sees the same stamped identity.
 #[derive(Clone)]
 pub struct SubagentRunner {
-    config: Arc<ModelsConfig>,
+    /// The models config overrides and entries resolve against. Behind
+    /// the lock so `/reload` can restamp it live (#186); a run takes an
+    /// `Arc` snapshot when it starts, so a restamp mid-run never
+    /// changes that run halfway.
+    config: Arc<Mutex<Arc<ModelsConfig>>>,
     cwd: Arc<PathBuf>,
     telemetry: bool,
     /// Consent gate for the subagent's own tool loop. `None` today —
@@ -161,7 +165,7 @@ impl SubagentRunner {
         transcripts: Option<PathBuf>,
     ) -> Self {
         Self {
-            config: Arc::new(config),
+            config: Arc::new(Mutex::new(Arc::new(config))),
             cwd: Arc::new(cwd),
             telemetry,
             gate: None,
@@ -187,6 +191,19 @@ impl SubagentRunner {
     /// `/resume`). The transcript header's lineage.
     pub fn stamp_session(&self, parent: Option<String>) {
         *self.parent.lock().unwrap() = parent;
+    }
+
+    /// Replace the config subagent runs resolve against — `/reload`
+    /// restamps it whenever it adopts a re-read `models.json`, so the
+    /// runner's config always equals the app's (#186). Every clone sees
+    /// it; runs already in flight keep the snapshot they started with.
+    pub fn stamp_config(&self, config: ModelsConfig) {
+        *self.config.lock().unwrap() = Arc::new(config);
+    }
+
+    /// The current config snapshot, for introspection and tests.
+    pub fn config(&self) -> Arc<ModelsConfig> {
+        Arc::clone(&self.config.lock().unwrap())
     }
 
     /// Record the transcripts root — `/reload` restamps it when the
@@ -234,6 +251,9 @@ impl SubagentRunner {
         spec: &SubagentSpec,
         alive: &dyn Fn() -> bool,
     ) -> Result<SubagentResult, String> {
+        // One snapshot for the whole run: a `/reload` restamp landing
+        // mid-run must not change it halfway.
+        let config = self.config();
         // Identity: inherit the stamp, or resolve the override. The
         // parent's provider Arc is never reused — the subagent gets a
         // provider wired to *its* registry, not the parent's toolset.
@@ -243,7 +263,7 @@ impl SubagentRunner {
             })?,
             _ => {
                 let selected = selection::resolve(
-                    &self.config,
+                    &config,
                     spec.provider.as_deref(),
                     spec.model.as_deref(),
                     None,
@@ -251,8 +271,7 @@ impl SubagentRunner {
                 (selected.provider, selected.model)
             }
         };
-        let entry = self
-            .config
+        let entry = config
             .providers
             .get(&provider_name)
             .ok_or_else(|| format!("provider `{provider_name}` is not in the config"))?;
@@ -667,6 +686,33 @@ mod tests {
             })
             .unwrap();
         assert_eq!(result.text, "override reply");
+    }
+
+    #[test]
+    fn stamp_config_swaps_the_config_for_every_clone() {
+        // #186: /reload adds a provider; the runner (and clones made
+        // before the stamp) must resolve against the new config.
+        let dir = std::env::temp_dir().join(format!("hi-sub-stampcfg-{}", std::process::id()));
+        let api = FakeApi::start(reply("added reply"));
+        let runner = runner_with("http://unused.invalid/v1", &dir, None);
+        runner.stamp("prov", "m");
+        let earlier_clone = runner.clone();
+        let spec = SubagentSpec {
+            prompt: "go".into(),
+            provider: Some("added".into()),
+            model: Some("m".into()),
+            thinking: None,
+            tools: None,
+            max_tool_rounds: None,
+        };
+        assert!(runner.run(&spec).is_err(), "unknown before the stamp");
+        let raw = format!(
+            r#"{{"providers":{{"prov":{{"baseUrl":"http://unused.invalid/v1"}},"added":{{"baseUrl":"{}"}}}}}}"#,
+            api.base_url
+        );
+        runner.stamp_config(serde_json::from_str(&raw).unwrap());
+        assert!(earlier_clone.config().providers.contains_key("added"));
+        assert_eq!(earlier_clone.run(&spec).unwrap().text, "added reply");
     }
 
     #[test]

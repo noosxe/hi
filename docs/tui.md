@@ -155,7 +155,7 @@ optionally named (`/new scratch`) — and walks the same reset resume
 walks, so transcript, bill, and ring all begin again while the model
 and thinking level carry (#98). `/reload` (AD-0054) re-reads
 `models.json` and `settings.json` and applies what they say to the
-live session, with per-file independence: a file that fails to read
+live session (the subagent runner's config included, #186), with per-file independence: a file that fails to read
 or parse keeps its old state and the one system note says so. Settings
 follow "files win when they speak" — `thinking`, `taskTurns`,
 `images`, `maxToolRounds`, `subagentTranscripts`, and `telemetry`

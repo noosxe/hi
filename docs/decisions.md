@@ -1863,3 +1863,14 @@ vanished model keeps the old provider running until the next
 `/model`. The catalog's discovery re-runs synchronously with the
 same 10s-per-provider bound as startup; if that ever hurts, the
 escape hatch is incremental discovery, not a semantics change.
+
+**Addendum (2026-11-10, #186): `/reload` restamps the subagent
+runner's config.** The runner held the startup `ModelsConfig` for good,
+so after `/reload` a subagent override still resolved providers,
+`baseUrl`s and keys against the old file (a provider added since failed
+with "not in the config"). The runner's config is now restampable like
+its other slots (`SubagentRunner::stamp_config`, every clone sees it;
+a run takes an `Arc` snapshot when it starts). `command_reload` stamps
+it exactly where `self.config` is replaced — every successfully read
+`models.json`, including the "current model is gone" path — and not
+when the file is broken and the old config stays.
