@@ -592,6 +592,9 @@ impl App {
                     0
                 });
             } else {
+                // Quitting mid-turn keeps the partial reply exactly as
+                // Esc does (#232): what was on screen is what resume shows.
+                self.drop_turn_keeping_partial();
                 self.quit = true;
             }
             return;
@@ -911,16 +914,7 @@ impl App {
                 // next send fails and it returns — the same
                 // drop-is-cancellation mechanism as quitting.
                 // pi's behavior: partial output stays in the transcript.
-                if let Some(turn) = self.turn.take()
-                    && !turn.blocks.is_empty()
-                {
-                    self.messages.push(Message::Assistant(turn.blocks));
-                    // Persist NOW (#181): key handling runs before the
-                    // frame pump captures `added_from`, so this push is
-                    // outside every later append range — without this
-                    // the partial shows on screen but is gone on resume.
-                    self.persist_last();
-                }
+                self.drop_turn_keeping_partial();
                 // A cancelled turn's arm must not outlive it and fire
                 // after the next unrelated human turn.
                 self.auto_armed = false;
@@ -1716,7 +1710,11 @@ impl App {
     /// take none ignore it.
     pub(crate) fn run_command(&mut self, name: &'static str, args: &str) {
         match name {
-            "exit" | "quit" => self.quit = true,
+            "exit" | "quit" => {
+                // Same as the Ctrl-C quit: a streaming reply is kept (#232).
+                self.drop_turn_keeping_partial();
+                self.quit = true;
+            }
             "model" => self.open_picker(),
             "resume" => self.open_session_picker(),
             "settings" => self.open_settings_board(),
@@ -2710,6 +2708,22 @@ keeping the old provider until you /model"
         }
         // Persist everything finalized this frame.
         self.persist_new(added_from);
+    }
+
+    /// Drop the in-flight turn (dropping its `Receiver` cancels the
+    /// provider thread) and keep what it had streamed: the partial reply
+    /// becomes an `Assistant` message, persisted at once (#181) — key
+    /// handling runs before the frame pump captures `added_from`, so
+    /// without this the partial would show on screen but be gone on
+    /// resume. No-op when no turn is live; nothing is written before the
+    /// first token. Shared by Esc and the Ctrl-C quit (#232).
+    fn drop_turn_keeping_partial(&mut self) {
+        if let Some(turn) = self.turn.take()
+            && !turn.blocks.is_empty()
+        {
+            self.messages.push(Message::Assistant(turn.blocks));
+            self.persist_last();
+        }
     }
 
     /// Append the message just pushed by an event handler. Event
@@ -4784,6 +4798,40 @@ mod tests {
         assert!(matches!(&disk[0], Message::User(u) if u == "hello"));
         assert_eq!(assistant_text(&disk[1]), "partial answer");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn ctrl_c_quit_mid_turn_persists_the_partial_like_esc() {
+        // #232: the quit used to drop the in-flight turn with the
+        // process, so `--continue` showed the user message and no reply.
+        let (mut app, root, tx) = esc_app("quit");
+        tx.send(Event::Token("partial answer".into())).unwrap();
+        app.pump();
+        app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.quit);
+        let path = app.session.as_ref().unwrap().path().to_path_buf();
+        let disk = hi_core::session::load(&path).unwrap().messages;
+        assert_eq!(disk.len(), 2, "{disk:?}");
+        assert!(matches!(&disk[0], Message::User(u) if u == "hello"));
+        assert_eq!(assistant_text(&disk[1]), "partial answer");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_exit_command_mid_turn_persists_the_partial_too() {
+        // #232: `/exit` and `/quit` are the other quit path.
+        for name in ["exit", "quit"] {
+            let (mut app, root, tx) = esc_app(name);
+            tx.send(Event::Token("partial answer".into())).unwrap();
+            app.pump();
+            app.run_command(name, "");
+            assert!(app.quit);
+            let path = app.session.as_ref().unwrap().path().to_path_buf();
+            let disk = hi_core::session::load(&path).unwrap().messages;
+            assert_eq!(disk.len(), 2, "{name}: {disk:?}");
+            assert_eq!(assistant_text(&disk[1]), "partial answer");
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     #[test]

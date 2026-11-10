@@ -92,7 +92,8 @@ Behaviors (each pinned by a test in `app.rs`):
 - Enter mid-turn queues; Esc mid-turn cancels **and** restores the queue
   into the input box. Esc keeps the partial reply in the transcript *and*
   persists it (`persist_last`, #181), so a resume shows it too; an Esc before
-  any token writes nothing. A tool call interrupted by Esc settles in the
+  any token writes nothing. A quit mid-turn (Ctrl-C or `/exit`/`/quit`) does the same
+  (`drop_turn_keeping_partial`, #232). A tool call interrupted by Esc settles in the
   display as an error block rather than staying "running" (`derive_blocks`
   and `Scroll::sync` take whether a turn is live, #221); mid-turn notes
   never settle a running call.
