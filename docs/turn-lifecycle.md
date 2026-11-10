@@ -91,7 +91,8 @@ into the scrollback above the viewport exactly once
   thread, so `hi-tui` wraps it after init (`guard_panic_hook`) and lets it
   run only for UI-thread panics. Worker-thread panics (tools, providers,
   task monitors) neither restore nor print while the TUI runs; they surface
-  as results/errors. Headless keeps the default hook (stderr).
+  as results/errors (a task monitor panic: the task turns `Failed` and its
+  completion notice goes out, #219). Headless keeps the default hook (stderr).
 - Cancellation is unchanged: dropping the `Receiver` fails the loop's next
   send and everything unwinds.
 - Subagents (#4) ride this contract one level down: a subagent is an

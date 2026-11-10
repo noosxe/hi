@@ -331,7 +331,8 @@ impl Ring {
     }
 
     fn push(&self, bytes: &[u8]) {
-        let mut ring = self.0.lock().unwrap();
+        // Poison-tolerant: `guarded` pushes from a panic handler.
+        let mut ring = self.0.lock().unwrap_or_else(|e| e.into_inner());
         ring.extend(bytes.iter().copied());
         let overflow = ring.len().saturating_sub(RING_BYTES);
         drop(ring.drain(..overflow));
@@ -340,7 +341,7 @@ impl Ring {
     /// The last `max_bytes` bytes, lossily decoded (a split multibyte
     /// char at the seam becomes a replacement char — display-only).
     fn tail(&self, max_bytes: usize) -> String {
-        let ring = self.0.lock().unwrap();
+        let ring = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let start = ring.len().saturating_sub(max_bytes);
         let bytes: Vec<u8> = ring.iter().skip(start).copied().collect();
         String::from_utf8_lossy(&bytes).into_owned()
@@ -519,20 +520,36 @@ impl TaskManager {
 
         let tasks = Arc::clone(&self.0.tasks);
         let tx = Arc::clone(&self.0.tx);
+        let pid = child.id();
+        let sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
         std::thread::Builder::new()
             .name(format!("hi-task-{id}"))
             .spawn(move || {
-                monitor(
+                let name = spec.name.clone();
+                let (tasks_for_guard, tx_for_guard) = (Arc::clone(&tasks), Arc::clone(&tx));
+                let sent_for_guard = Arc::clone(&sent);
+                guarded(
                     id,
-                    spec.name,
-                    child,
-                    stdout,
-                    ring,
-                    log,
-                    cancel,
-                    spec.timeout,
-                    tasks,
-                    tx,
+                    name,
+                    pid,
+                    &tasks_for_guard,
+                    &tx_for_guard,
+                    &sent_for_guard,
+                    move || {
+                        monitor(
+                            id,
+                            spec.name,
+                            child,
+                            stdout,
+                            ring,
+                            log,
+                            cancel,
+                            spec.timeout,
+                            tasks,
+                            tx,
+                            sent,
+                        );
+                    },
                 );
             })
             .map_err(|e| format!("cannot start task worker: {e}"))?;
@@ -653,6 +670,65 @@ fn bash_command(spec: &ProcessSpec) -> Command {
     cmd
 }
 
+/// Run a task's `monitor` so that a panic in it cannot leave the task
+/// `Running` forever with no completion (#219). Only the monitor moves
+/// a task out of `Running`, and under the TUI the panic message is
+/// silenced off the UI thread, so nothing else would ever say it
+/// died. On a panic:
+///
+/// - a task still `Running` has its group killed (never before the
+///   check: a finished task's leader is reaped and its pgid may be
+///   recycled), becomes `Failed` (exit code -1, as for a signal
+///   death) and gets a line in its output saying why;
+/// - the one completion notice goes out unless the monitor already
+///   sent it (`sent`, set right after its send) — including when the
+///   panic came after the state flipped but before the send.
+///
+/// Everything here tolerates poisoned locks: it runs in a panic's wake.
+fn guarded(
+    id: u64,
+    name: String,
+    pid: u32,
+    tasks: &Arc<Mutex<HashMap<u64, TaskEntry>>>,
+    tx: &Arc<Mutex<Sender<TaskCompletion>>>,
+    sent: &std::sync::atomic::AtomicBool,
+    body: impl FnOnce(),
+) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_ok() {
+        return;
+    }
+    let (state, wall) = {
+        let mut tasks = tasks.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(entry) = tasks.get_mut(&id) else {
+            return;
+        };
+        if !entry.state.finished() {
+            kill_group(pid, libc::SIGKILL);
+            let wall = entry.started.elapsed();
+            entry.state = TaskState::Failed { exit_code: -1 };
+            entry.finished_wall = Some(wall);
+            entry.ring.push(
+                b"\n[hi: the task monitor panicked; the task was killed and marked failed]\n",
+            );
+        }
+        let wall = entry
+            .finished_wall
+            .unwrap_or_else(|| entry.started.elapsed());
+        (entry.state, wall)
+    };
+    if !sent.swap(true, Ordering::SeqCst) {
+        let _ = tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .send(TaskCompletion {
+                id,
+                name,
+                state,
+                wall,
+            });
+    }
+}
+
 /// The worker: own the child, drain its output, own every state
 /// transition, send exactly one completion.
 #[allow(clippy::too_many_arguments)]
@@ -667,6 +743,7 @@ fn monitor(
     timeout: Option<Duration>,
     tasks: Arc<Mutex<HashMap<u64, TaskEntry>>>,
     tx: Arc<Mutex<Sender<TaskCompletion>>>,
+    sent: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let started = Instant::now();
     // Unrepresentable timeout = no deadline (#172); `+` would panic the
@@ -741,6 +818,9 @@ fn monitor(
         state,
         wall,
     });
+    // Right after the send: `guarded` sends the notice itself when a
+    // panic got in between (#219).
+    sent.store(true, Ordering::SeqCst);
 }
 
 /// Map an exit status to its state. Signal deaths have no code; they
@@ -806,6 +886,119 @@ mod tests {
     /// True when nothing in the process group `pid` is alive.
     fn group_dead(pid: u32) -> bool {
         unsafe { libc::kill(-(pid as i32), 0) != 0 }
+    }
+
+    #[test]
+    fn a_monitor_panic_after_the_state_flip_still_sends_one_notice_and_kills_nothing() {
+        // #219 review: the monitor set the state, then panicked before
+        // its send. The notice must still go out exactly once, and the
+        // (reaped, possibly recycled) group must not be signalled.
+        let (m, _dir) = manager();
+        let mut child = bash_command(&ProcessSpec {
+            command: "sleep 30".into(),
+            cwd: std::env::temp_dir(),
+            env: Default::default(),
+        })
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+        let pid = child.id();
+        let ring = Ring::new();
+        m.0.tasks.lock().unwrap().insert(
+            7,
+            TaskEntry {
+                name: "done".into(),
+                command: "sleep 30".into(),
+                state: TaskState::Succeeded { exit_code: 0 },
+                pid,
+                started: Instant::now(),
+                finished_wall: Some(Duration::from_millis(5)),
+                ring: ring.clone(),
+                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        // A poisoned ring must not turn the handler into a second panic.
+        let poison = ring.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poison.0.lock().unwrap();
+            panic!("poison the ring");
+        })
+        .join();
+        let sent = std::sync::atomic::AtomicBool::new(false);
+        guarded(7, "done".into(), pid, &m.0.tasks, &m.0.tx, &sent, || {
+            panic!("after the flip")
+        });
+        let c = m.try_recv_completion().expect("the notice still goes out");
+        assert_eq!(
+            (c.id, c.state, c.wall),
+            (
+                7,
+                TaskState::Succeeded { exit_code: 0 },
+                Duration::from_millis(5)
+            )
+        );
+        assert!(m.try_recv_completion().is_none(), "exactly one");
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "the group was not killed"
+        );
+        // And once the monitor did send, a later panic adds nothing.
+        let sent = std::sync::atomic::AtomicBool::new(true);
+        guarded(7, "done".into(), pid, &m.0.tasks, &m.0.tx, &sent, || {
+            panic!("after the send")
+        });
+        assert!(m.try_recv_completion().is_none());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn a_panicking_monitor_fails_the_task_and_still_notifies() {
+        // #219: the monitor is the only thing that moves a task out of
+        // `Running`; a panic in it left the task running forever.
+        let (m, _dir) = manager();
+        // A guard-only row: its "monitor" panics straight away.
+        let mut child = bash_command(&ProcessSpec {
+            command: "sleep 30".into(),
+            cwd: std::env::temp_dir(),
+            env: Default::default(),
+        })
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+        let fake_pid = child.id();
+        let ring = Ring::new();
+        m.0.tasks.lock().unwrap().insert(
+            99,
+            TaskEntry {
+                name: "doomed".into(),
+                command: "sleep 30".into(),
+                state: TaskState::Running,
+                pid: fake_pid,
+                started: Instant::now(),
+                finished_wall: None,
+                ring: ring.clone(),
+                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+        );
+        guarded(
+            99,
+            "doomed".into(),
+            fake_pid,
+            &m.0.tasks,
+            &m.0.tx,
+            &std::sync::atomic::AtomicBool::new(false),
+            || panic!("monitor boom"),
+        );
+        assert_eq!(state_of(&m, 99), TaskState::Failed { exit_code: -1 });
+        let c = m.try_recv_completion().expect("one completion notice");
+        assert_eq!((c.id, c.state), (99, TaskState::Failed { exit_code: -1 }));
+        assert!(m.try_recv_completion().is_none());
+        assert!(ring.tail(4096).contains("monitor panicked"));
+        // KILLed: the leader reaps, and the group is gone.
+        let status = child.wait().unwrap();
+        assert!(!status.success(), "the child was killed");
+        assert!(!crate::process::group_alive(fake_pid));
     }
 
     #[test]
