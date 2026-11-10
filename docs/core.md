@@ -353,6 +353,10 @@ prune (pi never deletes sessions either).
   `Session::append_usage(&Usage)` — the round's bill, same contract.
   Replay merges the records (`LoadedSession.usage`) and takes the last
   record's prompt size as `usage_last_prompt` — the context-share fact.
+  Headless (`run_with`) collects every round's `Event::Usage` and appends one
+  record per round, in order, after the turn's messages — the same shape
+  the TUI's `persist_usage` writes, so a multi-round turn sums correctly
+  (#187); a failing turn still records the rounds already reported.
   `Session::rename(&str)` — the `name` record (#89): names are
   **appended, never rewritten**; replay takes the last, an empty record
   clears, and the effective name lands on `LoadedSession.header.name`
