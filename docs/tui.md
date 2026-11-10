@@ -450,7 +450,13 @@ separates blocks inside one message, as pi does.
 
 Inline content is collected as styled segments and wrapped by
 `wrap_segments` — the styled sibling of `wrap.rs`, carrying styles across
-line breaks. User and assistant messages render as markdown (ruling ② of
+line breaks. One walker (`inline_event`) handles every inline event or
+container; `inline` runs it until a stop tag (paragraphs, headings, table
+cells) and `inline_run` runs it over a maximal run of inline events with no
+wrapping tag, stopping at the enclosing `End` or a block start. Tight list
+items (no `Paragraph`, inline events directly inside `Item`) and bare inline
+content in `blocks` use `inline_run`, so they get the same code, bold,
+italic, strikethrough, link-suffix and image handling as paragraphs. User and assistant messages render as markdown (ruling ② of
 #33); system and error lines stay plain text (`System` dim, `Error` in the
 error color — pi renders diagnostics as colored text, no labels).
 

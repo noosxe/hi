@@ -319,9 +319,9 @@ fn blocks(
                     rows.push(Line::from(Span::raw(line.to_string())));
                 }
             }
-            Event::Text(_) | Event::Code(_) => {
-                // Bare text outside a paragraph (loose list remnants).
-                let segs = inline_bare(events, i, base, theme);
+            ref event if is_inline_event(event) => {
+                // Bare inline content outside a paragraph.
+                let segs = inline_run(events, i, base, theme);
                 rows.extend(wrap_segments(&segs, width).into_iter().map(segs_into_line));
             }
             // Space, bare End tags (never our stop — checked above), and
@@ -444,8 +444,9 @@ fn list(
                                 emit(rows, row);
                             }
                         }
-                        Event::Text(_) => {
-                            let segs = inline_bare(events, i, base, theme);
+                        // Tight item: inline events sit directly in `Item`.
+                        ref event if is_inline_event(event) => {
+                            let segs = inline_run(events, i, base, theme);
                             for line in wrap_segments(&segs, item_width) {
                                 emit(rows, segs_into_line(line));
                             }
@@ -464,111 +465,126 @@ fn list(
 fn inline(events: &[Event], i: &mut usize, stop: TagEnd, base: Style, theme: &Theme) -> Vec<Seg> {
     let mut segs: Vec<Seg> = Vec::new();
     while *i < events.len() {
-        match events[*i].clone() {
-            Event::End(tag) if tag == stop => {
-                *i += 1;
-                return segs;
-            }
-            Event::Text(text) => {
-                *i += 1;
-                segs.push(Seg::new(text.to_string(), base));
-            }
-            Event::Code(code) => {
-                *i += 1;
-                segs.push(Seg::new(code.to_string(), theme.fg(Fg::Code)));
-            }
-            Event::SoftBreak => {
-                *i += 1;
-                segs.push(Seg::new(" ", base));
-            }
-            Event::HardBreak => {
-                *i += 1;
-                segs.push(Seg::new("\n", base));
-            }
-            Event::Html(html) | Event::InlineHtml(html) => {
-                *i += 1;
-                segs.push(Seg::new(html.to_string(), base));
-            }
-            Event::Start(Tag::Strong) => {
-                *i += 1;
-                segs.extend(inline(events, i, TagEnd::Strong, base.bold(), theme));
-            }
-            Event::Start(Tag::Emphasis) => {
-                *i += 1;
-                segs.extend(inline(events, i, TagEnd::Emphasis, base.italic(), theme));
-            }
-            Event::Start(Tag::Strikethrough) => {
-                *i += 1;
-                segs.extend(inline(
-                    events,
-                    i,
-                    TagEnd::Strikethrough,
-                    base.crossed_out(),
-                    theme,
-                ));
-            }
-            Event::Start(Tag::Link { dest_url, .. }) => {
-                *i += 1;
-                let link_base = base.patch(theme.fg(Fg::Link)).underlined();
-                let inner = inline(events, i, TagEnd::Link, link_base, theme);
-                // No OSC 8: pi's fallback prints the URL when the visible
-                // text differs from it (mailto: prefixes don't count).
-                let text: String = inner.iter().map(|s| s.text.as_str()).collect();
-                let href = dest_url.strip_prefix("mailto:").unwrap_or(&dest_url);
-                if text != href {
-                    segs.extend(inner);
-                    segs.push(Seg::new(format!(" ({href})"), theme.fg(Fg::LinkUrl)));
-                } else {
-                    segs.extend(inner);
-                }
-            }
-            Event::Start(Tag::Image { .. }) => {
-                // pi drops images in inline rendering; so does hi (alt text
-                // and all — a recorded divergence).
-                let mut depth = 0usize;
-                while *i < events.len() {
-                    match &events[*i] {
-                        Event::Start(Tag::Image { .. }) => depth += 1,
-                        Event::End(TagEnd::Image) => {
-                            depth -= 1;
-                            if depth == 0 {
-                                *i += 1;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                    *i += 1;
-                }
-            }
-            _ => *i += 1,
+        if matches!(&events[*i], Event::End(tag) if *tag == stop) {
+            *i += 1;
+            return segs;
         }
+        inline_event(events, i, base, theme, &mut segs);
     }
     segs
 }
 
-/// Consume bare text/code events (used outside paragraphs) as inline
-/// content.
-fn inline_bare(events: &[Event], i: &mut usize, base: Style, theme: &Theme) -> Vec<Seg> {
+/// True for events that belong to a run of inline content: text-like
+/// events and the start of an inline container.
+fn is_inline_event(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::Text(_)
+            | Event::Code(_)
+            | Event::SoftBreak
+            | Event::HardBreak
+            | Event::Html(_)
+            | Event::InlineHtml(_)
+            | Event::Start(
+                Tag::Strong
+                    | Tag::Emphasis
+                    | Tag::Strikethrough
+                    | Tag::Link { .. }
+                    | Tag::Image { .. }
+            )
+    )
+}
+
+/// Inline content with no wrapping tag (a tight list item, bare text in a
+/// block context): a maximal run of inline events, stopping — without
+/// consuming — at the first event that is not inline (the enclosing End
+/// tag or a block start).
+fn inline_run(events: &[Event], i: &mut usize, base: Style, theme: &Theme) -> Vec<Seg> {
     let mut segs = Vec::new();
-    while *i < events.len() {
-        match &events[*i] {
-            Event::Text(text) => {
-                segs.push(Seg::new(text.to_string(), base));
-                *i += 1;
-            }
-            Event::Code(code) => {
-                segs.push(Seg::new(code.to_string(), theme.fg(Fg::Code)));
-                *i += 1;
-            }
-            Event::SoftBreak => {
-                segs.push(Seg::new(" ", base));
-                *i += 1;
-            }
-            _ => break,
-        }
+    while *i < events.len() && is_inline_event(&events[*i]) {
+        inline_event(events, i, base, theme, &mut segs);
     }
     segs
+}
+
+/// Consume one inline event (or one whole inline container) into `segs`.
+/// Events that are not inline are stepped over.
+fn inline_event(events: &[Event], i: &mut usize, base: Style, theme: &Theme, segs: &mut Vec<Seg>) {
+    match events[*i].clone() {
+        Event::Text(text) => {
+            *i += 1;
+            segs.push(Seg::new(text.to_string(), base));
+        }
+        Event::Code(code) => {
+            *i += 1;
+            segs.push(Seg::new(code.to_string(), theme.fg(Fg::Code)));
+        }
+        Event::SoftBreak => {
+            *i += 1;
+            segs.push(Seg::new(" ", base));
+        }
+        Event::HardBreak => {
+            *i += 1;
+            segs.push(Seg::new("\n", base));
+        }
+        Event::Html(html) | Event::InlineHtml(html) => {
+            *i += 1;
+            segs.push(Seg::new(html.to_string(), base));
+        }
+        Event::Start(Tag::Strong) => {
+            *i += 1;
+            segs.extend(inline(events, i, TagEnd::Strong, base.bold(), theme));
+        }
+        Event::Start(Tag::Emphasis) => {
+            *i += 1;
+            segs.extend(inline(events, i, TagEnd::Emphasis, base.italic(), theme));
+        }
+        Event::Start(Tag::Strikethrough) => {
+            *i += 1;
+            segs.extend(inline(
+                events,
+                i,
+                TagEnd::Strikethrough,
+                base.crossed_out(),
+                theme,
+            ));
+        }
+        Event::Start(Tag::Link { dest_url, .. }) => {
+            *i += 1;
+            let link_base = base.patch(theme.fg(Fg::Link)).underlined();
+            let inner = inline(events, i, TagEnd::Link, link_base, theme);
+            // No OSC 8: pi's fallback prints the URL when the visible
+            // text differs from it (mailto: prefixes don't count).
+            let text: String = inner.iter().map(|s| s.text.as_str()).collect();
+            let href = dest_url.strip_prefix("mailto:").unwrap_or(&dest_url);
+            if text != href {
+                segs.extend(inner);
+                segs.push(Seg::new(format!(" ({href})"), theme.fg(Fg::LinkUrl)));
+            } else {
+                segs.extend(inner);
+            }
+        }
+        Event::Start(Tag::Image { .. }) => {
+            // pi drops images in inline rendering; so does hi (alt text
+            // and all — a recorded divergence).
+            let mut depth = 0usize;
+            while *i < events.len() {
+                match &events[*i] {
+                    Event::Start(Tag::Image { .. }) => depth += 1,
+                    Event::End(TagEnd::Image) => {
+                        depth -= 1;
+                        if depth == 0 {
+                            *i += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                *i += 1;
+            }
+        }
+        _ => *i += 1,
+    }
 }
 
 /// A table's cells, collected as styled segments.
@@ -934,6 +950,127 @@ mod tests {
     fn nested_lists_indent_four_per_level() {
         let rows = markdown_rows("- a\n    - b", 40, Style::new());
         assert_eq!(plain(&rows), vec!["- a", "    - b"]);
+    }
+
+    /// The span whose text is exactly `text` in row `row`.
+    fn span_of<'a>(rows: &'a [Line<'static>], row: usize, text: &str) -> &'a Span<'static> {
+        rows[row]
+            .spans
+            .iter()
+            .find(|s| s.content == text)
+            .unwrap_or_else(|| panic!("no span {text:?} in {:?}", rows[row]))
+    }
+
+    #[test]
+    fn tight_item_leading_code_is_kept() {
+        let rows = markdown_rows("- `code` rest", 40, Style::new());
+        assert_eq!(plain(&rows), vec!["- code rest"]);
+        assert_eq!(span_of(&rows, 0, "code").style.fg, THEME.fg(Fg::Code).fg);
+    }
+
+    #[test]
+    fn tight_item_bold_stays_on_one_row() {
+        let rows = markdown_rows("- **bold** text", 40, Style::new());
+        assert_eq!(plain(&rows), vec!["- bold text"]);
+        assert!(
+            span_of(&rows, 0, "bold")
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        assert!(
+            !span_of(&rows, 0, "text")
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn tight_item_link_keeps_url_suffix() {
+        let rows = markdown_rows("- see [l](http://x) y", 40, Style::new());
+        assert_eq!(plain(&rows), vec!["- see l (http://x) y"]);
+        let link = span_of(&rows, 0, "l");
+        assert_eq!(link.style.fg, THEME.fg(Fg::Link).fg);
+        assert!(link.style.add_modifier.contains(Modifier::UNDERLINED));
+        assert_eq!(
+            span_of(&rows, 0, "(http://x)").style.fg,
+            THEME.fg(Fg::LinkUrl).fg
+        );
+    }
+
+    #[test]
+    fn tight_item_italic_and_strikethrough() {
+        let rows = markdown_rows("- a *b* ~~c~~ d", 40, Style::new());
+        assert_eq!(plain(&rows), vec!["- a b c d"]);
+        assert!(
+            span_of(&rows, 0, "b")
+                .style
+                .add_modifier
+                .contains(Modifier::ITALIC)
+        );
+        assert!(
+            span_of(&rows, 0, "c")
+                .style
+                .add_modifier
+                .contains(Modifier::CROSSED_OUT)
+        );
+    }
+
+    #[test]
+    fn ordered_and_task_tight_items_keep_formatting() {
+        let rows = markdown_rows("1. `a` **b** c", 40, Style::new());
+        assert_eq!(plain(&rows), vec!["1. a b c"]);
+        assert!(
+            span_of(&rows, 0, "b")
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        let rows = markdown_rows("- [ ] **x** y", 40, Style::new());
+        assert_eq!(plain(&rows), vec!["- [ ] x y"]);
+        assert!(
+            span_of(&rows, 0, "x")
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn tight_item_with_formatting_wraps_under_the_marker() {
+        let rows = markdown_rows("- aaa **bbb** ccc ddd", 10, Style::new());
+        assert_eq!(plain(&rows), vec!["- aaa bbb ", "  ccc ddd"]);
+        assert!(
+            span_of(&rows, 0, "bbb")
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn tight_item_formatted_text_then_nested_list() {
+        let rows = markdown_rows("- **a** b\n  - c", 40, Style::new());
+        assert_eq!(plain(&rows), vec!["- a b", "    - c"]);
+        assert!(
+            span_of(&rows, 0, "a")
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+    }
+
+    #[test]
+    fn tight_item_soft_break_joins_with_a_space() {
+        let rows = markdown_rows("- a\n  **b**", 40, Style::new());
+        assert_eq!(plain(&rows), vec!["- a b"]);
+        assert!(
+            span_of(&rows, 0, "b")
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
     }
 
     #[test]
