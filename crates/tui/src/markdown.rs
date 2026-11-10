@@ -62,7 +62,11 @@ pub fn markdown_rows(text: &str, width: u16, base: Style) -> Vec<Line<'static>> 
 fn markdown_rows_with(text: &str, width: usize, base: Style, theme: &Theme) -> Vec<Line<'static>> {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let events: Vec<Event> = Parser::new_ext(text, options).collect();
+    // Tabs first (#201): a control character has no cell, so indentation
+    // in code blocks and lists would vanish; after this, widths are
+    // plain column counts.
+    let text = crate::wrap::expand_tabs(text);
+    let events: Vec<Event> = Parser::new_ext(&text, options).collect();
     let mut rows = Vec::new();
     let mut i = 0;
     blocks(&events, &mut i, None, base, theme, width, &mut rows);
@@ -169,8 +173,8 @@ pub(crate) fn segs_into_line(segs: Vec<Seg>) -> Line<'static> {
 /// boundaries, and a wide character never straddles a row (it moves to
 /// the next one). Every row holds at least one character, so a width
 /// at or under the indent still terminates; an empty line is one empty
-/// indented row. Characters without a width (tabs) count as 0, the
-/// same convention as `wrap_segments`.
+/// indented row. Tabs never get here: `markdown_rows_with` expands them
+/// to spaces up front (#201).
 fn wrap_code_line(line: &str, width: usize) -> Vec<String> {
     let avail = width.saturating_sub(2).max(1);
     let mut rows = Vec::new();
@@ -864,6 +868,22 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn tab_indentation_survives_in_code_blocks_and_paragraphs() {
+        // #201: the tab has no cell, so the indentation was dropped.
+        let rows = markdown_rows("```\n\tindented\n```\n\npara\twith tab", 40, Style::new());
+        let text: Vec<String> = rows
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert!(
+            text.iter().any(|r| r == "  \u{20}\u{20}\u{20}indented"),
+            "{text:?}"
+        );
+        assert!(text.iter().any(|r| r == "para   with tab"), "{text:?}");
+        assert!(text.iter().all(|r| !r.contains('\t')), "{text:?}");
     }
 
     #[test]

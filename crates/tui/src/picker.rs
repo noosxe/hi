@@ -81,7 +81,9 @@ pub fn preview_of(path: &Path) -> Option<String> {
         .messages
         .into_iter()
         .find_map(|message| match message {
-            hi_core::Message::User(text) => Some(text),
+            // Tabs have no cell in the terminal (#201): render them as
+            // pi-tui does, so a tab-led first line keeps its indent.
+            hi_core::Message::User(text) => Some(crate::wrap::expand_tabs(&text).into_owned()),
             _ => None,
         })
 }
@@ -287,6 +289,22 @@ mod tests {
             },
             modified: SystemTime::UNIX_EPOCH + Duration::from_secs(modified_secs),
         }
+    }
+
+    #[test]
+    fn a_previews_tabs_are_expanded() {
+        let root = std::env::temp_dir().join(format!("hi-preview-tab-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut session =
+            hi_core::Session::start_in(&root, Path::new("/p"), "p", "m", None, None).unwrap();
+        session
+            .append(&[hi_core::Message::User("\tindented ask".into())])
+            .unwrap();
+        assert_eq!(
+            preview_of(session.path()).as_deref(),
+            Some("   indented ask")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
