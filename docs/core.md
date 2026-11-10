@@ -319,7 +319,16 @@ no-op so the transcript pollers can call freely), which means an
 opened-but-unused hi leaves session storage untouched. Only finalized
 messages — and one `usage` record per round (the bill, #85) — are
 persisted, appended and flushed at turn end; the reader tolerates a
-torn final line and rejects malformation anywhere else. Retention is
+torn final line and rejects malformation anywhere else. `Session::resume`
+repairs the tail before returning the append handle (#178, private
+`repair_tail`, which reuses `parse_line`): an unparsable last non-empty
+line is cut off with `set_len` (blank lines after it go too), else a
+missing final `\n` is appended, else the file is not touched. A file
+whose only line is a torn header still fails in `read_header`, unrepaired.
+Every other append path goes through a resumed or freshly materialized
+handle (header restamp, `rename`, `append_usage`, `fork_from_in` writes a
+new file), so `resume` is the only place an existing file is reopened.
+Retention is
 opt-in (#23): with `sessionRetention` set (days), startup deletes aged
 `*.jsonl` files across every project before any session opens —
 best-effort, mtime is the liveness signal, absent key means never

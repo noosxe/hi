@@ -14,7 +14,7 @@ cargo run            # hi --mock needs no config
 
 CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI). Third-party actions are SHA-pinned with a `# vX.Y.Z` comment; `dtolnay/rust-toolchain@stable` stays a moving branch ref on purpose — the compiler channel is pinned by `rust-toolchain.toml` (#24, AD-0037). Dependabot (`.github/dependabot.yml`) opens one grouped PR per ecosystem weekly (`cargo`, `github-actions`), ignoring Rust major bumps.
 
-Current count: **667 `#[test]` functions** (the README's count gets refreshed in passing;
+Current count: **674 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 91
 core: openai 48, session 44, settings 29, subagent 20, tasks 24, selection 15, read 13,
 agent 17, walk 11, headless 13, message 5, catalog 5, context_report 4, grep 8, image_util 7, truncate 7, edit 6,
@@ -101,7 +101,7 @@ because of the #20 bug class — the startup provider never attached
 | auto-print on redirected streams: pipe→print, guard bypass, honest no-prompt, terminal still opens the TUI | `crates/cli/tests/auto_print.rs` + `tui_pty.rs` |
 | wire-level: the real binary against a recording fake API — system-prompt chain on the wire, thinking kwargs, `--continue`/`--no-session` files, failure contract, json stream | `crates/cli/tests/wire.rs` |
 | built-in tools: truncation contract, gitignore walk, per-tool behavior (paging, uniqueness, exit codes, timeouts), bundle selection | `tools/` |
-| session layout, header/message round-trip incl. tools, torn-tail tolerance, project keys (+ collisions), XDG data dir | `session.rs`, `config.rs` |
+| session layout, header/message round-trip incl. tools, torn-tail tolerance and `resume` tail repair, project keys (+ collisions), XDG data dir | `session.rs`, `config.rs` |
 | SSE parsing, streaming end-to-end, discovery shapes, thinking kwargs on the wire, tool-call fragments + wire replay, auth-header rules, error contract | `openai.rs` |
 | git branch detection (HEAD ref, detached, worktree `.git` file, walk-up, no repo), status composition | `tui/status.rs` |
 | markdown rendering: wrap, headings, fences, inline roles, links, lists/tasklists, quotes, rules, box tables + shrink, hard splits | `tui/markdown.rs` |

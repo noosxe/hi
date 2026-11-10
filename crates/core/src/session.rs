@@ -13,6 +13,9 @@
 //! round's `usage` record (the bill, #85). Only turn-end state is
 //! persisted — streamed tokens never touch disk — so a crash costs at
 //! most the in-flight turn, and a torn final line is tolerated on read.
+//! `Session::resume` repairs such a tail (truncates the fragment, or
+//! adds a missing final newline) before appending, so one crash never
+//! turns into a permanently unloadable file (#178).
 //! Everything is camelCase with unknown fields ignored, matching the
 //! config files' forward-compatibility rule.
 //!
@@ -203,8 +206,17 @@ impl Session {
     /// Reopen an existing session file for appending — the `--continue`
     /// path. One session stays one file; the directory listing reflects
     /// continued activity through the file's modification time.
+    ///
+    /// Repairs the tail before handing out the append handle (#178),
+    /// by the same rules [`load`] reads with: an unparsable last
+    /// non-empty line (a crash mid-append) is truncated away together
+    /// with any blank lines after it; otherwise a missing final
+    /// newline is added so the next record starts on its own line. A
+    /// healthy file is left byte-for-byte untouched. A file whose
+    /// header is unreadable still fails, unrepaired.
     pub fn resume(path: &Path) -> Result<Session, String> {
         let header = read_header(path)?;
+        repair_tail(path)?;
         let file = std::fs::OpenOptions::new()
             .append(true)
             .open(path)
@@ -649,7 +661,9 @@ pub fn resolve_in_root(root: &Path, cwd: &Path, arg: &str) -> Result<SessionRef,
 ///
 /// Tolerates a torn final line (crash mid-append) — an unparsable line
 /// is fatal anywhere *except* at the end of the file, where it is
-/// treated as the aftermath of an interrupted write and dropped.
+/// treated as the aftermath of an interrupted write and dropped. Read
+/// only: `Session::resume` is what cuts the fragment out of the file
+/// before anything is appended after it.
 pub fn load(path: &Path) -> Result<LoadedSession, String> {
     let raw = std::fs::read_to_string(path)
         .map_err(|err| format!("cannot read {}: {err}", path.display()))?;
@@ -820,6 +834,43 @@ fn epoch_millis() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Make an existing session file safe to append to (see
+/// [`Session::resume`]). Uses [`parse_line`] and `load`'s trimming, so
+/// "torn" means exactly what `load` drops.
+fn repair_tail(path: &Path) -> Result<(), String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|err| format!("cannot read {}: {err}", path.display()))?;
+    // Byte offset of the start of the last non-empty line.
+    let mut offset = 0;
+    let mut last: Option<(usize, &str)> = None;
+    for segment in raw.split_inclusive('\n') {
+        let trimmed = segment.trim();
+        if !trimmed.is_empty() {
+            last = Some((offset, trimmed));
+        }
+        offset += segment.len();
+    }
+    let fail = |err: std::io::Error| format!("cannot repair {}: {err}", path.display());
+    if let Some((start, line)) = last
+        && parse_line(line).is_err()
+    {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .map_err(fail)?;
+        file.set_len(start as u64).map_err(fail)?;
+        return Ok(());
+    }
+    if !raw.is_empty() && !raw.ends_with('\n') {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .and_then(|mut file| file.write_all(b"\n"))
+            .map_err(fail)?;
+    }
+    Ok(())
 }
 
 fn read_header(path: &Path) -> Result<SessionHeader, String> {
@@ -1126,6 +1177,124 @@ mod tests {
         raw.push_str("{\"type\":\"message\",\"message\":{\"user\":\"end\"}}");
         std::fs::write(&path, raw).unwrap();
         assert!(load(&path).is_err());
+    }
+
+    const TORN: &str = "{\"type\":\"message\",\"message\":{\"assi";
+
+    /// A one-message session file on disk, plus its path.
+    fn session_file(tag: &str) -> (PathBuf, PathBuf) {
+        let root = temp_root(tag);
+        let mut session =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        session.append(&[Message::User("one".into())]).unwrap();
+        (root, session.path().to_path_buf())
+    }
+
+    fn append_raw(path: &Path, text: &str) {
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(text.as_bytes()).unwrap();
+    }
+
+    /// Resume, append two messages, and check the whole file loads with
+    /// `expected` before them and no fragment left.
+    fn assert_resume_recovers(path: &Path, expected: Vec<Message>) {
+        let mut session = Session::resume(path).unwrap();
+        session.append(&[Message::User("two".into())]).unwrap();
+        session.append(&[Message::User("three".into())]).unwrap();
+        let mut all = expected;
+        all.push(Message::User("two".into()));
+        all.push(Message::User("three".into()));
+        assert_eq!(load(path).unwrap().messages, all);
+        assert!(!std::fs::read_to_string(path).unwrap().contains("assi"));
+    }
+
+    #[test]
+    fn resume_cuts_a_torn_tail_without_a_trailing_newline() {
+        let (root, path) = session_file("repair-nonl");
+        append_raw(&path, TORN);
+        assert_resume_recovers(&path, vec![Message::User("one".into())]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resume_cuts_a_torn_tail_followed_by_newlines() {
+        let (root, path) = session_file("repair-nl");
+        append_raw(&path, &format!("{TORN}\n \n\n"));
+        assert_resume_recovers(&path, vec![Message::User("one".into())]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resume_cuts_a_torn_tail_after_name_and_usage_records() {
+        let (root, path) = session_file("repair-records");
+        let mut session = Session::resume(&path).unwrap();
+        session.rename("named").unwrap();
+        session
+            .append_usage(&Usage {
+                prompt_tokens: 7,
+                ..Usage::default()
+            })
+            .unwrap();
+        drop(session);
+        append_raw(&path, "{\"type\":\"usage\",\"usa");
+        let mut session = Session::resume(&path).unwrap();
+        session.append(&[Message::User("two".into())]).unwrap();
+        session.append(&[Message::User("three".into())]).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.messages.len(), 3);
+        assert_eq!(loaded.header.name.as_deref(), Some("named"));
+        assert_eq!(loaded.usage_last_prompt, 7);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resume_terminates_a_complete_last_line_and_drops_nothing() {
+        let (root, path) = session_file("repair-complete");
+        let before = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, before.trim_end_matches('\n')).unwrap();
+        let session = Session::resume(&path).unwrap();
+        drop(session);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert_resume_recovers(&path, vec![Message::User("one".into())]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resume_leaves_a_healthy_file_byte_identical() {
+        let (root, path) = session_file("repair-healthy");
+        let before = std::fs::read(&path).unwrap();
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        drop(Session::resume(&path).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), mtime);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resume_does_not_truncate_a_file_whose_only_line_is_a_torn_header() {
+        let root = temp_root("repair-header");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("torn.jsonl");
+        std::fs::write(&path, "{\"type\":\"session\",\"id\":\"x").unwrap();
+        assert!(Session::resume(&path).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"type\":\"session\",\"id\":\"x"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_header_restamp_after_resuming_a_torn_file_keeps_it_loadable() {
+        let (root, path) = session_file("repair-restamp");
+        append_raw(&path, TORN);
+        let mut session = Session::resume(&path).unwrap();
+        session.set_thinking(Some("high")).unwrap();
+        session.append(&[Message::User("two".into())]).unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.header.thinking.as_deref(), Some("high"));
+        assert_eq!(loaded.messages.len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
