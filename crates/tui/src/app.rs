@@ -1781,8 +1781,10 @@ impl App {
                     );
                     applied.push("subagentTranscripts");
                 }
-                if let Some(on) = settings.telemetry {
-                    self.telemetry = on;
+                if settings.telemetry.is_some() {
+                    // The same resolution as startup: `HI_TELEMETRY`
+                    // beats the file (#203).
+                    self.telemetry = settings.telemetry_enabled();
                     applied.push("telemetry");
                 }
                 if !applied.is_empty() {
@@ -3888,6 +3890,30 @@ mod tests {
             "a key the file drops keeps its live value"
         );
         assert_eq!(app.max_tool_rounds, 5);
+    }
+
+    #[test]
+    fn reload_lets_hi_telemetry_override_the_file() {
+        // #203: startup resolves telemetry through `HI_TELEMETRY`;
+        // `/reload` used to take the file's value raw.
+        let _guard = settings_lock();
+        let _cleanup = ConfigCleanup::fresh();
+        let mut app = test_app();
+        let dir = hermetic_config_dir();
+        write_mock_models(&dir);
+        std::fs::write(dir.join("settings.json"), r#"{"telemetry":true}"#).unwrap();
+        // Safety: serialized by `settings_lock`; no other test in this
+        // process reads the variable.
+        unsafe { std::env::set_var("HI_TELEMETRY", "0") };
+        app.run_command("reload", "");
+        assert!(!app.telemetry, "HI_TELEMETRY=0 beats telemetry: true");
+        unsafe { std::env::set_var("HI_TELEMETRY", "1") };
+        std::fs::write(dir.join("settings.json"), r#"{"telemetry":false}"#).unwrap();
+        app.run_command("reload", "");
+        assert!(app.telemetry, "HI_TELEMETRY=1 beats telemetry: false");
+        unsafe { std::env::remove_var("HI_TELEMETRY") };
+        app.run_command("reload", "");
+        assert!(!app.telemetry, "without the override the file decides");
     }
 
     #[test]
