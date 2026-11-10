@@ -917,6 +917,14 @@ mid-turn, quitting after Esc, the end of the TUI loop, `--print` /
 restored. Not covered: Esc alone does not kill the abandoned `bash` call
 (it runs until it ends or `hi` exits), members that left the group
 (`setsid`), Windows (#31), and a crash or SIGKILL of `hi` itself.
+The sweep also **closes** both registries, because after a mid-turn
+Ctrl-C the agent thread keeps running tool rounds until it notices the
+dropped receiver: `BashGroups::spawn` checks `closed`, spawns and
+registers under one lock that `kill_all` also takes to close and
+snapshot, and `TaskManager::shutdown` sets `closed` under the tasks lock
+while `spawn` re-checks it under that same lock at the insert (killing
+its own child if it lost). A call after the sweep fails with "hi is
+exiting" and starts no process.
 
 ---
 

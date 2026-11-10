@@ -6,7 +6,8 @@
 //! Exit (#175): [`BashGroups`] is the registry of live foreground
 //! `bash` groups. The tool registers each group for the child's
 //! lifetime (RAII); [`BashGroups::kill_all`] takes them all down at
-//! exit, so a `bash` call abandoned mid-turn (Ctrl-C, or Esc followed
+//! exit and closes the registry — a later `spawn` is refused, so no
+//! group can slip in behind the sweep — so a `bash` call abandoned mid-turn (Ctrl-C, or Esc followed
 //! by a quit) does not outlive `hi`. Esc itself does not kill the
 //! call — the guarantee covers exits only. [`terminate_groups`] is the
 //! TERM, grace, KILL sweep shared with `TaskManager::shutdown`.
@@ -115,8 +116,20 @@ pub(crate) fn terminate_groups(pids: &[u32], grace: Duration) {
 /// process-wide instance is [`BashGroups::global`], tests build their
 /// own with [`BashGroups::new`] and must never `kill_all` the global
 /// one (parallel tests would lose their children).
+///
+/// `kill_all` also **closes** the registry: [`BashGroups::spawn`] then
+/// refuses, so an agent thread still running tool rounds after a
+/// mid-turn quit cannot start a group the sweep missed. Spawn checks
+/// `closed` and registers the pid under one lock, and `kill_all`
+/// closes and snapshots under the same lock — no window between them.
 #[derive(Clone, Default)]
-pub struct BashGroups(Arc<Mutex<HashSet<u32>>>);
+pub struct BashGroups(Arc<Mutex<GroupState>>);
+
+#[derive(Default)]
+struct GroupState {
+    closed: bool,
+    pids: HashSet<u32>,
+}
 
 /// Unregisters its group on drop — every return path of the tool.
 pub(crate) struct GroupGuard {
@@ -126,7 +139,7 @@ pub(crate) struct GroupGuard {
 
 impl Drop for GroupGuard {
     fn drop(&mut self) {
-        self.groups.0.lock().unwrap().remove(&self.pid);
+        self.groups.0.lock().unwrap().pids.remove(&self.pid);
     }
 }
 
@@ -142,27 +155,44 @@ impl BashGroups {
         GLOBAL.get_or_init(BashGroups::new).clone()
     }
 
-    pub(crate) fn register(&self, pid: u32) -> GroupGuard {
-        self.0.lock().unwrap().insert(pid);
-        GroupGuard {
-            groups: self.clone(),
-            pid,
+    /// Spawn `cmd` and register its group, atomically with respect to
+    /// `kill_all`: a closed registry spawns nothing.
+    pub(crate) fn spawn(&self, cmd: &mut Command) -> Result<(Child, GroupGuard), String> {
+        let mut state = self.0.lock().unwrap();
+        if state.closed {
+            return Err("hi is exiting; not starting a new process".into());
         }
+        let child = cmd.spawn().map_err(|e| format!("cannot spawn bash: {e}"))?;
+        let pid = child.id();
+        state.pids.insert(pid);
+        drop(state);
+        Ok((
+            child,
+            GroupGuard {
+                groups: self.clone(),
+                pid,
+            },
+        ))
     }
 
     /// How many groups are registered right now.
     pub fn len(&self) -> usize {
-        self.0.lock().unwrap().len()
+        self.0.lock().unwrap().pids.len()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// TERM every registered group, wait a grace beat, KILL what
-    /// remains. Idempotent; nothing registered means no wait.
+    /// Close the registry, then TERM every registered group, wait a
+    /// grace beat, KILL what remains. Idempotent; nothing registered
+    /// means no wait. Later `spawn`s are refused.
     pub fn kill_all(&self) {
-        let pids: Vec<u32> = self.0.lock().unwrap().iter().copied().collect();
+        let pids: Vec<u32> = {
+            let mut state = self.0.lock().unwrap();
+            state.closed = true;
+            state.pids.iter().copied().collect()
+        };
         terminate_groups(&pids, EXIT_GRACE);
     }
 }
@@ -244,6 +274,17 @@ mod tests {
         assert!(dead, "TERM-immune member {pid} survived stop_tree");
     }
 
+    impl BashGroups {
+        /// Register an already-spawned pid (test helper).
+        fn adopt(&self, pid: u32) -> GroupGuard {
+            self.0.lock().unwrap().pids.insert(pid);
+            GroupGuard {
+                groups: self.clone(),
+                pid,
+            }
+        }
+    }
+
     fn pid_alive(pid: i32) -> bool {
         unsafe { libc::kill(pid, 0) == 0 }
     }
@@ -255,7 +296,7 @@ mod tests {
         let mut child = spawn(&format!("echo $$ > {}; sleep 60", pidf.display()));
         let pid = wait_for_pid(&pidf);
         let groups = BashGroups::new();
-        let guard = groups.register(child.id());
+        let guard = groups.adopt(child.id());
         assert_eq!(groups.len(), 1);
         groups.kill_all();
         let _ = child.wait();
@@ -270,6 +311,29 @@ mod tests {
         let started = Instant::now();
         groups.kill_all();
         assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_spawn_after_kill_all_starts_nothing() {
+        let dir = temp("closed");
+        let pidf = dir.join("pid");
+        let groups = BashGroups::new();
+        groups.kill_all();
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c")
+            .arg(format!("echo $$ > {}; sleep 60", pidf.display()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        own_group(&mut cmd);
+        let err = groups
+            .spawn(&mut cmd)
+            .err()
+            .expect("closed registry spawned");
+        assert!(err.contains("exiting"), "{err}");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!pidf.exists(), "a process started after kill_all");
+        assert!(groups.is_empty());
     }
 
     #[test]
