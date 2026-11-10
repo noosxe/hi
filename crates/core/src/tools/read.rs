@@ -1,4 +1,8 @@
 //! `read` — file contents, line-numbered, paged with `offset`/`limit`.
+//! A clamp keeps whole lines only and its footer counts the lines
+//! actually kept (`[Showing lines a-b of n … Use offset=N to continue.]`);
+//! a first line over the byte cap yields a bash-fallback hint instead of
+//! content, as in pi.
 //! Image files (png/jpeg/webp/gif, magic-byte sniffed) are attached
 //! for the model when the startup policy allows it, after the
 //! [`super::image_resize`] ladder fits them to a universal budget
@@ -114,6 +118,30 @@ pub(crate) fn human_size(bytes: u64) -> String {
     }
 }
 
+/// pi's size format: `512B`, `60.0KB`, `1.5MB`.
+fn format_size(bytes: usize) -> String {
+    if bytes < 1024 {
+        format!("{bytes}B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Quote a path for a POSIX shell only when it needs it.
+fn shell_quote(path: &str) -> String {
+    let plain = !path.is_empty()
+        && path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c));
+    if plain {
+        path.to_string()
+    } else {
+        format!("'{}'", path.replace('\'', "'\\''"))
+    }
+}
+
 impl Tool for ReadTool {
     fn name(&self) -> &str {
         "read"
@@ -122,8 +150,10 @@ impl Tool for ReadTool {
     fn description(&self) -> &str {
         "Read the contents of a text file. Output is line-numbered and clamped to 2000 \
          lines or 50KB, whichever hits first; page through larger files with offset \
-         (1-indexed) and limit. Binary files are refused. When you need more of the \
-         file, call again with a later offset. Image files (png, jpeg, webp, gif) \
+         (1-indexed) and limit. Binary files are refused. When output is cut, the \
+         notice names the offset to continue from. If a single line is over 50KB, \
+         read returns no content for it, only a bash command (sed | head -c) that \
+         extracts it. Image files (png, jpeg, webp, gif) \
          are attached for you to look at when image input is enabled; otherwise \
          only their metadata comes back."
     }
@@ -183,14 +213,15 @@ impl Tool for ReadTool {
             return Err("read needs a path".into());
         };
         let offset = opt_usize(&args, "offset")?.unwrap_or(1);
-        let limit = opt_usize(&args, "limit")?.unwrap_or(truncate::MAX_LINES);
+        let limit = opt_usize(&args, "limit")?.unwrap_or(usize::MAX);
         if offset == 0 {
             return Err("offset is 1-indexed; it must be at least 1".into());
         }
         if limit == 0 {
             return Err("limit must be at least 1".into());
         }
-        let path = resolve_path(&self.cwd, &path);
+        let raw_path = path;
+        let path = resolve_path(&self.cwd, &raw_path);
         let bytes =
             std::fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         if is_probably_binary(&bytes) {
@@ -212,28 +243,57 @@ impl Tool for ReadTool {
                 "offset {offset} is past the end: the file has {total} lines"
             ));
         }
-        let selected: Vec<String> = lines[offset - 1..]
-            .iter()
-            .take(limit)
-            .enumerate()
-            .map(|(i, line)| format!("{:>5}│{}", offset + i, line))
-            .collect();
-        let selected_count = selected.len();
-
-        let clip = truncate::head_with(
-            &selected.join("\n"),
-            truncate::MAX_LINES,
-            truncate::MAX_BYTES,
-        );
-        let mut text = clip.text;
-        if clip.truncated {
-            text.push_str(&format!(
-                "\n[clamped at 50KB — call read again with offset {}]",
-                offset + clip.kept_lines
+        // Walk the selected lines, keeping whole numbered lines while
+        // both caps hold. The clamp is decided here, not by
+        // `truncate::head_with`, so the footer can count what was
+        // really kept.
+        let avail = total - (offset - 1);
+        let wanted = limit.min(avail);
+        let mut shown: Vec<String> = Vec::new();
+        let mut bytes = 0usize;
+        let mut byte_hit = false;
+        for (i, line) in lines[offset - 1..].iter().take(wanted).enumerate() {
+            if shown.len() >= truncate::MAX_LINES {
+                break;
+            }
+            let numbered = format!("{:>5}│{}", offset + i, line);
+            if bytes + numbered.len() + 1 > truncate::MAX_BYTES {
+                byte_hit = true;
+                break;
+            }
+            bytes += numbered.len() + 1;
+            shown.push(numbered);
+        }
+        if shown.is_empty() {
+            // The first line alone does not fit: no content, a bash
+            // fallback (pi parity). Not an error — the file is fine.
+            return Ok(format!(
+                "[Line {offset} is {}, exceeds {} limit. Use bash: sed -n '{offset}p' {} | head -c {}]",
+                format_size(lines[offset - 1].len()),
+                format_size(truncate::MAX_BYTES),
+                shell_quote(&raw_path),
+                truncate::MAX_BYTES
             ));
         }
-        let end = offset + selected_count - 1;
-        if offset > 1 || end < total {
+        let kept = shown.len();
+        let end = offset + kept - 1;
+        let next = end + 1;
+        let mut text = shown.join("\n");
+        if kept < wanted {
+            let why = if byte_hit {
+                format!(" ({} limit)", format_size(truncate::MAX_BYTES))
+            } else {
+                String::new()
+            };
+            text.push_str(&format!(
+                "\n\n[Showing lines {offset}-{end} of {total}{why}. Use offset={next} to continue.]"
+            ));
+        } else if end < total {
+            text.push_str(&format!(
+                "\n\n[{} more lines in file. Use offset={next} to continue.]",
+                total - end
+            ));
+        } else if offset > 1 {
             text.push_str(&format!("\n[lines {offset}–{end} of {total}]"));
         }
         Ok(text)
@@ -277,7 +337,7 @@ mod tests {
         let out = tool(&root)
             .execute(r#"{"path":"f.txt","offset":2,"limit":2}"#)
             .unwrap();
-        assert!(out.contains("[lines 2–3 of 5]"));
+        assert!(out.contains("[2 more lines in file. Use offset=4 to continue.]"));
     }
 
     #[test]
@@ -336,6 +396,87 @@ mod tests {
         let err = tool(&root).execute(r#"{"path":"nope.txt"}"#).unwrap_err();
         assert!(err.contains("cannot read"), "got: {err}");
     }
+    fn run(root: &Path, args: &str) -> String {
+        tool(root).execute(args).unwrap()
+    }
+
+    #[test]
+    fn a_single_oversized_line_gets_the_bash_fallback() {
+        let root = temp_root("longline");
+        fs::write(root.join("f.txt"), "x".repeat(60 * 1024)).unwrap();
+        let out = run(&root, r#"{"path":"f.txt"}"#);
+        assert_eq!(
+            out,
+            "[Line 1 is 60.0KB, exceeds 50.0KB limit. Use bash: sed -n '1p' f.txt | head -c 51200]"
+        );
+        assert!(!out.contains("offset=1") && !out.contains('│'));
+    }
+
+    #[test]
+    fn a_long_second_line_pages_then_falls_back() {
+        let root = temp_root("longsecond");
+        fs::write(
+            root.join("f.txt"),
+            format!("hi\n{}\n", "y".repeat(60 * 1024)),
+        )
+        .unwrap();
+        let out = run(&root, r#"{"path":"f.txt"}"#);
+        assert!(out.starts_with("    1│hi"));
+        assert!(out.contains("[Showing lines 1-1 of 2 (50.0KB limit). Use offset=2 to continue.]"));
+        let out = run(&root, r#"{"path":"f.txt","offset":2}"#);
+        assert!(out.starts_with("[Line 2 is 60.0KB"), "got: {out}");
+        assert!(out.contains("sed -n '2p'"));
+    }
+
+    #[test]
+    fn byte_clamped_footer_matches_the_last_shown_line() {
+        let root = temp_root("byteclamp");
+        let body: String = (0..100).map(|_| "z".repeat(1000) + "\n").collect();
+        fs::write(root.join("f.txt"), body).unwrap();
+        let out = run(&root, r#"{"path":"f.txt"}"#);
+        let shown = out.lines().filter(|l| l.contains('│')).count();
+        assert!(shown > 0 && shown < 100);
+        assert!(out.contains(&format!("{shown:>5}│")));
+        assert!(out.contains(&format!(
+            "[Showing lines 1-{shown} of 100 (50.0KB limit). Use offset={} to continue.]",
+            shown + 1
+        )));
+    }
+
+    #[test]
+    fn line_cap_footer_and_next_offset_are_right() {
+        let root = temp_root("linecap");
+        let body: String = (1..=2500).map(|i| format!("{i}\n")).collect();
+        fs::write(root.join("f.txt"), body).unwrap();
+        let out = run(&root, r#"{"path":"f.txt"}"#);
+        assert!(out.ends_with("[Showing lines 1-2000 of 2500. Use offset=2001 to continue.]"));
+        let out = run(&root, r#"{"path":"f.txt","offset":2001}"#);
+        assert!(out.contains("[lines 2001–2500 of 2500]"));
+    }
+
+    #[test]
+    fn a_user_limit_reports_the_remaining_lines() {
+        let root = temp_root("userlimit");
+        fs::write(root.join("f.txt"), "a\nb\nc\nd\n").unwrap();
+        let out = run(&root, r#"{"path":"f.txt","limit":1}"#);
+        assert_eq!(
+            out,
+            "    1│a\n\n[3 more lines in file. Use offset=2 to continue.]"
+        );
+    }
+
+    #[test]
+    fn the_bash_hint_quotes_awkward_paths() {
+        let root = temp_root("quote");
+        let long = "q".repeat(60 * 1024);
+        fs::write(root.join("it's here.txt"), &long).unwrap();
+        let out = run(&root, r#"{"path":"it's here.txt"}"#);
+        assert!(out.contains(r"'it'\''s here.txt' | head"), "got: {out}");
+        fs::write(root.join("a b.txt"), &long).unwrap();
+        let out = run(&root, r#"{"path":"a b.txt"}"#);
+        assert!(out.contains("'a b.txt' | head"), "got: {out}");
+    }
+
     /// A real 1×1 PNG: small enough that the resize ladder must pass
     /// it through byte-identical.
     fn tiny_png_bytes() -> Vec<u8> {
