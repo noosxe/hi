@@ -76,8 +76,15 @@ into the scrollback above the viewport exactly once
   `decide_and_execute` (`catch_unwind`) and becomes an `is_error`
   `ToolResult` (`tool `x` panicked: <message>`; `&str` and `String`
   payloads both read) — the model adapts and the turn continues. A provider
-  thread that panics closes its round's channel with no `TurnEnd`; the loop
-  tracks whether the round saw one and, if not (and no `Error` came), sends
+  thread that panics is caught by `spawn_turn`, which runs `respond` on a
+  worker thread and relays its events, noting whether the round already sent
+  `Error`/`TurnEnd`: after a panic it sends `Error("provider panicked:
+  <message>")` then `TurnEnd` — but only what is missing (a round that
+  already ended gets nothing; one that already sent an `Error` gets just
+  `TurnEnd`), so the panic's own text reaches the user without duplicating or
+  replacing the provider's (#243). If a round's channel closes
+  anyway with no `TurnEnd`, the loop tracks whether the round saw one and, if
+  not (and no `Error` came), sends
   `Error("provider thread ended without finishing the round …")` then
   `TurnEnd` — never a clean settle. Calls from such a round are not
   dispatched.

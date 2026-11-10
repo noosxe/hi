@@ -236,7 +236,9 @@ fn truncated_call_result(call: &ToolCall) -> ToolResult {
     }
 }
 
-/// The error for a round whose provider thread vanished mid-stream.
+/// The fallback error for a round whose provider thread vanished
+/// mid-stream without reporting why. `spawn_turn` catches a panic and
+/// sends its message (#243); this covers a channel that closes anyway.
 const PROVIDER_DIED: &str = "provider thread ended without finishing the round (it panicked)";
 
 /// Best-effort text of a caught panic payload: `panic!("literal")`
@@ -534,8 +536,10 @@ mod tests {
             ));
             let n = events.len();
             assert!(n >= 3, "{events:?}");
+            // #243: the panic's own message rides the error.
             assert!(
-                matches!(&events[n - 2], Event::Error(e) if e.contains("provider")),
+                matches!(&events[n - 2], Event::Error(e)
+                    if e.contains("provider") && e.contains("provider exploded")),
                 "{events:?}"
             );
             assert_eq!(events[n - 1], Event::TurnEnd);
@@ -544,6 +548,66 @@ mod tests {
             // An incomplete round never dispatches its calls.
             assert!(tool_results(&events).is_empty(), "had_call={had_call}");
         }
+    }
+
+    #[test]
+    fn a_provider_panic_adds_only_what_the_round_is_missing() {
+        // #243: a panic after the provider's own `Error` must neither add
+        // a second error nor replace the first; after its own `TurnEnd`
+        // it must add nothing and leave the finished round alone.
+        let run = |before: Vec<Event>| {
+            collect(spawn_turn(
+                Arc::new(PanicProvider { before }),
+                &[Message::User("go".into())],
+            ))
+        };
+        let errors = |events: &[Event]| -> Vec<String> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    Event::Error(m) => Some(m.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let ends = |events: &[Event]| events.iter().filter(|e| **e == Event::TurnEnd).count();
+
+        let events = run(vec![Event::TurnStart, Event::Error("upstream 502".into())]);
+        assert_eq!(
+            errors(&events),
+            vec!["upstream 502".to_string()],
+            "{events:?}"
+        );
+        assert_eq!(ends(&events), 1, "{events:?}");
+        assert_eq!(events.last(), Some(&Event::TurnEnd));
+
+        let events = run(vec![
+            Event::TurnStart,
+            Event::Token("ok".into()),
+            Event::TurnEnd,
+        ]);
+        assert!(errors(&events).is_empty(), "{events:?}");
+        assert_eq!(ends(&events), 1, "{events:?}");
+
+        // And through the agent loop a round that finished stays settled.
+        let events = collect(spawn_agent_turn(
+            Arc::new(PanicProvider {
+                before: vec![Event::TurnStart, Event::Token("ok".into()), Event::TurnEnd],
+            }),
+            registry_with(Arc::new(EchoTool)),
+            None,
+            &[Message::User("go".into())],
+            DEFAULT_MAX_TOOL_ROUNDS,
+        ));
+        assert!(errors(&events).is_empty(), "{events:?}");
+
+        // Nothing sent at all: the full report, panic text included.
+        let events = run(vec![]);
+        assert_eq!(
+            errors(&events),
+            vec!["provider panicked: provider exploded".to_string()]
+        );
+        assert_eq!(ends(&events), 1);
     }
 
     #[test]
