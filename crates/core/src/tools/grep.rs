@@ -197,7 +197,9 @@ fn search_one(
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     for &m in &matched {
         let start = m.saturating_sub(context);
-        let end = (m + context).min(lines.len() - 1);
+        // `context` is model-supplied: saturate, or u64::MAX panics in
+        // debug and wraps (dropping the match) in release (#218).
+        let end = m.saturating_add(context).min(lines.len() - 1);
         match ranges.last_mut() {
             Some(last) if start <= last.1 + 1 => last.1 = end,
             _ => ranges.push((start, end)),
@@ -259,6 +261,24 @@ mod tests {
 
     fn tool(root: &Path) -> GrepTool {
         GrepTool::new(root)
+    }
+
+    #[test]
+    fn a_huge_context_saturates_instead_of_overflowing() {
+        // #218: `m + context` overflowed — a panic in debug, a wrap that
+        // dropped the matching line in release.
+        let dir = std::env::temp_dir().join(format!("hi-grep-ctx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f.txt"), "a\nb\nc\nd\nneedle\nf\n").unwrap();
+        let out = GrepTool::new(&dir)
+            .execute(r#"{"pattern":"needle","path":"f.txt","context":18446744073709551615}"#)
+            .unwrap();
+        assert!(out.contains("f.txt:5: needle"), "{out}");
+        assert!(
+            out.contains("f.txt-1- a") && out.contains("f.txt-6- f"),
+            "{out}"
+        );
     }
 
     #[test]

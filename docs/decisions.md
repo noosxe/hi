@@ -144,6 +144,10 @@ panic hook restores the terminal on any thread, which would leave a running TUI
 in cooked mode after a *caught* panic, so `hi-tui` guards it to the UI thread
 (hook lives in `crates/tui`, never `crates/core`). Arithmetic on model numbers
 uses checked/saturating ops; an unrepresentable timeout means no deadline.
+The end-to-end panic test used `grep`'s overflow as its trigger; once #218 fixed
+that there was no model-reachable panic left, and a test-only backdoor in the
+shipped binary was ruled out, so the coverage moved in process: a test-only
+panicking tool, a real turn and `guard_panic_hook` (see testing.md).
 
 
 ## AD-0004 — the harness ships its tools (2026-10-12)

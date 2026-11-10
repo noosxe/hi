@@ -123,11 +123,7 @@ its `TurnEnd`: a round that closes without it (provider thread panic) ends the
 turn with `Error` + `TurnEnd` instead of a clean settle. Model-supplied
 numbers (`opt_usize` callers) must use checked/saturating arithmetic: an
 unrepresentable `bash`/`task_run` timeout means no deadline, `find`'s `limit`
-saturates. Known exception: `grep`'s `context` still overflows at
-`m + context` (`search_one`) — a debug-build panic caught as an error result;
-in release it wraps and mis-slices. The PTY test
-`a_panicking_tool_leaves_the_tui_alive_raw_and_clean` uses it as its trigger,
-so fixing `grep` means giving that test a new trigger.
+saturates, `grep`'s `context` saturates (#218). No built-in tool is known to panic on model input; the panic-containment tests use a test-only panicking tool (`tui/app.rs`).
 
 ## tools/ — the built-in capabilities (#26)
 

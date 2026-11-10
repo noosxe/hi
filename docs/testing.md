@@ -27,7 +27,7 @@ the session; only Ctrl-S persists, so tests that stop at Enter need no lock.
 Saves are also atomic in core (`write_json`: temp file + rename), so a reader
 never sees an empty `settings.json` even without the lock (#215).
 
-Current count: **743 `#[test]` functions** (the README's count gets refreshed in passing;
+Current count: **744 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 91
 core: openai 48, session 44, settings 31, subagent 21, tasks 28, selection 15, read 13,
 agent 17, walk 11, headless 15, message 5, catalog 5, context_report 4, grep 8, image_util 7, truncate 7, edit 6,
@@ -40,7 +40,7 @@ rendered by the avt emulator (asciinema's), and every wait a predicate over
 rendered frames — typed keys must echo in the composer, a settled turn must
 stop spinner-cell churn, the composer must remain the last content on screen
 and untinted, a full window must give its rows up to the flush, and `/exit`
-must exit cleanly, and a model-reachable tool panic must leave raw mode on, print nothing and let the next request out; dev-only `portable-pty` and `avt`).
+must exit cleanly, dev-only `portable-pty` and `avt`).
 ## The central tool: `FakeApi` (`crates/core/src/test_support.rs`, cfg(test))
 
 A minimal HTTP server on an ephemeral port:
@@ -130,7 +130,7 @@ because of the #20 bug class — the startup provider never attached
 | catalog flattening, empty catalog | `tui/catalog.rs` |
 | queueing, Esc-cancel + queue restore, completion keys, unknown commands, auto-trigger gating (`taskTurns` off/zero budget/Esc/toggled-off never fire) | `tui/app.rs` |
 | wrap width semantics, oversized-word hard split | `tui/wrap.rs` |
-| panics (#172): u64-max `bash`/`task_run` timeout and `find` limit; a panicking tool or gate (`&str`/`String` payloads) → error result and the turn continues; a panicking provider → `Error` + one `TurnEnd`; closed channel with no `TurnEnd` → failed turn in `pump` (partial kept, queue fires, Empty stays in flight, normal `TurnEnd` finalized once), headless `Failed`, subagent `Err`; the UI-thread-only panic hook; PTY: a real tool panic keeps raw mode, prints nothing, next request goes out | `core/agent.rs`, `core/tools/{bash,find}.rs`, `core/tasks.rs`, `core/headless.rs`, `core/subagent.rs`, `tui/app.rs`, `tui/lib.rs`, `cli/tests/tui_pty.rs` |
+| panics (#172): u64-max `bash`/`task_run` timeout and `find` limit; a panicking tool or gate (`&str`/`String` payloads) → error result and the turn continues; a panicking provider → `Error` + one `TurnEnd`; closed channel with no `TurnEnd` → failed turn in `pump` (partial kept, queue fires, Empty stays in flight, normal `TurnEnd` finalized once), headless `Failed`, subagent `Err`; the UI-thread-only panic hook; in-process in `tui/app.rs` (`a_panicking_tool_leaves_the_turn_alive_and_the_terminal_untouched`): a test-only panicking tool in a real turn with `guard_panic_hook` over a stand-in for ratatui's restore-and-print hook — error result, next round goes out, the hook never runs (no pty test: no shipped tool panics on model input any more, #218) | `core/agent.rs`, `core/tools/{bash,find}.rs`, `core/tasks.rs`, `core/headless.rs`, `core/subagent.rs`, `tui/app.rs`, `tui/lib.rs` |
 
 Gaps to be aware of: `ui.rs` drawing has row-level tests (scrollback wrapping) but no pty/frame snapshots, `lib.rs` event loop is
 untested (needs a pty), CLI `main` is untested (thin by design).

@@ -229,6 +229,10 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io
     Ok(())
 }
 
+/// The panic hook is process-global: tests that swap it take this lock.
+#[cfg(test)]
+pub(crate) static HOOK_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +242,7 @@ mod tests {
     fn the_hook_runs_for_the_ui_thread_only() {
         // Stand-in for ratatui's restore-then-print hook: counts calls.
         static CALLS: AtomicUsize = AtomicUsize::new(0);
+        let _lock = HOOK_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let original = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_| {
             CALLS.fetch_add(1, Ordering::SeqCst);
