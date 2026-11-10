@@ -182,7 +182,12 @@ structural chunk-walk for the kitty renderer — AD-0010 — and
   (#74): older than 7 days goes, aged survivors beyond 64 MiB (newest
   kept) go, logs under 24h old are never touched, and a failed unlink
   never blocks startup — one stderr line only when something was
-  removed.
+  removed. Each manager writes `<pid>-<millis>-<seq>-<id>.log` (a
+  per-run prefix; task ids stay 1, 2, 3 per run), opened with
+  `create_new` so two runs sharing the tasks dir never truncate each
+  other (#188) and a collision fails the spawn; the prune recognises
+  that pattern and the legacy `<id>.log`, and leaves every other file
+  alone.
 - **Truncation contract**: every result clamps at 2000 lines or 50 KiB,
   whichever hits first — head-kept for inspection tools, tail-kept for bash.
   The contract lives in `truncate.rs` and has its own tests.
