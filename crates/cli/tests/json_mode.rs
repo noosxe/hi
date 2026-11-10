@@ -15,6 +15,8 @@ fn run_json(args: &[&str]) -> std::process::Output {
     std::fs::create_dir_all(&root).unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_hi"))
         .args(args)
+        // Never the runner's stdin: print mode reads it to EOF.
+        .stdin(std::process::Stdio::null())
         .env("XDG_DATA_HOME", &root)
         // Config too: the maintainer's real settings.json (taskTurns
         // on, a thinking level) must not leak into the run's behavior.
