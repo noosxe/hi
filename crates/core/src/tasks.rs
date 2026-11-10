@@ -9,8 +9,10 @@
 //!   runtime anywhere; the Luau bridge (#6) inherits this choice.
 //! - **Process groups.** A task spawns in its own group (Unix) and
 //!   cancel/timeout/shutdown kill the *group*, so grandchildren (a dev
-//!   server's watchers) die with it. This is deliberately stronger
-//!   than the `bash` tool, whose #30 grandchild limitation stands.
+//!   server's watchers) die with it. The `bash` tool shares that
+//!   plumbing (`process::own_group` / `stop_tree`, #30) for its timeout
+//!   kill; the difference is that a task outlives its leader until the
+//!   group is empty, while `bash` returns when the leader exits.
 //!   A task lives until its group is empty (#174), reports the
 //!   leader's state, and waits a bounded time for the reader's EOF.
 //! - **Merged output, total order.** The command runs under
