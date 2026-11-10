@@ -116,14 +116,17 @@ into the scrollback above the viewport exactly once
 
 - `handle_key(Esc)` while a turn is in flight drops the `Turn` (which owns
   the `Receiver`). The provider thread's next `send` fails → it returns.
-  Partial output already pumped into `turn.blocks` is **kept**: `handle_key`
-  itself pushes the partial `Assistant` message (only when there are blocks)
+  Partial output already pumped into `turn.blocks` is **kept**
+  (`App::drop_turn_keeping_partial`, shared with the Ctrl-C quit below):
+  `handle_key` itself pushes the partial `Assistant` message (only when there are blocks)
   and appends it to the session file at once via `persist_last` (#181) — key
   handling runs before `pump` captures its `added_from` marker, so no later
   frame append would ever cover it. Esc before any token persists nothing.
   `/new` and `/resume` are refused mid-turn (esc first), so they never see a
-  partial; quitting mid-turn (Ctrl-C) drops the unfinished reply with the
-  process, unrecorded.
+  partial. Quitting mid-turn — Ctrl-C on an empty composer, or `/exit` / `/quit` —
+  goes through the same helper (#232): the partial is pushed and persisted before `quit` is
+  set, so `--continue` shows what was on screen. Only events still in the
+  channel, not yet pumped, are lost.
 - Esc can land after a `ToolCall` was pushed (and persisted) but before
   its `ToolResult`, leaving an orphan call. Nothing is written to history
   or the session file for it; instead `wire_messages` repairs every
