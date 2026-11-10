@@ -3202,6 +3202,104 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A tool that panics — test code only, never registered by the binary.
+    struct PanickingTool;
+
+    impl hi_core::Tool for PanickingTool {
+        fn name(&self) -> &str {
+            "boom"
+        }
+        fn description(&self) -> &str {
+            "always panics"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn execute(&self, _arguments: &str) -> Result<String, String> {
+            panic!("tool exploded");
+        }
+    }
+
+    /// Round one asks for `boom`; once a tool result is in the history,
+    /// round two settles with text.
+    struct CallsBoomThenSettles;
+
+    impl Provider for CallsBoomThenSettles {
+        fn respond(&self, history: &[Message], tx: std::sync::mpsc::Sender<Event>) {
+            let _ = tx.send(Event::TurnStart);
+            if history.iter().any(|m| matches!(m, Message::ToolResult(_))) {
+                let _ = tx.send(Event::Token("recovered after panic".into()));
+            } else {
+                let _ = tx.send(Event::ToolCall(hi_core::ToolCall {
+                    id: "c1".into(),
+                    name: "boom".into(),
+                    arguments: "{}".into(),
+                }));
+            }
+            let _ = tx.send(Event::TurnEnd);
+        }
+    }
+
+    #[test]
+    fn a_panicking_tool_leaves_the_turn_alive_and_the_terminal_untouched() {
+        // #172, in process (it replaces a pty test whose trigger was a
+        // grep overflow, #218). A real turn runs a panicking tool on the
+        // agent thread with `guard_panic_hook` installed over a stand-in
+        // for ratatui's restore-and-print hook. The turn must survive
+        // with an error result, the next round must go out, and the
+        // stand-in — which in the binary leaves raw mode and prints the
+        // panic — must never run.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static RESTORE_AND_PRINT: AtomicUsize = AtomicUsize::new(0);
+        let _lock = crate::HOOK_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let original = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {
+            RESTORE_AND_PRINT.fetch_add(1, Ordering::SeqCst);
+        }));
+        crate::guard_panic_hook(std::thread::current().id());
+
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(PanickingTool)).unwrap();
+        let mut app = test_app();
+        app.tools = Arc::new(registry);
+        app.provider = Arc::new(CallsBoomThenSettles);
+        app.input = "go".into();
+        app.cursor = 2;
+        app.handle_key(key(KeyCode::Enter));
+        drain_turns(&mut app);
+
+        let _ = std::panic::take_hook();
+        std::panic::set_hook(original);
+
+        assert_eq!(
+            RESTORE_AND_PRINT.load(Ordering::SeqCst),
+            0,
+            "a worker-thread panic must not restore the terminal or print"
+        );
+        assert!(
+            app.messages.iter().any(|m| matches!(
+                m,
+                Message::ToolResult(r) if r.is_error && r.content.contains("tool `boom` panicked")
+            )),
+            "the panic became an error result: {:?}",
+            app.messages
+        );
+        assert!(
+            app.messages.iter().any(|m| matches!(
+                m,
+                Message::Assistant(blocks)
+                    if hi_core::message::AssistantBlock::text_of(blocks)
+                        .contains("recovered after panic")
+            )),
+            "the next round went out: {:?}",
+            app.messages
+        );
+        // The session still takes another turn.
+        assert!(app.turn.is_none());
+    }
+
     #[test]
     fn two_rounds_in_one_frame_keep_the_latest_prompt_as_context() {
         let mut app = test_app();

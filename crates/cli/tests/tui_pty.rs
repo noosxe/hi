@@ -304,14 +304,6 @@ impl Tui {
         }
     }
 
-    /// Is the pty still in raw mode? crossterm's raw mode clears
-    /// `ICANON`; cooked mode (what a panic hook's `restore()` leaves
-    /// behind) has it set. Read from the line discipline itself.
-    fn is_raw(&self) -> bool {
-        let termios = self.master.get_termios().expect("termios of the pty");
-        !format!("{:?}", termios.local_flags).contains("ICANON")
-    }
-
     fn sees(&mut self, needle: &str) {
         self.until(needle, TEXT_TIMEOUT, |frame| frame.contains(needle));
     }
@@ -912,78 +904,6 @@ fn tool_call_body(id: &str, name: &str, arguments: &str) -> String {
     let frame = serde_json::json!({"choices":[{"delta":{"tool_calls":[
         {"index":0,"id":id,"function":{"name":name,"arguments":arguments}}]}}]});
     format!("data: {frame}\n\ndata: [DONE]\n\n")
-}
-
-#[test]
-fn a_panicking_tool_leaves_the_tui_alive_raw_and_clean() {
-    // #172 end to end. The tool call below panics on the agent thread
-    // in the real binary. Three things must hold: the turn survives
-    // (the model gets an error result and the next request goes out),
-    // the terminal stays in raw mode (ratatui's panic hook restores the
-    // terminal on ANY thread unless hi-tui guards it), and no panic text
-    // lands on the screen.
-    //
-    // The trigger: `grep` with `context` = u64::MAX overflows
-    // `m + context` in debug builds (the profile `cargo test` uses).
-    // That is a real, model-reachable tool panic that #172 deliberately
-    // does not fix (it lists, not fixes, panics outside bash/find/tasks);
-    // when grep is hardened, swap in whatever panics next — there is no
-    // test-only backdoor in the shipped binary to use instead.
-    let target = std::env::temp_dir().join(format!("hi-pty-panic-{}.txt", std::process::id()));
-    std::fs::write(&target, "needle\nneedle\n").unwrap();
-    let args = serde_json::json!({
-        "pattern": "needle",
-        "path": target.to_str().unwrap(),
-        "context": 18446744073709551615u64,
-    })
-    .to_string();
-    let settle = "data: {\"choices\":[{\"delta\":{\"content\":\"recovered after panic\"}}]}\n\n\
-                  data: [DONE]\n\n"
-        .to_string();
-    let (url, requests) = fake_sse_sequence(vec![tool_call_body("c1", "grep", &args), settle]);
-    let models = format!(
-        "{{\"providers\":{{\"fake\":{{\"baseUrl\":\"{url}\",\"apiKey\":\"k\",\"models\":[{{\"id\":\"fake-mini\"}}]}}}}}}"
-    );
-    // `--tools all`: grep is not in the default (coding) bundle.
-    let mut tui = Tui::spawn_configured(
-        &[
-            "--provider",
-            "fake",
-            "--model",
-            "fake-mini",
-            "--tools",
-            "all",
-        ],
-        &models,
-    );
-    tui.sees("\u{2500}");
-    assert!(tui.is_raw(), "raw mode before the turn");
-    tui.type_keys("go");
-    tui.write("\r");
-    // The next round only happens if the panic became an error result.
-    tui.settled_turn("recovered after panic");
-    assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 2);
-    assert!(tui.is_raw(), "a tool panic must not restore the terminal");
-    let everything = format!("{}\n{}", tui.frame(), tui.scrollback().join("\n"));
-    // The tool really panicked (this is not an unknown-tool refusal).
-    assert!(
-        everything.contains("tool `grep` panicked"),
-        "no panic error result on screen:\n{everything}"
-    );
-    for needle in ["panicked at", "RUST_BACKTRACE", "thread '"] {
-        assert!(
-            !everything.contains(needle),
-            "panic text {needle:?} reached the screen:\n{everything}"
-        );
-    }
-    // The error result is visible to the user as a tool result, and the
-    // session still takes input and runs another turn.
-    tui.type_keys("again");
-    tui.write("\r");
-    tui.until("a third request", TEXT_TIMEOUT, |_| {
-        requests.load(std::sync::atomic::Ordering::SeqCst) >= 3
-    });
-    assert!(tui.exits_cleanly(Duration::from_secs(20)));
 }
 
 /// `kill -0`: is the pid still there? (The cli crate has no libc.)
