@@ -1097,14 +1097,23 @@ fn accumulate_fragment(partials: &mut BTreeMap<usize, PartialToolCall>, delta: T
 
 /// Turn accumulated fragments into finished calls, in index order. A
 /// call whose server never sent an id gets `call_{index}` — every
-/// result still needs something to point back at.
+/// result still needs something to point back at — and empty
+/// arguments become `{}` (#204).
 fn finalize_tool_calls(partials: BTreeMap<usize, PartialToolCall>) -> Vec<ToolCall> {
     partials
         .into_iter()
         .map(|(index, partial)| ToolCall {
             id: partial.id.unwrap_or_else(|| format!("call_{index}")),
             name: partial.name,
-            arguments: partial.arguments,
+            // A no-argument tool call may stream no `arguments` at all
+            // (Ollama, some vLLM builds). pi reads empty or
+            // whitespace-only text as `{}`; so do we (#204), which
+            // also keeps the replayed history valid JSON.
+            arguments: if partial.arguments.trim().is_empty() {
+                "{}".to_string()
+            } else {
+                partial.arguments
+            },
         })
         .collect()
 }
@@ -1637,6 +1646,23 @@ mod tests {
                 .unwrap();
         accumulate_fragment(&mut partials, delta);
         assert_eq!(finalize_tool_calls(partials)[0].id, "call_2");
+    }
+
+    #[test]
+    fn a_no_argument_call_with_empty_arguments_becomes_an_empty_object() {
+        // #204: servers that send no `arguments` (or only whitespace)
+        // for a no-arg tool must not get an "invalid JSON" result.
+        let mut partials: BTreeMap<usize, PartialToolCall> = BTreeMap::new();
+        for delta in [
+            r#"{"index":0,"id":"call_a","function":{"name":"ls"}}"#,
+            r#"{"index":1,"id":"call_b","function":{"name":"task_status","arguments":" "}}"#,
+        ] {
+            let delta: ToolCallDelta = serde_json::from_str(delta).unwrap();
+            accumulate_fragment(&mut partials, delta);
+        }
+        let calls = finalize_tool_calls(partials);
+        assert_eq!(calls[0].arguments, "{}");
+        assert_eq!(calls[1].arguments, "{}");
     }
 
     #[test]
