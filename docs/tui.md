@@ -320,7 +320,9 @@ transcript:
 
 - **Emission model**: the block builder returns `Segment`s — text rows
   or `{ sequence, rows }` images. `lib.rs` computes the height across
-  segments and `insert_before`s once; `segments_into` writes text via
+  segments and `insert_before`s once (`segments_height` counts a text
+  segment as exactly its rows — an empty one is 0, matching `take_flush`
+  and `window_rows`, #207); `segments_into` writes text via
   the ordinary Paragraph path and drops the whole kitty APC sequence
   into **one buffer cell** at the block's side padding. The `rows`
   cells below stay untouched — the image overlays them (z-order draws

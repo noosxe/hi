@@ -415,6 +415,18 @@ mod tests {
     }
 
     #[test]
+    fn a_whitespace_only_reply_block_adds_no_phantom_row() {
+        // #207: a `Text("\n\n")` block renders no rows; the height
+        // count used to give it one, leaving the window a row short.
+        let blank = Message::Assistant(vec![hi_core::message::AssistantBlock::Text("\n\n".into())]);
+        let mut scroll = scroll_with(&[user("hi"), blank, user("x")], 40);
+        let total = scroll.total;
+        assert_eq!(scroll.window_rows().len(), total, "total matches the rows");
+        scroll.take_flush(2, false);
+        assert_eq!(scroll.window_rows().len(), 2, "the window keeps its rows");
+    }
+
+    #[test]
     fn thinking_and_reply_are_separate_blocks_with_one_blank_row() {
         let message = Message::Assistant(vec![
             hi_core::message::AssistantBlock::Thinking {

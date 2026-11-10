@@ -929,12 +929,14 @@ fn tool_segments(
     segments
 }
 
-/// Total scrollback rows a set of segments will occupy.
+/// Total scrollback rows a set of segments will occupy. A text segment
+/// is exactly its rows — an empty one is zero, the count `take_flush`
+/// and `window_rows` use (#207).
 pub fn segments_height(segments: &[Segment]) -> u16 {
     segments
         .iter()
         .map(|segment| match segment {
-            Segment::Text(rows) => rows.len().max(1) as u16,
+            Segment::Text(rows) => rows.len() as u16,
             Segment::Image { rows, .. } => *rows,
         })
         .sum()
@@ -951,7 +953,7 @@ pub fn segments_into(segments: Vec<Segment>, buf: &mut Buffer) {
     for segment in segments {
         match segment {
             Segment::Text(rows) => {
-                let height = rows.len().max(1) as u16;
+                let height = rows.len() as u16;
                 Paragraph::new(Text::from(rows)).render(
                     Rect {
                         x: 0,
