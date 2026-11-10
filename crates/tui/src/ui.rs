@@ -1554,7 +1554,10 @@ mod tests {
 
     #[test]
     fn the_status_board_renders_its_resident_rows() {
-        let app = crate::app::test_app();
+        let mut app = crate::app::test_app();
+        // A fixed location: the real one depends on where the checkout
+        // lives (`~` only under $HOME, #211).
+        app.location = "~/proj (main)".into();
         assert_eq!(app.status_height(), 2, "both rows are permanent now");
         // Wide enough that the location doesn't clip the right label.
         let mut terminal = Terminal::new(TestBackend::new(72, 20)).unwrap();
@@ -1569,7 +1572,11 @@ mod tests {
         };
         // Two permanent rows: the model on row 18, the location bar
         // on the bottom edge — row 0's right stays empty.
-        assert!(row_text(19).contains("~"), "{:?}", row_text(19));
+        assert!(
+            row_text(19).starts_with("~/proj (main)"),
+            "{:?}",
+            row_text(19)
+        );
         assert!(!row_text(19).contains("(mock)"), "{:?}", row_text(19));
         assert!(
             row_text(18).ends_with("(mock) mock · thinking:auto"),
