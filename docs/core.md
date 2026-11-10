@@ -346,7 +346,7 @@ missing final `\n` is appended, else the file is not touched. A file
 whose only line is a torn header still fails in `read_header`, unrepaired.
 Every other append path goes through a resumed or freshly materialized
 handle (header restamp, `rename`, `append_usage`, `fork_from_in` writes a
-new file), so `resume` is the only place an existing file is reopened.
+new file — materialized even when the source has no messages, #198), so `resume` is the only place an existing file is reopened.
 Retention is
 opt-in (#23): with `sessionRetention` set (days), startup deletes aged
 `*.jsonl` files across every project before any session opens —

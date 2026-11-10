@@ -361,6 +361,11 @@ impl Session {
             parent: None,
         };
         let mut session = create(root, cwd, created_at, header)?;
+        // A fork is an explicit act whose file the caller opens next:
+        // create it even when there is nothing to copy (`append` of an
+        // empty slice is deliberately a no-op), or `load` of a
+        // header-only or name-only source's fork fails (#198).
+        session.materialize()?;
         session.append(&loaded.messages)?;
         Ok(session)
     }
@@ -1708,6 +1713,31 @@ mod tests {
         let loaded = load(fork.path()).unwrap();
         assert_eq!(loaded.messages, vec![Message::User("history".into())]);
         assert_eq!(loaded.usage, crate::event::Usage::default());
+    }
+
+    #[test]
+    fn forking_a_session_with_no_messages_creates_a_loadable_file() {
+        // #198: the fork's file was planned but never created, so
+        // opening it failed.
+        let root = std::env::temp_dir().join(format!("hi-fork-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut source =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        source.materialize().unwrap();
+        let fork = Session::fork_from_in(&root, source.path(), Path::new("/q"), None).unwrap();
+        let loaded = load(fork.path()).expect("the fork's file exists");
+        assert!(loaded.messages.is_empty());
+        assert_eq!(loaded.header.forked_from.as_deref(), source.path().to_str());
+
+        // A name-only source (`/name` before any message) forks too.
+        let mut named =
+            Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        named.rename("keeper").unwrap();
+        let fork = Session::fork_from_in(&root, named.path(), Path::new("/q"), None).unwrap();
+        assert_eq!(
+            load(fork.path()).unwrap().header.name.as_deref(),
+            Some("keeper")
+        );
     }
 
     #[test]
