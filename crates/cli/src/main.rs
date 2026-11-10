@@ -500,12 +500,27 @@ fn apply_session_identity(target: &mut Target, session: &Session) {
         if hi_core::selection::model_available(&target.config, recorded_provider, recorded_model) {
             target.status.provider = recorded_provider.to_string();
             target.status.model = recorded_model.to_string();
+            resolve_image_gate(target);
         } else {
             eprintln!(
                 "hi: session recorded model {recorded_provider}/{recorded_model} — not available; using {}",
                 target.status.model
             );
         }
+    }
+}
+
+/// Re-resolve the shared image gate for the model now in
+/// `target.status` — the same rule the TUI's `rebuild_provider` applies
+/// on a /model switch (AD-0012). The gate is the instance inside the
+/// registry's `read`, so `set` (not a new gate) is what reaches it.
+/// Every change to `target.status.provider/model` after startup goes
+/// through here, so the gate cannot drift from the model (#184).
+fn resolve_image_gate(target: &Target) {
+    if let Some(entry) = target.config.providers.get(&target.status.provider) {
+        target
+            .images
+            .set(entry.images_allowed(&target.status.model, target.images_setting));
     }
 }
 
@@ -1022,5 +1037,71 @@ mod tests {
         assert!(!streams_look_interactive(true, false)); // stdout redirected
         assert!(!streams_look_interactive(false, true)); // piped stdin
         assert!(!streams_look_interactive(false, false)); // full pipe
+    }
+
+    /// A target resolved from a two-model config (`vis` first, so it is
+    /// the startup model; `novis` is `vision: false`), plus a session
+    /// recorded on `recorded`. Returns the target and the session.
+    fn gate_fixture(name: &str, first: &str, recorded: &str) -> (Target, Session) {
+        let root = hermetic_root(name);
+        let models = if first == "vis" {
+            r#"[{"id": "vis"}, {"id": "novis", "vision": false}]"#
+        } else {
+            r#"[{"id": "novis", "vision": false}, {"id": "vis"}]"#
+        };
+        std::fs::write(root.join("hi/models.json"), config_with_models(models)).unwrap();
+        point_xdg_at(&root);
+        let target = resolve_target(None, None, None).unwrap();
+        assert_eq!(target.status.model, first);
+        let cwd = root.join("proj");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = Session::start_in(
+            &root.join("sessions"),
+            &cwd,
+            "test-provider",
+            recorded,
+            None,
+            None,
+        )
+        .unwrap();
+        (target, session)
+    }
+
+    #[test]
+    fn resuming_a_non_vision_session_closes_the_image_gate() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let (mut target, session) = gate_fixture("gate-close", "vis", "novis");
+        assert!(target.images.allowed());
+        apply_session_identity(&mut target, &session);
+        assert_eq!(target.status.model, "novis");
+        assert!(!target.images.allowed(), "the recorded model has no vision");
+    }
+
+    #[test]
+    fn resuming_a_vision_session_opens_the_image_gate() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let (mut target, session) = gate_fixture("gate-open", "novis", "vis");
+        assert!(!target.images.allowed());
+        apply_session_identity(&mut target, &session);
+        assert_eq!(target.status.model, "vis");
+        assert!(target.images.allowed());
+    }
+
+    #[test]
+    fn an_unavailable_recorded_model_leaves_the_image_gate_alone() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let (mut target, session) = gate_fixture("gate-gone", "vis", "vanished");
+        apply_session_identity(&mut target, &session);
+        assert_eq!(target.status.model, "vis");
+        assert!(target.images.allowed());
+    }
+
+    #[test]
+    fn the_master_switch_keeps_the_gate_closed_on_resume() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let (mut target, session) = gate_fixture("gate-master", "novis", "vis");
+        target.images_setting = false;
+        apply_session_identity(&mut target, &session);
+        assert!(!target.images.allowed());
     }
 }
