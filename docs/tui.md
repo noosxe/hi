@@ -441,7 +441,7 @@ position, and the parked input stay session-local.
 strikethrough, tasklists; no math, by ruling) and renders with pi-tui's
 conventions: h1 bold+underlined, h2 bold, h3+ keep their `### ` prefix
 (headings color); fenced code restated with border-colored ``` lines and a
-two-space indented body (no syntax highlighting — a recorded divergence);
+two-space indented body, hard-wrapped by display columns (`wrap_code_line`: every row keeps the indent and fits the width, whitespace is kept as written, no word-boundary breaks, a wide character never straddles rows, at least one character per row at any width; fence lines are not wrapped; tabs arrive unexpanded and count as width 0) (no syntax highlighting — a recorded divergence);
 `│ `-bordered blockquotes with italic bodies; `- `/`N. ` list markers with
 `[x]`/`[ ] ` task checkboxes and four-space nesting; links as underlined
 text plus ` (url)` when the text differs from the href (the no-OSC-8

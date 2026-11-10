@@ -163,6 +163,32 @@ pub(crate) fn segs_into_line(segs: Vec<Seg>) -> Line<'static> {
     )
 }
 
+/// Hard-wrap one code line by display columns into rows of at most
+/// `width` columns including the 2-column indent every row carries.
+/// Code is not prose: whitespace is kept exactly, breaks ignore word
+/// boundaries, and a wide character never straddles a row (it moves to
+/// the next one). Every row holds at least one character, so a width
+/// at or under the indent still terminates; an empty line is one empty
+/// indented row. Characters without a width (tabs) count as 0, the
+/// same convention as `wrap_segments`.
+fn wrap_code_line(line: &str, width: usize) -> Vec<String> {
+    let avail = width.saturating_sub(2).max(1);
+    let mut rows = Vec::new();
+    let mut row = String::from("  ");
+    let mut row_w = 0usize;
+    for ch in line.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if row_w + cw > avail && row_w > 0 {
+            rows.push(std::mem::replace(&mut row, String::from("  ")));
+            row_w = 0;
+        }
+        row.push(ch);
+        row_w += cw;
+    }
+    rows.push(row);
+    rows
+}
+
 /// Block-level walk. Consumes events until `stop` (exclusive) or EOF,
 /// pushing rendered rows. `base` is the default style for inline text
 /// (quotes layer italic + quote color onto it).
@@ -235,10 +261,12 @@ fn blocks(
                         Event::Text(code) => {
                             *i += 1;
                             for line in code.lines() {
-                                rows.push(Line::from(Span::styled(
-                                    format!("  {line}"),
-                                    theme.fg(Fg::CodeBlock),
-                                )));
+                                for row in wrap_code_line(line, width) {
+                                    rows.push(Line::from(Span::styled(
+                                        row,
+                                        theme.fg(Fg::CodeBlock),
+                                    )));
+                                }
                             }
                         }
                         Event::End(TagEnd::CodeBlock) => {
@@ -870,6 +898,73 @@ mod tests {
         );
         assert_eq!(rows[0].spans[0].style.fg, THEME.fg(Fg::CodeBlockBorder).fg);
         assert_eq!(rows[1].spans[0].style.fg, THEME.fg(Fg::CodeBlock).fg);
+    }
+
+    /// Every row fits `width`, and stripping each row's 2-column
+    /// indent then joining gives the code back exactly.
+    fn assert_code_rows_fit(rows: &[String], width: usize, code: &str) {
+        for row in rows {
+            assert!(display_width(row) <= width, "{row:?} wider than {width}");
+        }
+        let joined: String = rows.iter().map(|r| r.strip_prefix("  ").unwrap()).collect();
+        assert_eq!(joined, code);
+    }
+
+    #[test]
+    fn a_long_code_line_wraps_at_the_width_keeping_every_character() {
+        // #189 (t10): a 40-column line at width 20 was one 42-column row.
+        let code = "0123456789abcdefghij0123456789ABCDEFGHIJ";
+        let rows = markdown_rows(&format!("```\n{code}\n```"), 20, Style::new());
+        let text = plain(&rows);
+        assert_eq!(text.first().unwrap(), "```");
+        assert_eq!(text.last().unwrap(), "```");
+        let body = &text[1..text.len() - 1];
+        assert!(body.len() > 1);
+        assert_code_rows_fit(body, 20, code);
+    }
+
+    #[test]
+    fn code_wrapping_keeps_whitespace_and_empty_lines() {
+        let rows = markdown_rows("```\n\n  a  b   c   d  \n```", 8, Style::new());
+        let text = plain(&rows);
+        assert_eq!(text[1], "  ", "empty code line stays one indented row");
+        let body = &text[2..text.len() - 1];
+        assert_code_rows_fit(body, 8, "  a  b   c   d  ");
+    }
+
+    #[test]
+    fn code_wrapping_never_splits_a_wide_character() {
+        let code = "日本語のコードです";
+        let rows = markdown_rows(&format!("```\n{code}\n```"), 9, Style::new());
+        let text = plain(&rows);
+        let body = &text[1..text.len() - 1];
+        // 7 columns after the indent: three wide chars (6) per row.
+        assert_code_rows_fit(body, 9, code);
+        assert!(body.iter().all(|r| r.chars().count() <= 2 + 3));
+    }
+
+    #[test]
+    fn very_narrow_widths_still_terminate_one_char_per_row() {
+        for width in [0, 1, 2, 3] {
+            let rows = wrap_code_line("abcd", width);
+            let joined: String = rows.iter().map(|r| r.strip_prefix("  ").unwrap()).collect();
+            assert_eq!(joined, "abcd");
+            assert!(rows.len() >= 2, "{width}: {rows:?}");
+        }
+        assert_eq!(wrap_code_line("", 1), vec!["  ".to_string()]);
+    }
+
+    #[test]
+    fn a_wrapped_code_block_in_a_list_item_fits_the_width() {
+        let code = "0123456789abcdefghij0123456789ABCDEFGHIJ";
+        let md = format!("- item\n\n  ```\n  {code}\n  ```");
+        let rows = markdown_rows(&md, 20, Style::new());
+        for row in plain(&rows) {
+            assert!(display_width(&row) <= 20, "{row:?}");
+        }
+        let all: String = plain(&rows).join("");
+        let squashed: String = all.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(squashed.contains(code), "{squashed}");
     }
 
     #[test]
