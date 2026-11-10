@@ -5834,4 +5834,138 @@ mod tests {
         assert_eq!(sent_cache_key(&mut app, server), None);
         let _ = std::fs::remove_dir_all(root);
     }
+
+    /// Visible window rows as plain strings.
+    fn window_text(app: &App) -> Vec<String> {
+        app.scroll
+            .window_rows()
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// Drive the app like a user: a tool call is mid-flight, Esc, then
+    /// a second message — syncing the scroll as every frame does.
+    fn esc_mid_tool_then_a_second_message(tag: &str) -> (App, std::path::PathBuf) {
+        let (mut app, root, tx) = esc_app(tag);
+        tx.send(Event::ToolCall(hi_core::ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: "{\"command\":\"sleep 9\"}".into(),
+        }))
+        .unwrap();
+        app.pump();
+        app.scroll.sync(&app.messages, 60, None, app.turn.is_some());
+        assert!(
+            crate::ui::pending_tool(&app.messages, app.turn.is_some()).is_some(),
+            "mid-tool the call is the live pending execution"
+        );
+        app.handle_key(key(KeyCode::Esc));
+        app.scroll.sync(&app.messages, 60, None, app.turn.is_some());
+        app.set_input("second message".to_string());
+        app.handle_key(key(KeyCode::Enter));
+        for _ in 0..3 {
+            app.scroll.sync(&app.messages, 60, None, app.turn.is_some());
+        }
+        (app, root)
+    }
+
+    #[test]
+    fn esc_mid_tool_leaves_no_call_running() {
+        // #221 (a): the interrupted call stayed the live "running"
+        // block, and never flushed to the transcript.
+        let (mut app, root, tx) = esc_app("settle");
+        tx.send(Event::ToolCall(hi_core::ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: "{\"command\":\"sleep 9\"}".into(),
+        }))
+        .unwrap();
+        app.pump();
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.turn.is_none());
+        app.scroll.sync(&app.messages, 60, None, app.turn.is_some());
+        assert!(crate::ui::pending_tool(&app.messages, false).is_none());
+        let text = window_text(&app).join("\n");
+        assert!(
+            text.contains("bash"),
+            "the call is in the transcript: {text}"
+        );
+        assert!(text.contains("interrupted"), "and settled: {text}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_message_after_an_esc_mid_tool_appears_exactly_once() {
+        // #221 (b): the fold pointer stopped before the unanswered
+        // call, so every later sync re-derived the next message.
+        let (app, root) = esc_mid_tool_then_a_second_message("once");
+        let rows = window_text(&app);
+        let count = rows.iter().filter(|r| r.contains("second message")).count();
+        assert_eq!(count, 1, "rows: {rows:#?}");
+        assert!(
+            crate::ui::pending_tool(&app.messages, false).is_none(),
+            "the interrupted call is not running"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_mid_turn_note_neither_settles_the_running_call_nor_prints_twice() {
+        // #221 review: a task-completion note folds into the transcript
+        // while a long tool still runs. The call must stay pending, the
+        // note must print once, and the real result must pair up later.
+        let (mut app, root, tx) = esc_app("midnote");
+        tx.send(Event::ToolCall(hi_core::ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: "{\"command\":\"sleep 9\"}".into(),
+        }))
+        .unwrap();
+        app.pump();
+        app.messages
+            .push(Message::System("task 1 (build) finished (exit 0)".into()));
+        for _ in 0..3 {
+            app.scroll.sync(&app.messages, 60, None, app.turn.is_some());
+            let text = window_text(&app).join("\n");
+            assert!(!text.contains("interrupted"), "{text}");
+            assert!(
+                crate::ui::pending_tool(&app.messages, true).is_some(),
+                "the call stays the live pending execution"
+            );
+        }
+        assert_eq!(
+            window_text(&app)
+                .iter()
+                .filter(|r| r.contains("finished (exit 0)"))
+                .count(),
+            1,
+            "the note prints once while the call is pending"
+        );
+        tx.send(Event::ToolResult(hi_core::ToolResult {
+            call_id: "c1".into(),
+            name: "bash".into(),
+            content: "all built".into(),
+            is_error: false,
+            images: Vec::new(),
+        }))
+        .unwrap();
+        tx.send(Event::TurnEnd).unwrap();
+        app.pump();
+        assert!(app.turn.is_none());
+        for _ in 0..3 {
+            app.scroll.sync(&app.messages, 60, None, app.turn.is_some());
+        }
+        let text = window_text(&app).join("\n");
+        assert!(!text.contains("interrupted"), "{text}");
+        assert!(text.contains("all built"), "the result paired: {text}");
+        assert_eq!(text.matches("finished (exit 0)").count(), 1, "{text}");
+        assert!(crate::ui::pending_tool(&app.messages, false).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
