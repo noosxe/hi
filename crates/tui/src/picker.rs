@@ -175,6 +175,18 @@ pub fn picker_lines(
     lines
 }
 
+/// Rows for the inline picker viewport: title + list + filter + hint,
+/// at least 6 and at most 20, and always within the terminal (two rows
+/// spare). On a terminal too short for the floor the ceiling wins:
+/// `clamp` panics when min > max (#192).
+fn picker_height(sessions: usize, terminal_rows: u16) -> u16 {
+    let ceiling = terminal_rows.saturating_sub(2).max(1);
+    (sessions.min(usize::from(u16::MAX)) as u16)
+        .saturating_add(3)
+        .clamp(6.min(ceiling), ceiling)
+        .min(20)
+}
+
 /// Show the picker and return the chosen session file, if any. Owns
 /// its terminal lifetime — a short inline viewport restored before
 /// returning — so the main TUI boots fresh after selection (pi's
@@ -182,10 +194,7 @@ pub fn picker_lines(
 pub fn pick_session(summaries: &[SessionSummary]) -> Option<PathBuf> {
     let previews: Vec<Option<String>> = summaries.iter().map(|s| preview_of(&s.path)).collect();
     let (columns, rows) = ratatui::crossterm::terminal::size().unwrap_or((80, 24));
-    // Title + list + filter + hint rows, bounded by the real terminal.
-    let height = (summaries.len() as u16 + 3)
-        .clamp(6, rows.saturating_sub(2))
-        .min(20);
+    let height = picker_height(summaries.len(), rows);
     let mut filter = String::new();
     let mut selected: usize = 0;
 
@@ -278,6 +287,27 @@ mod tests {
             },
             modified: SystemTime::UNIX_EPOCH + Duration::from_secs(modified_secs),
         }
+    }
+
+    #[test]
+    fn picker_height_never_panics_and_stays_inside_the_terminal() {
+        // #192: a terminal of 7 rows or fewer made `clamp(6, rows - 2)`
+        // panic with min > max.
+        for rows in 0..=60u16 {
+            for sessions in [0usize, 1, 5, 17, 100, 100_000] {
+                let h = picker_height(sessions, rows);
+                assert!(
+                    (1..=20).contains(&h),
+                    "{sessions} sessions, {rows} rows: {h}"
+                );
+                if rows >= 3 {
+                    assert!(h <= rows - 2, "{sessions} sessions, {rows} rows: {h}");
+                }
+            }
+        }
+        assert_eq!(picker_height(0, 24), 6, "the floor on a roomy terminal");
+        assert_eq!(picker_height(100, 24), 20, "the ceiling");
+        assert_eq!(picker_height(2, 7), 5);
     }
 
     #[test]
