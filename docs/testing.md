@@ -14,9 +14,22 @@ cargo run            # hi --mock needs no config
 
 CI runs the same gates (fmt, clippy, test) plus a weekly `cargo audit` via GitHub Actions — see `.github/workflows/ci.yml`. The toolchain channel is `stable` everywhere (`rust-toolchain.toml` ↔ `flake.nix` ↔ CI). Third-party actions are SHA-pinned with a `# vX.Y.Z` comment; `dtolnay/rust-toolchain@stable` stays a moving branch ref on purpose — the compiler channel is pinned by `rust-toolchain.toml` (#24, AD-0037). Dependabot (`.github/dependabot.yml`) opens one grouped PR per ecosystem weekly (`cargo`, `github-actions`), ignoring Rust major bumps.
 
-Current count: **689 `#[test]` functions** (the README's count gets refreshed in passing;
+## The hermetic config dir and `SETTINGS_LOCK`
+
+`hi-tui` tests share one scratch config dir per process (`hermetic_config` in
+`app.rs`, armed once through `XDG_CONFIG_HOME`/`XDG_DATA_HOME` under
+`$TMPDIR/hi-tui-test-config-<pid>`). Any test whose path saves or loads
+`settings.json` there (`/thinking`, `/reload`, anything reaching
+`Settings::persist_*` or `Settings::load`) must hold `settings_lock()` (the
+poison-tolerant guard over `SETTINGS_LOCK` in the `app.rs` tests module) for its
+whole body. Enter in the settings board and the `/model` picker only changes
+the session; only Ctrl-S persists, so tests that stop at Enter need no lock.
+Saves are also atomic in core (`write_json`: temp file + rename), so a reader
+never sees an empty `settings.json` even without the lock (#215).
+
+Current count: **691 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 91
-core: openai 48, session 44, settings 29, subagent 20, tasks 24, selection 15, read 13,
+core: openai 48, session 44, settings 31, subagent 20, tasks 24, selection 15, read 13,
 agent 17, walk 11, headless 13, message 5, catalog 5, context_report 4, grep 8, image_util 7, truncate 7, edit 6,
 config 7, system_prompt 6, tasks-tool 6, bash 16, process 2, mod 6, image_resize 6, subagent-tool 10,
 find 5, write 3, ls 3, thinking 3, mock 2, event 1, tool 1. tui: app 118,

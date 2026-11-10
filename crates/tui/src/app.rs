@@ -2775,10 +2775,16 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
 
-    /// The two tests that persist through `apply_thinking_choice`
-    /// still serialize: their read-modify-write on the one scratch
-    /// `settings.json` must not interleave in-process.
+    /// Every test whose path saves or loads `settings.json` in the shared
+    /// hermetic config dir (`/thinking`, `/reload`) holds this for its
+    /// whole body: their read-modify-write on the one scratch file must
+    /// not interleave in-process (#215).
     static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Poison-tolerant: one failing test must not cascade into the rest.
+    fn settings_lock() -> std::sync::MutexGuard<'static, ()> {
+        SETTINGS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn app() -> App {
         test_app()
@@ -3508,7 +3514,7 @@ mod tests {
 
     #[test]
     fn thinking_command_switches_level_directly() {
-        let _guard = SETTINGS_LOCK.lock().unwrap();
+        let _guard = settings_lock();
         let mut app = test_app();
         // The argument form never opens a modal — power path.
         app.run_command("thinking", "high");
@@ -3571,7 +3577,7 @@ mod tests {
 
     #[test]
     fn thinking_picker_enter_switches_wraps_and_persists() {
-        let _guard = SETTINGS_LOCK.lock().unwrap();
+        let _guard = settings_lock();
         let mut app = test_app();
         app.run_command("thinking", "");
         // Wrap up from auto (preselected: nothing set) lands on max.
@@ -3653,7 +3659,7 @@ mod tests {
 
     #[test]
     fn reload_rereads_models_json_and_rebuilds_the_provider() {
-        let _guard = SETTINGS_LOCK.lock().unwrap();
+        let _guard = settings_lock();
         let _cleanup = ConfigCleanup::fresh();
         let mut app = test_app();
         let dir = hermetic_config_dir();
@@ -3674,7 +3680,7 @@ mod tests {
 
     #[test]
     fn reload_keeps_the_old_provider_when_the_model_vanished() {
-        let _guard = SETTINGS_LOCK.lock().unwrap();
+        let _guard = settings_lock();
         let _cleanup = ConfigCleanup::fresh();
         let mut app = test_app();
         let dir = hermetic_config_dir();
@@ -3696,7 +3702,7 @@ mod tests {
 
     #[test]
     fn reload_survives_a_broken_models_json_and_keeps_the_old() {
-        let _guard = SETTINGS_LOCK.lock().unwrap();
+        let _guard = settings_lock();
         let _cleanup = ConfigCleanup::fresh();
         let mut app = test_app();
         let dir = hermetic_config_dir();
@@ -3711,7 +3717,7 @@ mod tests {
 
     #[test]
     fn reload_applies_settings_that_speak_and_keeps_the_silent() {
-        let _guard = SETTINGS_LOCK.lock().unwrap();
+        let _guard = settings_lock();
         let _cleanup = ConfigCleanup::fresh();
         let mut app = test_app();
         let dir = hermetic_config_dir();
@@ -3744,7 +3750,7 @@ mod tests {
 
     #[test]
     fn reload_survives_a_broken_settings_json() {
-        let _guard = SETTINGS_LOCK.lock().unwrap();
+        let _guard = settings_lock();
         let _cleanup = ConfigCleanup::fresh();
         let mut app = test_app();
         let dir = hermetic_config_dir();
@@ -4965,6 +4971,7 @@ mod tests {
     fn thinking_switch_restamps_the_live_session_header() {
         // AD-0045 ruling 2: the live header follows the switch, so
         // the next resume of this session restores the last level.
+        let _guard = settings_lock();
         let root = std::env::temp_dir().join(format!("hi-think-restamp-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let mut app = test_app();

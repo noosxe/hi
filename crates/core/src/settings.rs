@@ -285,16 +285,42 @@ impl Settings {
 }
 
 /// Create the parent directory and write `value` pretty-printed with a
-/// trailing newline.
+/// trailing newline. The save is atomic (#215): the bytes go to a unique
+/// temp file beside the target, are flushed, then renamed over it, so a
+/// concurrent reader (or a crash mid-save) sees the old file or the new
+/// one, never a truncated one. A failed write or rename removes the temp
+/// file.
 fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
     }
     let pretty = serde_json::to_string_pretty(value)
         .map_err(|err| format!("cannot serialize settings: {err}"))?;
-    std::fs::write(path, pretty + "\n")
-        .map_err(|err| format!("cannot write {}: {err}", path.display()))
+
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(
+        ".tmp-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let tmp = path.with_file_name(name);
+
+    let result = (|| {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all((pretty + "\n").as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, path)
+    })();
+    result.map_err(|err| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("cannot write {}: {err}", path.display())
+    })
 }
 
 #[cfg(test)]
@@ -705,6 +731,46 @@ mod tests {
         Settings::persist_default_model_to(&path, "m").unwrap();
         assert!(std::fs::read_to_string(&path).unwrap().ends_with('\n'));
         assert_eq!(read_json(&path)["defaultModel"], "m");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_saves_never_expose_a_torn_file() {
+        // #215: a reader racing a writer must see the old or the new
+        // file, never an empty/truncated one.
+        let dir = tmp("atomic");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        Settings::persist_images_to(&path, true).unwrap();
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || {
+            for i in 0..200 {
+                Settings::persist_images_to(&writer_path, i % 2 == 0).unwrap();
+            }
+        });
+        let mut reads = 0;
+        while !writer.is_finished() || reads < 200 {
+            let raw = std::fs::read_to_string(&path).unwrap();
+            Settings::parse(&raw, &path).expect("reader saw a torn settings.json");
+            reads += 1;
+        }
+        writer.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_save_leaves_no_temp_file() {
+        // The target is a directory, so the final rename fails.
+        let dir = tmp("failsave");
+        let target = dir.join("settings.json");
+        std::fs::create_dir_all(&target).unwrap();
+        let err = write_json(&target, &serde_json::json!({"a": 1})).unwrap_err();
+        assert!(err.contains("cannot write"), "{err}");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, vec![std::ffi::OsString::from("settings.json")]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

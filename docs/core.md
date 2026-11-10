@@ -604,7 +604,11 @@ on read (`None` fields are skipped on serialize). Path: next to `models.json`
 
 - Missing file = `Settings::default()` (normal first-run state; tested).
 - Unparseable file = `Err` (surfaced, not silently ignored; tested).
-- `save()` creates parent dirs, writes pretty JSON + trailing newline. It
+- `save()` creates parent dirs, writes pretty JSON + trailing newline. All
+  saves go through `write_json`, which is **atomic**: it writes a uniquely
+  named temp file beside the target (`settings.json.tmp-<pid>-<n>`), `sync_all`s
+  it and `rename`s it over the target (removed again if the write or rename
+  fails), so a concurrent reader or a crash never sees a truncated file (#215). It
   writes **only the known keys**; the `persist_*` functions
   (`persist_default_model`, `persist_task_turns`, `persist_thinking`,
   `persist_images`) are the path that preserves the rest of the file.
