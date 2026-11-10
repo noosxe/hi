@@ -232,7 +232,7 @@ same way (`stamp_config`, #186): `/reload` swaps it for every clone, and a
 run snapshots it (an `Arc`) at start so a reload never changes it
 mid-run. `run` is blocking by ruling (the tool loop is
 sequential; parallelism is #5's) and returns a shaped `SubagentResult`
-{final text, the subagent's own usage, round count, and the recording
+{final text, the subagent's own usage, round count (tool-call rounds; parallel calls in one round count once), and the recording
 path when one was written} — `Event::Error` becomes `Err`. The tool's
 result line flags runs whose cumulative input crosses
 `SUBAGENT_HIGH_TOKEN_USE` (100k prompt tokens) with
