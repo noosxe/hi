@@ -843,3 +843,71 @@ fn session_flag_reopens_that_exact_session_by_path_and_id() {
     assert_eq!(lines(&newer), newer_lines, "newest session untouched");
     assert_eq!(session_files(&env).len(), 2, "no new file");
 }
+
+// ── exit sweep (#175) ─────────────────────────────────────────────
+
+/// `kill -0`: is the pid still there? (The cli crate has no libc.)
+fn pid_exists(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn print_mode_exit_kills_a_task_the_model_started() {
+    // The model starts a `task_run` process, the next round answers
+    // with text, `hi -p` exits: the sweep (print_mode's ExitGuard)
+    // must take the task's group with it.
+    let env = Env::new("exit-sweep");
+    let pid_file = env.root.join("task.pid");
+    let args = json!({
+        "command": format!("echo $$ > {}; exec sleep 120", pid_file.display())
+    })
+    .to_string();
+    let call = json!({"choices":[{"delta":{"tool_calls":[
+        {"index":0,"id":"c1","function":{"name":"task_run","arguments":args}}]}}]});
+    let api = FakeApi::start(vec![
+        Script::Sse(sse(&[call])),
+        Script::Sse(sse(&[token_chunk("started")])),
+    ]);
+    env.write_models_json(api.url(), plain_model());
+    let project = env.project("exit-sweep-proj");
+
+    let (code, stdout, stderr) = run(
+        &project,
+        &env,
+        &[
+            "-p",
+            "--provider",
+            "fake",
+            "--model",
+            "fake-mini",
+            "--tools",
+            "all",
+            "go",
+        ],
+    );
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    // Poll: the sweep ran before exit, but the OS may take a beat.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !pid.is_empty() && pid_exists(&pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let left = !pid.is_empty() && pid_exists(&pid);
+    if left {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &pid])
+            .status();
+    }
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("started"), "stdout: {stdout}");
+    assert!(!pid.is_empty(), "the task never started");
+    assert!(!left, "task_run process {pid} outlived `hi -p`");
+    let _ = std::fs::remove_dir_all(&env.root);
+}

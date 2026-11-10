@@ -1230,10 +1230,11 @@ mod tests {
             .spawn(TaskSpec::process("sleep 30", std::env::temp_dir()))
             .unwrap();
         let pid = m.status(id).unwrap().pid;
-        drop(m);
-        assert!(!group_dead(pid), "a non-last drop must not kill");
-        other.shutdown();
+        // Two handles stay alive across the call: no last-handle help.
+        m.shutdown();
         until("group to die on shutdown", || group_dead(pid));
+        drop(other);
+        drop(m);
     }
 
     #[test]
