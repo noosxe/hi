@@ -9,6 +9,11 @@
 //!   process-wide registry) — a call abandoned by Ctrl-C, or by Esc
 //!   followed by a quit.
 //!
+//! The sweep also **closes** both registries: a `task_run` or `bash`
+//! call the still-running agent thread tries to start afterwards is
+//! refused ("hi is exiting") and spawns nothing, so nothing slips in
+//! behind the sweep.
+//!
 //! Out of scope: Esc alone does not kill an abandoned `bash` call (the
 //! guarantee covers exits), members that left their group (`setsid`),
 //! and Windows (#31). Call it after the terminal is restored — the

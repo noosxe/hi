@@ -40,6 +40,10 @@
 //!   the in-flight turn's worker thread holds a registry clone at a
 //!   mid-turn quit, so a last-handle `Drop` alone never fires there.
 //!   Idempotent; `Drop` reuses it under the last-handle condition.
+//!   It also closes the manager: `spawn` afterwards returns "hi is
+//!   exiting" and starts nothing (the flag is set and re-checked under
+//!   the tasks lock, so a racing spawn is either swept or kills its own
+//!   child).
 //!   `exit::shutdown` calls it on every way out of `hi`.
 //!
 //! The manager tracks *life and output*; what the worker is, is a
@@ -54,7 +58,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
-use crate::process::stop_tree;
+use crate::process::{kill_group, stop_tree};
 use std::time::{Duration, Instant};
 
 /// In-memory output kept for instant tail reads. The full stream goes
@@ -64,6 +68,9 @@ pub const RING_BYTES: usize = 256 * 1024;
 /// error the caller (tool) turns into content the model can read.
 pub const MAX_RUNNING: usize = 16;
 /// Child poll cadence — the bash tool's interval.
+/// The refusal `spawn` returns once `shutdown` closed the manager.
+const EXITING: &str = "hi is exiting; not starting new tasks";
+
 const POLL: Duration = Duration::from_millis(50);
 /// How long the monitor waits for the reader to hit EOF once the task
 /// is over (the `DRAIN_GRACE` of the bash tool).
@@ -346,6 +353,9 @@ struct Inner {
     /// it does no extra signalling or waiting while workers are still
     /// reaping the groups the first one killed.
     swept: Mutex<std::collections::HashSet<u64>>,
+    /// Set by `shutdown` under the `tasks` lock; `spawn` refuses once
+    /// set, and re-checks it under the same lock as the insert.
+    closed: std::sync::atomic::AtomicBool,
 }
 
 /// A cloneable handle to the background task manager. `shutdown` (or
@@ -380,6 +390,7 @@ impl TaskManager {
             completions: Mutex::new(rx),
             logs_dir,
             swept: Mutex::new(Default::default()),
+            closed: std::sync::atomic::AtomicBool::new(false),
         }))
     }
 
@@ -387,6 +398,9 @@ impl TaskManager {
     /// spawned synchronously (so spawn errors come back as `Err`),
     /// then handed to a worker thread that owns the lifecycle.
     pub fn spawn(&self, spec: TaskSpec) -> Result<u64, String> {
+        if self.0.closed.load(Ordering::SeqCst) {
+            return Err(EXITING.into());
+        }
         let running = self
             .0
             .tasks
@@ -431,11 +445,23 @@ impl TaskManager {
             ring: ring.clone(),
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
-        self.0.tasks.lock().unwrap().insert(id, entry);
+        let cancel = entry.cancel.clone();
+        {
+            // `shutdown` closes under this lock: the insert either
+            // lands before its snapshot (and is swept) or sees the flag
+            // here and kills its own child — no window in between.
+            let mut tasks = self.0.tasks.lock().unwrap();
+            if self.0.closed.load(Ordering::SeqCst) {
+                drop(tasks);
+                kill_group(child.id(), libc::SIGKILL);
+                let _ = child.wait();
+                return Err(EXITING.into());
+            }
+            tasks.insert(id, entry);
+        }
 
         let tasks = Arc::clone(&self.0.tasks);
         let tx = Arc::clone(&self.0.tx);
-        let cancel = self.0.tasks.lock().unwrap()[&id].cancel.clone();
         std::thread::Builder::new()
             .name(format!("hi-task-{id}"))
             .spawn(move || {
@@ -525,15 +551,15 @@ impl TaskManager {
     /// may still be polling; they observe the exit and finish on their
     /// own, and their completion sends land in a channel nobody reads.
     pub fn shutdown(&self) {
-        let running: Vec<(u64, u32)> = self
-            .0
-            .tasks
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, e)| !e.state.finished())
-            .map(|(id, e)| (*id, e.pid))
-            .collect();
+        let running: Vec<(u64, u32)> = {
+            let tasks = self.0.tasks.lock().unwrap();
+            self.0.closed.store(true, Ordering::SeqCst);
+            tasks
+                .iter()
+                .filter(|(_, e)| !e.state.finished())
+                .map(|(id, e)| (*id, e.pid))
+                .collect()
+        };
         let mut swept = self.0.swept.lock().unwrap();
         let pids: Vec<u32> = running
             .into_iter()
@@ -1211,11 +1237,29 @@ mod tests {
     }
 
     #[test]
+    fn a_spawn_after_shutdown_is_refused_and_starts_nothing() {
+        let (m, dir) = manager();
+        m.shutdown();
+        let pidf = dir.join("late.pid");
+        let err = m
+            .spawn(TaskSpec::process(
+                format!("echo $$ > {}; sleep 30", pidf.display()),
+                std::env::temp_dir(),
+            ))
+            .unwrap_err();
+        assert!(err.contains("exiting"), "{err}");
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!pidf.exists(), "a process started after shutdown");
+        assert_eq!(m.running_count(), 0);
+    }
+
+    #[test]
     fn shutdown_is_idempotent_and_free_when_nothing_runs() {
-        let (m, _dir) = manager();
+        let (empty, _d) = manager();
         let started = Instant::now();
-        m.shutdown(); // nothing running: no sleep
+        empty.shutdown(); // nothing running: no sleep
         assert!(started.elapsed() < Duration::from_millis(100));
+        let (m, _dir) = manager();
         let id = m
             .spawn(TaskSpec::process("sleep 30", std::env::temp_dir()))
             .unwrap();

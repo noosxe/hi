@@ -261,7 +261,9 @@ on the process-wide registry (`BashGroups::global`, used by
 never `kill_all` the global one). The `bash` tool registers its child's
 group for the call's lifetime (RAII). `exit::ExitGuard` runs the sweep on
 drop. Esc alone does not kill an abandoned `bash` call; the guarantee
-covers exits. `process::terminate_groups` is the shared TERM, grace, KILL.
+covers exits. The sweep also closes both registries: a later `bash` or
+`task_run` call is refused ("hi is exiting") and spawns nothing.
+`process::terminate_groups` is the shared TERM, grace, KILL.
 
 **Lifetime (#174):** a task is `Running` until its whole process group is
 gone, not until the leader exits. `monitor` remembers the leader's exit

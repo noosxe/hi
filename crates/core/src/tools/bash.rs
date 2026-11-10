@@ -22,7 +22,9 @@
 //! return path unregisters). `BashTool::new` uses the process-wide
 //! registry, which `exit::shutdown` kills on the way out — a call
 //! abandoned by Ctrl-C (or by Esc, then a quit) does not outlive `hi`.
-//! Esc alone does not kill the call; the guarantee covers exits.
+//! Esc alone does not kill the call; the guarantee covers exits. The
+//! sweep also closes the registry: a call starting afterwards fails with
+//! "hi is exiting" and spawns nothing.
 
 use super::truncate;
 use super::{args_object, opt_str, opt_usize};
@@ -163,9 +165,9 @@ impl Tool for BashTool {
         // Own process group (#30): the timeout kill takes the whole
         // tree — the task manager's rule, shared plumbing.
         crate::process::own_group(&mut cmd);
-        let mut child = cmd.spawn().map_err(|e| format!("cannot spawn bash: {e}"))?;
-        // Registered for the child's lifetime; dropped on every return.
-        let _registered = self.groups.register(child.id());
+        // Spawned and registered under the registry's lock (refused
+        // once the exit sweep closed it); unregisters on every return.
+        let (mut child, _registered) = self.groups.spawn(&mut cmd)?;
         let Some(out_pipe) = child.stdout.take() else {
             return Err("bash produced no stdout pipe".into());
         };
