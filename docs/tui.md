@@ -277,6 +277,8 @@ entirely to an open menu)
 - `draw_input`: top/bottom rules only, no side walls (pi-style); the real
   terminal cursor parks **at the logical cursor** (`wrap::cursor_pos` maps the
   byte offset into wrapped row/column — mid-text while editing, AD-0014);
+  past six rows the box scrolls just far enough that the caret's row is the
+  last one shown (stateless, from the caret row; #206);
   while busy, the top rule carries the right-aligned activity label in yellow.
 - Transcript is NOT drawn here — finalized messages go to scrollback via
   `block_rows` + `rows_into` (pi-style role blocks, no text labels; see the

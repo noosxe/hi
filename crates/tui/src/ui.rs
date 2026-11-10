@@ -274,10 +274,17 @@ fn draw_input(frame: &mut Frame, area: Rect, app: &App) {
     let (cursor_row, cursor_col) =
         crate::wrap::cursor_pos(&app.input, app.cursor, inner.width as usize);
     let text: Text = rows.iter().map(|row| Line::from(*row)).collect();
-    frame.render_widget(Paragraph::new(text).block(block), area);
+    // The box shows at most `inner.height` rows (`input_height` clamps
+    // to six): past that, scroll just far enough that the caret's row is
+    // the last one shown, so a long paste never hides the caret (#206).
+    let scroll = (cursor_row + 1).saturating_sub(inner.height as usize);
+    frame.render_widget(
+        Paragraph::new(text).block(block).scroll((scroll as u16, 0)),
+        area,
+    );
     frame.set_cursor_position(Position::new(
         inner.x + cursor_col as u16,
-        inner.y + cursor_row as u16,
+        inner.y + (cursor_row - scroll) as u16,
     ));
 }
 
@@ -1122,6 +1129,44 @@ mod tests {
         assert!(row_text(13).trim().is_empty()); // the block's lower pad
         assert!(row_text(14).trim().is_empty()); // the margin row
         assert!(row_text(15).contains("─")); // input top rule
+    }
+
+    #[test]
+    fn a_long_input_scrolls_to_keep_the_caret_visible() {
+        use crate::app::test_app;
+        // #206: ten rows in a six-row box — the caret used to land
+        // below the box (off screen) while the box showed rows 1-6.
+        let mut app = test_app();
+        app.input = (1..=10)
+            .map(|n| format!("line{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.cursor = app.input.len();
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let pos = terminal.get_cursor_position().unwrap();
+        let buf = terminal.backend_mut().buffer().clone();
+        let row_text = |y: u16| {
+            (0..40)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        };
+        // Rows 11..=16 hold the box's text, rule at 17.
+        assert_eq!(row_text(11), "line5");
+        assert_eq!(row_text(16), "line10");
+        assert!(row_text(17).contains('─'));
+        assert_eq!((pos.x, pos.y), (6, 16), "caret at the end of the last row");
+
+        // Caret back on the first line: the box scrolls back to it.
+        app.cursor = 0;
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let pos = terminal.get_cursor_position().unwrap();
+        let buf = terminal.backend_mut().buffer().clone();
+        let first: String = (0..40).map(|x| buf[(x, 11)].symbol().to_string()).collect();
+        assert_eq!(first.trim_end(), "line1");
+        assert_eq!((pos.x, pos.y), (0, 11));
     }
 
     #[test]
