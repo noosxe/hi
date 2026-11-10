@@ -111,14 +111,17 @@ impl Tool for EditTool {
             if old.is_empty() {
                 return Err(format!("edits[{i}].oldText must not be empty"));
             }
-            let mut found = content.match_indices(old).map(|(at, _)| at);
-            let Some(start) = found.next() else {
+            let Some(start) = content.find(old) else {
                 return Err(format!(
                     "edits[{i}].oldText not found in {}",
                     path.display()
                 ));
             };
-            if found.next().is_some() {
+            // Uniqueness counts overlapping occurrences too (`aa` in
+            // `aaa` is ambiguous): look again from one character past
+            // the first match, not from its end (#195).
+            let next_from = start + content[start..].chars().next().map_or(1, char::len_utf8);
+            if content[next_from..].contains(old) {
                 return Err(format!(
                     "edits[{i}].oldText matches more than once — include surrounding text to make it unique"
                 ));
@@ -187,6 +190,24 @@ mod tests {
             .execute(r#"{"path":"f.txt","edits":[{"oldText":"ab","newText":"x"}]}"#)
             .unwrap_err();
         assert!(many.contains("more than once"), "got: {many}");
+    }
+
+    #[test]
+    fn an_overlapping_match_is_ambiguous() {
+        // #195: `aa` occurs at 0 and at 1 in `aaa`; match_indices skipped
+        // the second, so the edit silently hit the first.
+        let (root, tool) = setup("overlapping-match", "aaa\n");
+        let err = tool
+            .execute(r#"{"path":"f.txt","edits":[{"oldText":"aa","newText":"b"}]}"#)
+            .unwrap_err();
+        assert!(err.contains("more than once"), "got: {err}");
+        assert_eq!(fs::read_to_string(root.join("f.txt")).unwrap(), "aaa\n");
+        // Multibyte first characters step by their own width.
+        let (_, tool) = setup("overlapping-multibyte", "ééé\n");
+        let err = tool
+            .execute(r#"{"path":"f.txt","edits":[{"oldText":"éé","newText":"b"}]}"#)
+            .unwrap_err();
+        assert!(err.contains("more than once"), "got: {err}");
     }
 
     #[test]
