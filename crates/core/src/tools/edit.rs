@@ -99,8 +99,22 @@ impl Tool for EditTool {
             content.remove(0);
         }
 
+        // `read` shows CRLF lines as plain lines, so a multi-line `oldText`
+        // copied from it carries bare `\n`. Match in LF space and map the
+        // spans back onto the real bytes, so a CRLF file edits like an LF
+        // one and untouched lines keep their endings (#196; pi does the
+        // same).
+        let matching = content.replace("\r\n", "\n");
+        // Normalized offsets of the LFs that were half of a CRLF.
+        let crlf_lfs: Vec<usize> = content
+            .match_indices("\r\n")
+            .enumerate()
+            .map(|(n, (at, _))| at - n)
+            .collect();
+        let to_original = |offset: usize| offset + crlf_lfs.partition_point(|&lf| lf < offset);
+
         // Validate everything against the original before touching anything.
-        let mut spans: Vec<(usize, usize, &str)> = Vec::new();
+        let mut spans: Vec<(usize, usize, String)> = Vec::new();
         for (i, edit) in edits.iter().enumerate() {
             let Some(old) = edit.get("oldText").and_then(|v| v.as_str()) else {
                 return Err(format!("edits[{i}].oldText must be a string"));
@@ -111,7 +125,9 @@ impl Tool for EditTool {
             if old.is_empty() {
                 return Err(format!("edits[{i}].oldText must not be empty"));
             }
-            let Some(start) = content.find(old) else {
+            let old = old.replace("\r\n", "\n");
+            let old = old.as_str();
+            let Some(start) = matching.find(old) else {
                 return Err(format!(
                     "edits[{i}].oldText not found in {}",
                     path.display()
@@ -120,13 +136,13 @@ impl Tool for EditTool {
             // Uniqueness counts overlapping occurrences too (`aa` in
             // `aaa` is ambiguous): look again from one character past
             // the first match, not from its end (#195).
-            let next_from = start + content[start..].chars().next().map_or(1, char::len_utf8);
-            if content[next_from..].contains(old) {
+            let next_from = start + matching[start..].chars().next().map_or(1, char::len_utf8);
+            if matching[next_from..].contains(old) {
                 return Err(format!(
                     "edits[{i}].oldText matches more than once — include surrounding text to make it unique"
                 ));
             }
-            spans.push((start, start + old.len(), new));
+            spans.push((start, start + old.len(), new.replace("\r\n", "\n")));
         }
         spans.sort_by_key(|(start, _, _)| *start);
         for pair in spans.windows(2) {
@@ -136,7 +152,13 @@ impl Tool for EditTool {
         }
 
         for (start, end, new) in spans.iter().rev() {
-            content.replace_range(start..end, new);
+            let (start, end) = (to_original(*start), to_original(*end));
+            // New lines take the ending of the line they land on.
+            if line_ending_at(&content, start) == "\r\n" {
+                content.replace_range(start..end, &new.replace('\n', "\r\n"));
+            } else {
+                content.replace_range(start..end, new);
+            }
         }
         std::fs::write(&path, &content)
             .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
@@ -145,6 +167,22 @@ impl Tool for EditTool {
             spans.len(),
             path.display()
         ))
+    }
+}
+
+/// Line ending of the line containing `offset`: its own LF or CRLF, or
+/// — on an unterminated last line — the file's first line ending.
+fn line_ending_at(content: &str, offset: usize) -> &'static str {
+    let ending_before = |lf: usize| {
+        if content[..lf].ends_with('\r') {
+            "\r\n"
+        } else {
+            "\n"
+        }
+    };
+    match content[offset..].find('\n') {
+        Some(rel) => ending_before(offset + rel),
+        None => content.find('\n').map_or("\n", ending_before),
     }
 }
 
@@ -190,6 +228,38 @@ mod tests {
             .execute(r#"{"path":"f.txt","edits":[{"oldText":"ab","newText":"x"}]}"#)
             .unwrap_err();
         assert!(many.contains("more than once"), "got: {many}");
+    }
+
+    #[test]
+    fn a_multi_line_old_text_matches_a_crlf_file_and_keeps_its_endings() {
+        // #196: `read` shows CRLF lines as plain lines, so the model's
+        // multi-line oldText has bare LFs.
+        let (root, tool) = setup("crlf", "one\r\ntwo\r\nthree\r\nfour\r\n");
+        tool.execute(
+            r#"{"path":"f.txt","edits":[{"oldText":"two\nthree\n","newText":"2\n2.5\n3\n"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(root.join("f.txt")).unwrap(),
+            b"one\r\n2\r\n2.5\r\n3\r\nfour\r\n"
+        );
+        // A match that ends mid-line, and a second edit on the last line.
+        tool.execute(
+            r#"{"path":"f.txt","edits":[{"oldText":"one\n2","newText":"1\nx"},{"oldText":"four","newText":"4"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(root.join("f.txt")).unwrap(),
+            b"1\r\nx\r\n2.5\r\n3\r\n4\r\n"
+        );
+    }
+
+    #[test]
+    fn a_mixed_ending_file_keeps_the_endings_of_untouched_lines() {
+        let (root, tool) = setup("mixed", "a\nb\r\nc\nd\r\n");
+        tool.execute(r#"{"path":"f.txt","edits":[{"oldText":"b\nc","newText":"B\nC"}]}"#)
+            .unwrap();
+        assert_eq!(fs::read(root.join("f.txt")).unwrap(), b"a\nB\r\nC\nd\r\n");
     }
 
     #[test]

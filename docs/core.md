@@ -161,7 +161,8 @@ structural chunk-walk for the kitty renderer — AD-0010 — and
   it — survivors stay alive, later output is discarded, and a note on the
   result says so; survivors are untracked and not swept at teardown —
   `task_run` is the tracked form, #173), `edit` (`edits[]` matched
-  against the ORIGINAL file, each exactly once — overlapping occurrences
+  against the ORIGINAL file in LF space — CRLF files match a bare-`\n`
+  `oldText` and keep their endings, #196 — each exactly once, overlapping occurrences
   count, `aa` in `aaa` is ambiguous (#195; pi counts non-overlapping) —
   overlapping edits rejected),
   `write` (creates parents, full overwrite), `grep` (`regex` crate, rg-style
