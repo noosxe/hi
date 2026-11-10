@@ -5,12 +5,13 @@
 //!
 //! Exit (#175): [`BashGroups`] is the registry of live foreground
 //! `bash` groups. The tool registers each group for the child's
-//! lifetime (RAII); [`BashGroups::kill_all`] takes them all down at
-//! exit and closes the registry — a later `spawn` is refused, so no
-//! group can slip in behind the sweep — so a `bash` call abandoned mid-turn (Ctrl-C, or Esc followed
-//! by a quit) does not outlive `hi`. Esc itself does not kill the
-//! call — the guarantee covers exits only. [`terminate_groups`] is the
-//! TERM, grace, KILL sweep shared with `TaskManager::shutdown`.
+//! lifetime (RAII). [`BashGroups::kill_all`] takes them all down at
+//! exit and closes the registry, so a later `spawn` is refused and no
+//! group can slip in behind the sweep. A `bash` call abandoned
+//! mid-turn (Ctrl-C, or Esc followed by a quit) therefore does not
+//! outlive `hi`. Esc itself does not kill the call — the guarantee
+//! covers exits only. [`terminate_groups`] is the TERM, grace, KILL
+//! sweep shared with `TaskManager::shutdown`.
 
 use std::collections::HashSet;
 use std::process::{Child, Command};
