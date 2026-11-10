@@ -164,9 +164,11 @@ fn drain_turn(
     let mut blocks: Vec<AssistantBlock> = Vec::new();
     let mut transcript: Vec<Message> = Vec::new();
     let mut error: Option<String> = None;
-    // The round's bill rides the session file even though headless
+    // Every round's bill rides the session file even though headless
     // prints nothing (#85) — the front end that resumes shows totals.
-    let mut bill: Option<Usage> = None;
+    // One entry per round, in order, so the file has the TUI's shape
+    // (a `usage` record per round, #187).
+    let mut bills: Vec<Usage> = Vec::new();
     let mut ended = false;
     for event in rx {
         match event {
@@ -210,7 +212,7 @@ fn drain_turn(
             // records the bill (AD-0026, #85).
             Event::Usage(recorded) => {
                 sink(&JsonRecord::Usage { usage: recorded });
-                bill = Some(recorded);
+                bills.push(recorded);
             }
             Event::Error(message) => error = Some(message),
             Event::TurnEnd => {
@@ -251,8 +253,8 @@ fn drain_turn(
     history.extend(transcript);
     if let Some(session) = session.as_mut() {
         let _ = session.append(&history[added_from..]);
-        if let Some(bill) = bill {
-            let _ = session.append_usage(&bill);
+        for bill in &bills {
+            let _ = session.append_usage(bill);
         }
     }
 
@@ -488,6 +490,109 @@ mod tests {
         assert_eq!(loaded.usage.completion_tokens, 250);
         assert_eq!(loaded.usage.cached_tokens, Some(700));
         assert_eq!(loaded.usage_last_prompt, 1000);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn usage(prompt: u64, completion: u64, cached: Option<u64>) -> Event {
+        Event::Usage(crate::event::Usage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            cached_tokens: cached,
+            reasoning_tokens: None,
+        })
+    }
+
+    fn usage_records(path: &Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == "usage")
+            .collect()
+    }
+
+    #[test]
+    fn every_round_of_a_multi_round_turn_is_billed() {
+        // #187: only the last round's usage used to be recorded.
+        let root = std::env::temp_dir().join(format!("hi-headless-rounds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let session = Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        let path = session.path().to_path_buf();
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                Event::ToolCall(call("c1", "{\"x\":1}")),
+                usage(100, 10, Some(40)),
+                Event::TurnEnd,
+            ],
+            vec![
+                Event::Token("done".into()),
+                usage(200, 20, Some(150)),
+                Event::TurnEnd,
+            ],
+        ]));
+        let mut history = Vec::new();
+        run(
+            provider,
+            registry(),
+            None,
+            &mut history,
+            "go",
+            Some(session),
+            DEFAULT_MAX_TOOL_ROUNDS,
+        )
+        .unwrap();
+        let loaded = crate::session::load(&path).unwrap();
+        assert_eq!(loaded.usage.prompt_tokens, 300);
+        assert_eq!(loaded.usage.completion_tokens, 30);
+        assert_eq!(loaded.usage.cached_tokens, Some(190));
+        assert_eq!(loaded.usage_last_prompt, 200);
+        let records = usage_records(&path);
+        assert_eq!(records.len(), 2, "one usage record per round: {records:?}");
+        let prompts: Vec<u64> = records
+            .iter()
+            .map(|r| {
+                let u = r.get("usage").unwrap_or(r);
+                u["prompt_tokens"]
+                    .as_u64()
+                    .or_else(|| u["promptTokens"].as_u64())
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(prompts, [100, 200]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_failing_turn_still_records_the_rounds_already_reported() {
+        let root =
+            std::env::temp_dir().join(format!("hi-headless-failbill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let session = Session::start_in(&root, Path::new("/p"), "prov", "mod", None, None).unwrap();
+        let path = session.path().to_path_buf();
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                Event::ToolCall(call("c1", "{\"x\":1}")),
+                usage(100, 10, None),
+                Event::TurnEnd,
+            ],
+            vec![Event::Error("boom".into()), Event::TurnEnd],
+        ]));
+        let mut history = Vec::new();
+        let err = run(
+            provider,
+            registry(),
+            None,
+            &mut history,
+            "go",
+            Some(session),
+            DEFAULT_MAX_TOOL_ROUNDS,
+        )
+        .unwrap_err();
+        assert_eq!(err, "boom");
+        let loaded = crate::session::load(&path).unwrap();
+        assert_eq!(loaded.usage.prompt_tokens, 100);
+        assert_eq!(loaded.usage_last_prompt, 100);
+        assert_eq!(usage_records(&path).len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 
