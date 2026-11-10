@@ -635,6 +635,73 @@ fn continue_appends_and_no_session_writes_nothing() {
 }
 
 #[test]
+fn continue_with_no_session_starts_and_records_a_new_one() {
+    let env = Env::new("continue-empty");
+    let project = env.project("continue-empty-proj");
+    let api = FakeApi::start(reply_script());
+    env.write_models_json(api.url(), plain_model());
+
+    let (code, stdout, stderr) = run(
+        &project,
+        &env,
+        &[
+            "--continue",
+            "-p",
+            "--provider",
+            "fake",
+            "--model",
+            "fake-mini",
+            "hello there",
+        ],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains(REPLY), "stdout: {stdout}");
+    assert!(
+        stderr.contains("no previous session in this directory — starting a new one"),
+        "stderr: {stderr}"
+    );
+    let files = session_files(&env);
+    assert_eq!(files.len(), 1, "the run must be recorded");
+    let text = std::fs::read_to_string(&files[0]).unwrap();
+    assert!(
+        text.contains("hello there") && text.contains(REPLY),
+        "{text}"
+    );
+    assert!(text.contains(&project.to_string_lossy().to_string()));
+}
+
+#[test]
+fn continue_leaves_an_unresumable_newest_file_untouched() {
+    let env = Env::new("continue-broken");
+    let project = env.project("continue-broken-proj");
+    let api = FakeApi::start([reply_script(), reply_script()].concat());
+    env.write_models_json(api.url(), plain_model());
+    let args = ["-p", "--provider", "fake", "--model", "fake-mini"];
+
+    let (code, _, stderr) = run(&project, &env, &[&args[..], &["first"]].concat());
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let broken = session_files(&env)[0].clone();
+    // Corrupt the header, so the file can't be opened for resume.
+    std::fs::write(&broken, "{not json\n").unwrap();
+    let before = std::fs::read(&broken).unwrap();
+
+    let (code, _, stderr) = run(
+        &project,
+        &env,
+        &[&["--continue"], &args[..], &["second"]].concat(),
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stderr.contains("starting a new one"), "stderr: {stderr}");
+    assert_eq!(
+        std::fs::read(&broken).unwrap(),
+        before,
+        "never written into"
+    );
+    let files = session_files(&env);
+    assert_eq!(files.len(), 2, "a new file next to it: {files:?}");
+}
+
+#[test]
 fn a_failed_turn_fails_with_stdout_empty() {
     let env = Env::new("failure");
     let api = FakeApi::start(vec![Script::Status(500)]);

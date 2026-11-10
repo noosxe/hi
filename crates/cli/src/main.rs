@@ -800,24 +800,37 @@ fn open_session(
             None => Ok(None),
         };
     }
+    // --continue: reopen the newest session; with none to reopen, say so
+    // and start a new recorded one (pi does the same) — never an
+    // unrecorded run. A file that failed to resume is left untouched:
+    // `Session::start` always writes a new file.
     if cli.continue_last {
         return Ok(Some(open_latest(cwd).unwrap_or_else(|warning| {
-            eprintln!("hi: {warning}");
-            OpenedSession::fresh()
+            eprintln!("hi: {warning} — starting a new one");
+            start_fresh(provider, model, thinking, name)
         })));
     }
     // Fresh start, optionally named.
-    Ok(Some(
-        Session::start(provider, model, thinking, name)
-            .map(|session| OpenedSession {
-                session: Some(session),
-                ..OpenedSession::fresh()
-            })
-            .unwrap_or_else(|warning| {
-                eprintln!("hi: {warning}");
-                OpenedSession::fresh()
-            }),
-    ))
+    Ok(Some(start_fresh(provider, model, thinking, name)))
+}
+
+/// A new recorded session; a disk failure degrades to a warning and an
+/// in-memory-only run.
+fn start_fresh(
+    provider: &str,
+    model: &str,
+    thinking: Option<&str>,
+    name: Option<&str>,
+) -> OpenedSession {
+    Session::start(provider, model, thinking, name)
+        .map(|session| OpenedSession {
+            session: Some(session),
+            ..OpenedSession::fresh()
+        })
+        .unwrap_or_else(|warning| {
+            eprintln!("hi: {warning}");
+            OpenedSession::fresh()
+        })
 }
 
 /// A y/N stdin prompt — the cross-project fork offer (interactive mode

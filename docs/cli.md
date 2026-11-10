@@ -14,7 +14,7 @@ The headless branch links no `hi-tui` code paths at runtime.
 | `--mock` | Built-in mock provider; conflicts with `--provider`, `--model`, `--list-models` |
 | `--list-models` | Print the selected provider's models and exit |
 | `-h, --help` / `-V, --version` | clap-standard |
-| `--continue` | Resume the most recent session for this directory (never a subagent transcript; the picker and `--session` can open one) |
+| `--continue` | Resume the most recent session for this directory (never a subagent transcript; the picker and `--session` can open one). With nothing to resume it warns and starts a new recorded session (pi does too), never an unrecorded run (#225) |
 | `-r, --resume` | Interactive session picker — arrow list with type-to-filter; refused under `--print` |
 | `--session <PATH\|ID>` | Open a session by file path or (partial) id — path shape wins, then exact id, then id prefix in this project, then across all projects |
 | `--fork <PATH\|ID>` | Copy a session into a new file for this directory (fresh id, `forkedFrom` pointer) and open the copy; the original is never written |
@@ -32,7 +32,10 @@ get a y/N fork prompt (pi's), headlessly a hard error naming `--fork`. A
 
 `--session` and the `--resume` picker open exactly the chosen file
 (`open_session_file` → `session::load`); only `--continue` does a
-newest-in-directory lookup (`open_latest`). Never pass a file path where
+newest-in-directory lookup (`open_latest`); when that finds nothing
+resumable, it prints `hi: <reason> — starting a new one` and falls through
+to `start_fresh` (`Session::start`, keeping `--name`), so the run is
+recorded. An unresumable file is never written into. Never pass a file path where
 a project directory is expected (#167).
 
 Session layout and the on-disk format are in [core.md](core.md).
@@ -86,8 +89,9 @@ otherwise (interactive):
                      (Global, interactive) | refusal (Global, --print)
        --resume    → sessions_in + hi_tui::pick_session →
                      open_session_file(chosen path) (interactive only)
-       --continue  → open_latest(cwd): session::latest (skips kind "subagent") + Session::resume
-       otherwise   → Session::start(provider, model, thinking, name)
+       --continue  → open_latest(cwd): session::latest (skips kind "subagent") + Session::resume;
+                     nothing resumable → warn + start_fresh
+       otherwise   → start_fresh → Session::start(provider, model, thinking, name)
   7. launch(...) → hi_tui::run(...)
 ```
 
