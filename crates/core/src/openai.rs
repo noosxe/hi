@@ -351,6 +351,16 @@ impl OpenAiCompatProvider {
                         return Ok(());
                     }
                     DataLine::Malformed(why) => return Err(why),
+                    DataLine::Error(message) => {
+                        // A failed round: partial text already went out
+                        // and stands. Half-streamed tool-call fragments
+                        // are dropped (`partials` is never emitted) — a
+                        // failed round must not run incomplete calls.
+                        // The usage seen so far is real spend, so it is
+                        // still reported, ahead of the error.
+                        emit_usage(round_usage, tx);
+                        return Err(message);
+                    }
                 }
             }
         }
@@ -520,6 +530,10 @@ enum DataLine {
     Usage(Usage),
     Done,
     Malformed(String),
+    /// The server reported a failure inside the stream (a top-level
+    /// `error` member, or `finish_reason: "error"`). The message is
+    /// ready for `Event::Error`.
+    Error(String),
 }
 
 fn parse_data_line(line: &str) -> Vec<DataLine> {
@@ -547,6 +561,10 @@ fn parse_data_line(line: &str) -> Vec<DataLine> {
     // First choice only. Role-only and empty deltas happen (openers,
     // keep-alives) and are not tokens.
     let Some(choice) = chunk.choices.into_iter().next() else {
+        // An error frame can arrive with no choices at all.
+        if let Some(error) = stream_error(chunk.error, None) {
+            out.push(DataLine::Error(error));
+        }
         return out;
     };
     // Reasoning streams under several field names depending on the
@@ -573,7 +591,42 @@ fn parse_data_line(line: &str) -> Vec<DataLine> {
     if !choice.delta.tool_calls.is_empty() {
         out.push(DataLine::ToolFragments(choice.delta.tool_calls));
     }
+    // The error goes last so partial content in the same chunk stands.
+    if let Some(error) = stream_error(chunk.error, choice.finish_reason.as_deref()) {
+        out.push(DataLine::Error(error));
+    }
     out
+}
+
+/// The failure a chunk reports, if any. `error` may be an object
+/// (`message`, `code`, `type`), a bare string, or null/absent (no
+/// error). OpenRouter sends `code` as a string or a number. A bare
+/// `finish_reason: "error"` without an `error` member still fails the
+/// round, with a generic message.
+fn stream_error(error: Option<serde_json::Value>, finish_reason: Option<&str>) -> Option<String> {
+    use serde_json::Value;
+    match error {
+        None | Some(Value::Null) => {}
+        Some(Value::String(message)) => return Some(format!("provider error: {message}")),
+        Some(other) => {
+            let message = other.get("message").and_then(Value::as_str);
+            let code = other.get("code").and_then(|code| match code {
+                Value::String(s) => Some(s.clone()),
+                Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            });
+            let label = match code {
+                Some(code) => format!("provider error ({code})"),
+                None => "provider error".to_string(),
+            };
+            return Some(match message {
+                Some(message) => format!("{label}: {message}"),
+                None => format!("{label}: {other}"),
+            });
+        }
+    }
+    (finish_reason == Some("error"))
+        .then(|| "provider error: stream ended with finish_reason \"error\"".to_string())
 }
 
 /// One OpenAI chat request. Borrowed strings (`&'a str`,
@@ -916,12 +969,17 @@ fn settle<'a>(
 }
 
 /// One streamed chunk. `choices[0]` is all hi reads of a content
-/// chunk; ids and finish reasons stay ignored by serde. The final
-/// chunk's `usage` object is the round's bill (AD-0026).
+/// chunk; ids stay ignored by serde, and of the finish reasons only
+/// `"error"` matters (it fails the round). A top-level `error` member
+/// is a mid-stream failure frame, kept as raw JSON because its shape
+/// varies by server. The final chunk's `usage` object is the round's
+/// bill (AD-0026).
 #[derive(Deserialize)]
 struct StreamChunk {
     #[serde(default)]
     choices: Vec<StreamChoice>,
+    #[serde(default)]
+    error: Option<serde_json::Value>,
     #[serde(default)]
     usage: Option<RawUsage>,
 }
@@ -970,6 +1028,8 @@ impl From<RawUsage> for Usage {
 struct StreamChoice {
     #[serde(default)]
     delta: Delta,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1120,6 +1180,146 @@ mod tests {
             parse_data_line("data: {not json").as_slice(),
             [DataLine::Malformed(_)]
         ));
+    }
+
+    #[test]
+    fn error_frames_parse_in_every_shape() {
+        let err = |line: &str| match parse_data_line(line).as_slice() {
+            [DataLine::Error(m)] => m.clone(),
+            other => panic!("expected one error, got {other:?}"),
+        };
+        // OpenRouter: string code, with finish_reason alongside.
+        assert_eq!(
+            err(
+                r#"data: {"error":{"code":"server_error","message":"Provider disconnected unexpectedly"},"choices":[{"delta":{"content":""},"finish_reason":"error"}]}"#
+            ),
+            "provider error (server_error): Provider disconnected unexpectedly"
+        );
+        // Numeric code, metadata ignored.
+        assert_eq!(
+            err(
+                r#"data: {"error":{"code":429,"message":"rate limited","metadata":{"provider_name":"x"}}}"#
+            ),
+            "provider error (429): rate limited"
+        );
+        // Plain string.
+        assert_eq!(err(r#"data: {"error":"boom"}"#), "provider error: boom");
+        // No message: compact JSON fallback.
+        assert_eq!(
+            err(r#"data: {"error":{"type":"overloaded"}}"#),
+            r#"provider error: {"type":"overloaded"}"#
+        );
+        // finish_reason alone.
+        assert_eq!(
+            err(r#"data: {"choices":[{"delta":{},"finish_reason":"error"}]}"#),
+            r#"provider error: stream ended with finish_reason "error""#
+        );
+        // null / absent is no error; other finish reasons untouched.
+        assert_eq!(parse_data_line(r#"data: {"error":null}"#), Vec::new());
+        assert_eq!(
+            parse_data_line(
+                r#"data: {"error":null,"choices":[{"delta":{},"finish_reason":"stop"}]}"#
+            ),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn an_error_chunk_keeps_its_content_ahead_of_the_error() {
+        assert_eq!(
+            parse_data_line(
+                r#"data: {"choices":[{"delta":{"content":"par"},"finish_reason":"error"}],"error":{"code":502,"message":"bad"}}"#
+            ),
+            vec![
+                DataLine::Token("par".into()),
+                DataLine::Error("provider error (502): bad".into())
+            ]
+        );
+    }
+
+    fn run_turn(frames: &[&str], with_tools: bool) -> Vec<Event> {
+        let api = FakeApi::start(sse_response(frames));
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(EchoTool)).unwrap();
+        let registry = Arc::new(registry);
+        let mut provider = OpenAiCompatProvider::new(api.base_url.clone(), None, "m");
+        if with_tools {
+            provider = provider.with_tools(Arc::clone(&registry));
+        }
+        spawn_agent_turn(
+            Arc::new(provider),
+            registry,
+            None,
+            &[Message::User("go".into())],
+            4,
+        )
+        .iter()
+        .collect()
+    }
+
+    #[test]
+    fn a_mid_stream_error_frame_fails_the_turn_after_its_tokens() {
+        let events = run_turn(
+            &[
+                r#"{"choices":[{"delta":{"content":"par"}}]}"#,
+                r#"{"error":{"code":502,"message":"upstream exploded"}}"#,
+                "[DONE]",
+            ],
+            false,
+        );
+        assert_eq!(events.first(), Some(&Event::TurnStart));
+        assert_eq!(events.last(), Some(&Event::TurnEnd));
+        assert!(events.contains(&Event::Token("par".into())));
+        let errors: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Error(m) => Some(m.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(errors.len(), 1, "{events:?}");
+        assert!(errors[0].contains("upstream exploded"), "{errors:?}");
+        let n = events.len();
+        assert!(matches!(events[n - 2], Event::Error(_)), "{events:?}");
+    }
+
+    #[test]
+    fn an_error_as_the_only_frame_without_done_still_fails() {
+        let events = run_turn(
+            &[r#"{"error":{"code":"server_error","message":"nope"}}"#],
+            false,
+        );
+        assert_eq!(events.first(), Some(&Event::TurnStart));
+        assert_eq!(events.last(), Some(&Event::TurnEnd));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::Error(m) if m.contains("nope"))),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn tool_fragments_before_an_error_are_dropped_but_usage_stands() {
+        let events = run_turn(
+            &[
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"echo","arguments":"{}"}}]}}]}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2}}"#,
+                r#"{"error":{"message":"cut off"},"choices":[{"delta":{},"finish_reason":"error"}]}"#,
+            ],
+            true,
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::ToolCall(_) | Event::ToolResult(_))),
+            "{events:?}"
+        );
+        let usage = events.iter().position(|e| matches!(e, Event::Usage(_)));
+        let error = events.iter().position(|e| matches!(e, Event::Error(_)));
+        assert!(usage.is_some() && error.is_some(), "{events:?}");
+        assert!(usage < error, "usage precedes the error: {events:?}");
+        assert_eq!(events.last(), Some(&Event::TurnEnd));
     }
 
     #[test]
