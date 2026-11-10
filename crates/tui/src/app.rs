@@ -841,10 +841,7 @@ impl App {
                 // Every non-empty submission lands in prompt
                 // history — commands included, shell parity (AD-0014).
                 if !trimmed.is_empty() {
-                    if self.history.len() >= HISTORY_CAP {
-                        self.history.remove(0);
-                    }
-                    self.history.push(msg.clone());
+                    self.record_history(msg.clone());
                 }
                 self.history_pos = None;
                 self.history_draft = None;
@@ -1678,8 +1675,13 @@ impl App {
             }
             KeyCode::Enter => {
                 self.completion = None;
-                self.input.clear();
+                // The typed text lands in history like any submission
+                // (AD-0014) — the menu is just another way to run it.
+                let typed = std::mem::take(&mut self.input);
                 self.cursor = 0;
+                if !typed.trim().is_empty() {
+                    self.record_history(typed);
+                }
                 if let Some((name, _)) = completion.items.get(completion.selected) {
                     self.run_command(name, "");
                 }
@@ -1687,6 +1689,18 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    /// Push a submission onto the prompt history (ring-capped) and reset
+    /// browsing. Every non-empty submission goes through here — messages,
+    /// typed commands and menu-run commands alike (AD-0014).
+    fn record_history(&mut self, entry: String) {
+        if self.history.len() >= HISTORY_CAP {
+            self.history.remove(0);
+        }
+        self.history.push(entry);
+        self.history_pos = None;
+        self.history_draft = None;
     }
 
     /// Execute a slash command by name. One arm per registry entry —
@@ -5662,6 +5676,21 @@ mod tests {
         app.handle_key(key(KeyCode::Enter));
         app.pump();
         assert_eq!(app.history, ["/theme", "hello", "also this"]);
+    }
+
+    #[test]
+    fn a_command_run_from_the_completion_menu_lands_in_history() {
+        let mut app = app();
+        for c in "/tool".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        assert!(app.completion.is_some(), "the menu is open");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.completion.is_none() && app.input.is_empty());
+        assert_eq!(app.history, ["/tool"]);
+        // Recallable like any submission.
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.input, "/tool");
     }
 
     #[test]

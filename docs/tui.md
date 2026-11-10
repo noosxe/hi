@@ -419,7 +419,9 @@ history at the first/last row's edges; a single-line input keeps
 history from anywhere. Cmd+← / → stay start/end of the whole input.
 
 Prompt history: every non-empty Enter submission — commands included,
-shell parity — lands in `App.history` (cap 100). ↑ from fresh input
+shell parity — lands in `App.history` (cap 100), including a command
+run by Enter from the completion menu (the typed text is recorded, via
+`record_history`). ↑ from fresh input
 parks the draft and loads the newest entry with the cursor at its
 start; ↓ walks back down, and past the newest entry the draft returns
 with the cursor at its end, as if you'd never left. Submitting a
