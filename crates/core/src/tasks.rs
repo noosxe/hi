@@ -67,10 +67,10 @@ pub const RING_BYTES: usize = 256 * 1024;
 /// How many tasks may run at once. Beyond it, `spawn` refuses — an
 /// error the caller (tool) turns into content the model can read.
 pub const MAX_RUNNING: usize = 16;
-/// Child poll cadence — the bash tool's interval.
 /// The refusal `spawn` returns once `shutdown` closed the manager.
 const EXITING: &str = "hi is exiting; not starting new tasks";
 
+/// Child poll cadence — the bash tool's interval.
 const POLL: Duration = Duration::from_millis(50);
 /// How long the monitor waits for the reader to hit EOF once the task
 /// is over (the `DRAIN_GRACE` of the bash tool).
