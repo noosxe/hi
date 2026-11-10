@@ -77,7 +77,9 @@ the pre-thinking plain string (upgraded to one `Text` block on replay).
   turn still ends normally. The agent loop forwards it; the TUI `pump` shows it
   as a `System` line after the reply; headless emits a `notice` record
   (`--mode json`) or, in text mode, one `hi: …` line on stderr; the subagent
-  drain ignores it.
+  drain appends the last round's notice to the result text as a trailing
+  `[note: …]` line (#245), so the parent model sees a cut-off reply is
+  incomplete; a tool round's notice is dropped once its results arrive.
 - `Heartbeat` (#170) carries no content: a liveness probe a long-running
   tool sends on the consumer's channel to detect a dropped `Receiver`.
   Every consumer (TUI `pump`, headless, the subagent drain, the agent
