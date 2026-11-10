@@ -53,7 +53,7 @@ Key fields: `quit`, `input`, `messages: Vec<Message>` (finalized only),
 model switch), `picker: Option<Picker>` (open `/model` chooser; `Some` = owns
 the keyboard), `tick: u8` (spinner frames), `completion: Option<Completion>`
 (`/` menu; `Some` = consumes navigation keys), `queued: Option<String>`,
-`system_prompt` + `thinking` (re-attached on provider rebuild),
+`system_prompt` + `thinking` (re-attached on provider rebuild; `rebuild_provider` takes no cache-key argument — it reads the key from `session`, so a path that switches sessions sets `session` first),
 `turn: Option<Turn>`, `settings_board: Option<SettingsBoard>` (the
 `/settings` board — AD-0023), `thinking_picker: Option<ThinkingPicker>`
 (the `/thinking` ladder — AD-0044 addendum; same owns-the-keyboard
@@ -123,7 +123,7 @@ seven levels then `auto`, each row with its honest per-model mark
 (`✓` reaches the wire via map/family/vendor efforts, `–` sends
 nothing), preselected at the current state; Enter switches, rebuilds
 the provider, and persists (the one commit path,
-`apply_thinking_choice`); Esc closes. `/thinking <level|auto>` stays
+`apply_thinking_choice`); the rebuild keeps the live session's prompt-cache key (#185); Esc closes. `/thinking <level|auto>` stays
 the direct argument path — no modal. the switch restamps the live
 session header (`Session::set_thinking`, AD-0045) so resume
 restores the last level. `/model` restamps the identity the same

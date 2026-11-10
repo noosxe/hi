@@ -1099,8 +1099,7 @@ impl App {
                 self.images_setting = !self.images_setting;
                 let provider = self.status.provider.clone();
                 let model = self.status.model.clone();
-                let cache_key = self.session.as_ref().map(|s| s.id().to_string());
-                self.rebuild_provider(&provider, &model, cache_key);
+                self.rebuild_provider(&provider, &model);
                 let state = if self.images_setting { "on" } else { "off" };
                 self.messages.push(Message::System(format!(
                     "images {state} for this session — ctrl-s saves it"
@@ -1112,10 +1111,14 @@ impl App {
     /// Rebuild the OpenAI-compat provider from the live session facts
     /// — system prompt, thinking, tools — plus the wire-identity
     /// stamps: the telemetry opt-in and the prompt-cache routing key.
+    /// The key is read from the live session (`self.session`), never
+    /// passed in, so no caller can drop or mis-set it: a path that
+    /// switches sessions must set `self.session` before rebuilding.
     /// One construction path for every post-startup rebuild (/model,
-    /// /resume) so a switch can never drop a stamp startup applied.
-    /// Mock providers (no config entry) are left alone.
-    fn rebuild_provider(&mut self, provider: &str, model: &str, cache_key: Option<String>) {
+    /// /resume, /thinking, the images toggle) so a switch can never
+    /// drop a stamp startup applied. Mock providers (no config entry)
+    /// are left alone.
+    fn rebuild_provider(&mut self, provider: &str, model: &str) {
         let Some(entry) = self.config.providers.get(provider) else {
             return;
         };
@@ -1125,6 +1128,7 @@ impl App {
         // vision-capable, and the settings master switch still wins.
         self.images
             .set(entry.images_allowed(model, self.images_setting));
+        let cache_key = self.session.as_ref().map(|s| s.id().to_string());
         self.provider = Arc::new(
             OpenAiCompatProvider::from_config(entry, model.to_string())
                 .with_system_prompt(self.system_prompt.clone())
@@ -1150,9 +1154,7 @@ impl App {
         let Some((provider, model)) = item.split_once('/') else {
             return;
         };
-        // Cache routing follows the live session across model switches.
-        let cache_key = self.session.as_ref().map(|s| s.id().to_string());
-        self.rebuild_provider(provider, model, cache_key);
+        self.rebuild_provider(provider, model);
         self.status = Status {
             provider: provider.to_string(),
             model: model.to_string(),
@@ -1801,10 +1803,7 @@ impl App {
                 let (provider, model) = (self.status.provider.clone(), self.status.model.clone());
                 let current = format!("{provider}/{model}");
                 if hi_core::selection::model_available(&self.config, &provider, &model) {
-                    // Cache routing follows the live session, exactly
-                    // like a `/model` switch.
-                    let cache_key = self.session.as_ref().map(|s| s.id().to_string());
-                    self.rebuild_provider(&provider, &model, cache_key);
+                    self.rebuild_provider(&provider, &model);
                     parts.push("models.json applied — provider rebuilt from the new config".into());
                 } else {
                     parts.push(format!(
@@ -2193,9 +2192,8 @@ keeping the old provider until you /model"
         self.history = seed_history(&self.messages);
         self.history_pos = None;
         self.history_draft = None;
-        // Cache routing follows the session: the new id adopts the
-        // prompt-cache key before any further turn is spawned.
-        let cache_key = session.id().to_string();
+        // Cache routing follows the session: `rebuild_provider` below
+        // reads the key from the live session, so it must be set first.
         self.session = Some(session);
         // AD-0045 ruling 1: the session's recorded level outranks the
         // settings default — resume puts you back where the session
@@ -2234,7 +2232,7 @@ keeping the old provider until you /model"
             }
         }
         let (provider, model) = (self.status.provider.clone(), self.status.model.clone());
-        self.rebuild_provider(&provider, &model, Some(cache_key));
+        self.rebuild_provider(&provider, &model);
         self.scroll.refold();
         self.queued = None;
     }
@@ -2301,11 +2299,7 @@ keeping the old provider until you /model"
     /// `/thinking <level>` argument both land here.
     fn apply_thinking_choice(&mut self, level: Option<hi_core::thinking::ThinkingLevel>) {
         self.thinking = level;
-        self.rebuild_provider(
-            &self.status.provider.clone(),
-            &self.status.model.clone(),
-            None,
-        );
+        self.rebuild_provider(&self.status.provider.clone(), &self.status.model.clone());
         match hi_core::Settings::persist_thinking(level) {
             Ok(()) => {
                 let label = level
@@ -5624,7 +5618,7 @@ mod tests {
         .unwrap();
         app.status.provider = "prov".into();
         app.status.model = "m".into();
-        app.rebuild_provider("prov", "m", None);
+        app.rebuild_provider("prov", "m");
         app.messages.push(Message::User("run it".into()));
         // A live turn that has surfaced a tool call but no result yet.
         let (tx, rx) = std::sync::mpsc::channel();
@@ -5702,5 +5696,86 @@ mod tests {
                 .map(|l| l.replace(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'], "")),
             label
         );
+    }
+
+    /// An app whose provider "prov" points at a one-shot fake endpoint,
+    /// with `session_root` set so `/new` and `/resume` work.
+    fn app_on_fake_endpoint(
+        tag: &str,
+    ) -> (App, std::thread::JoinHandle<String>, std::path::PathBuf) {
+        let (base, server) = one_shot_chat();
+        let root = std::env::temp_dir().join(format!("hi-cachekey-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut app = test_app();
+        app.config = serde_json::from_str(&format!(
+            r#"{{"providers":{{"prov":{{"baseUrl":"{base}"}}}}}}"#
+        ))
+        .unwrap();
+        app.status.provider = "prov".into();
+        app.status.model = "m".into();
+        app.session_root = Some(root.clone());
+        (app, server, root)
+    }
+
+    /// Send one message through the app's current provider and return
+    /// the `prompt_cache_key` the fake endpoint saw on the wire.
+    fn sent_cache_key(app: &mut App, server: std::thread::JoinHandle<String>) -> Option<String> {
+        app.set_input("hello".to_string());
+        app.handle_key(key(KeyCode::Enter));
+        let request = server.join().unwrap();
+        let body: serde_json::Value =
+            serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        body["prompt_cache_key"].as_str().map(str::to_string)
+    }
+
+    #[test]
+    fn thinking_command_keeps_the_sessions_cache_key() {
+        // #185: /thinking used to rebuild the provider with no key.
+        let _guard = settings_lock();
+        let (mut app, server, root) = app_on_fake_endpoint("think-arg");
+        app.run_command("new", "");
+        let id = app.session.as_ref().expect("live session").id().to_string();
+        app.run_command("thinking", "high");
+        assert_eq!(sent_cache_key(&mut app, server), Some(id));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn thinking_picker_enter_keeps_the_sessions_cache_key() {
+        let _guard = settings_lock();
+        let (mut app, server, root) = app_on_fake_endpoint("think-picker");
+        app.run_command("new", "");
+        let id = app.session.as_ref().expect("live session").id().to_string();
+        app.run_command("thinking", "");
+        app.handle_key(key(KeyCode::Up));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.thinking.is_some());
+        assert_eq!(sent_cache_key(&mut app, server), Some(id));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resume_switches_the_cache_key_to_the_new_session() {
+        let (mut app, server, root) = app_on_fake_endpoint("resume");
+        let cwd = std::env::current_dir().unwrap();
+        let mut other = hi_core::Session::start_in(&root, &cwd, "prov", "m", None, None).unwrap();
+        other.append(&[Message::User("old".into())]).unwrap();
+        let other_id = other.id().to_string();
+        app.run_command("new", "");
+        let first_id = app.session.as_ref().unwrap().id().to_string();
+        assert_ne!(first_id, other_id);
+        app.switch_session(other.path());
+        assert_eq!(sent_cache_key(&mut app, server), Some(other_id));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn no_session_means_no_cache_key_and_no_panic() {
+        let _guard = settings_lock();
+        let (mut app, server, root) = app_on_fake_endpoint("nosession");
+        assert!(app.session.is_none());
+        app.run_command("thinking", "low");
+        assert_eq!(sent_cache_key(&mut app, server), None);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

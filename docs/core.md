@@ -446,8 +446,10 @@ Construction chain:
 - `.with_telemetry(bool)` / `.with_cache_key(Option<String>)` — the
   wire-identity stamps. Applied at startup (`resolve_target`, then
   `stamp_session_cache_key` once the session exists) and re-applied by
-  every TUI provider rebuild, so a `/model` or `/resume` switch never
-  drops them.
+  every TUI provider rebuild (`rebuild_provider`, which reads the cache
+  key from the live session rather than taking it as an argument), so a
+  `/model`, `/resume`, `/thinking` or images-toggle rebuild never drops
+  them.
 
 Images on the wire (AD-0008): `role: "tool"` is text-only in the OpenAI-compat
   protocol, so a result's images move into a **synthetic follow-up user message** —
@@ -475,7 +477,7 @@ Wire identity (see also [decisions.md](decisions.md) AD-0007):
   `prompt_cache_key: <session id>` and OpenRouter additionally gets
   `x-session-id` (`wire_headers()`). The session id is the natural key —
   stable across `--continue`/`--resume`/`--session`, following `/resume`
-  switches (`rebuild_provider` re-stamps), fresh on forks.
+  switches (`rebuild_provider` re-stamps from the live session), fresh on forks.
 - **Prefix stability is the caching lever** — locked by the test
   `consecutive_turns_keep_a_byte_stable_prefix`: the system prompt is
   constant per session, tool definitions serialize in registry order
