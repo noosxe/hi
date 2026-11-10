@@ -1539,6 +1539,16 @@ under-provisioning cost ~148k where one well-sized run would spend
 ~80k, and the parent session out-burned its subagents (260k vs 190k)
 — both fuel for #121's trimming design.
 
+**AD-0042 addendum (2026-11-10): #183, `--continue` skips subagent
+transcripts.** A subagent that outlives Esc keeps its file the newest,
+so `--continue` reopened it instead of the user's conversation.
+`latest_in_root` now skips headers with `kind: "subagent"` (exact
+match; future kinds stay eligible), judged on the summary header before
+`load`; with only subagent files it returns `None`. Unchanged on
+purpose: `sessions_in_root`, the `--resume`/`/resume` pickers and
+`--session`/`--fork` still list and open transcripts, which is the
+"resumable, no special-casing" promise above.
+
 **AD-0043 (2026-10-19): `subagents` master switch.** The nested-agent
 tool ships as a default capability: `settings.subagents`, absent =
 on (sibling of `images`, opposite default of `taskTurns`). Rulings:
