@@ -359,6 +359,11 @@ fn drain(
     let mut in_call_batch = false;
     let mut failure = None;
     let mut ended = false;
+    // The last round's `Notice` (#245): a reply cut off at the token
+    // limit must not reach the parent as if complete. A tool round's
+    // notice is cleared by its results — the loop failed those calls
+    // and the subagent went on, so only the final round's survives.
+    let mut notice: Option<String> = None;
     // The transcript mirror: the same reconstruction rule the loop
     // documents for consumers — accumulate tokens, flush them as an
     // Assistant message at each ToolCall, record ToolResults in
@@ -403,8 +408,10 @@ fn drain(
                 }
                 blocks.clear();
             }
+            Event::Notice(text) => notice = Some(text),
             Event::ToolResult(r) => {
                 in_call_batch = false;
+                notice = None;
                 if transcript.is_some() {
                     tbuf.push(Message::ToolResult(r));
                 }
@@ -473,8 +480,15 @@ fn drain(
         }
         return Err(e);
     }
+    let mut text = AssistantBlock::text_of(&blocks);
+    if let Some(note) = notice {
+        if !text.is_empty() {
+            text.push_str("\n\n");
+        }
+        text.push_str(&format!("[note: {note}]"));
+    }
     Ok(SubagentResult {
-        text: AssistantBlock::text_of(&blocks),
+        text,
         usage,
         rounds,
         recorded,
@@ -998,6 +1012,44 @@ mod tests {
         tx.send(Event::TurnEnd).unwrap();
         drop(tx);
         assert_eq!(drain(&rx, &|| true, None, None).unwrap().text, "whole");
+    }
+
+    #[test]
+    fn a_reply_cut_off_at_the_token_limit_is_marked_for_the_parent() {
+        // #245: the final round's Notice rides the result text.
+        let (tx, rx) = channel::<Event>();
+        tx.send(Event::Token("partial answer".into())).unwrap();
+        tx.send(Event::Notice(crate::event::TRUNCATED_NOTICE.into()))
+            .unwrap();
+        tx.send(Event::TurnEnd).unwrap();
+        drop(tx);
+        let text = drain(&rx, &|| true, None, None).unwrap().text;
+        assert!(text.starts_with("partial answer\n\n[note: "), "{text}");
+        assert!(text.contains("output token limit"), "{text}");
+
+        // A notice on an earlier, tool round was handled by the loop;
+        // the settled reply is complete and stays unmarked.
+        let (tx, rx) = channel::<Event>();
+        tx.send(Event::ToolCall(crate::ToolCall {
+            id: "c1".into(),
+            name: "echo".into(),
+            arguments: "{}".into(),
+        }))
+        .unwrap();
+        tx.send(Event::Notice(crate::event::TRUNCATED_NOTICE.into()))
+            .unwrap();
+        tx.send(Event::ToolResult(crate::ToolResult {
+            call_id: "c1".into(),
+            name: "echo".into(),
+            images: vec![],
+            content: "not executed".into(),
+            is_error: true,
+        }))
+        .unwrap();
+        tx.send(Event::Token("done".into())).unwrap();
+        tx.send(Event::TurnEnd).unwrap();
+        drop(tx);
+        assert_eq!(drain(&rx, &|| true, None, None).unwrap().text, "done");
     }
 
     #[test]
