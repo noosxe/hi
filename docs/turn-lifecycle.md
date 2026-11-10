@@ -177,7 +177,10 @@ cannot affect it.
 `OpenAiCompatProvider::respond` maps failures so consumers keep one finalize
 path: partial `Token`s stand, then one `Event::Error` (message built by
 `describe()`, e.g. `"chat request: server returned HTTP 401"`), then
-`TurnEnd`. Malformed SSE payload → `Malformed` → same path. Missing
+`TurnEnd`. Malformed SSE payload → `Malformed` → same path. An in-stream
+error frame (`error` member or `finish_reason: "error"`) → `DataLine::Error`
+→ same path, so headless runs exit non-zero (tool-call fragments of that
+round are dropped, usage still reported). Missing
 `[DONE]` (server closed early) is tolerated as a complete stream.
 
 ## Invariants recap (all tested somewhere)

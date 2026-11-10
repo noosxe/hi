@@ -483,8 +483,19 @@ Wire behavior:
   (`encode_request_body`); smaller bodies and compression failures ride
   identity.
 - SSE parsing: `parse_data_line` classifies each line into
-  `DataLine::{Token, Done, Ignore, Malformed}`. `data: [DONE]` ends the
-  stream; a server closing without `[DONE]` is tolerated as complete.
+  `DataLine::{Token, Thinking, ToolFragments, Usage, Done, Malformed, Error}`.
+  `data: [DONE]` ends the stream; a server closing without `[DONE]` is
+  tolerated as complete.
+- Mid-stream errors: a chunk with a non-null top-level `error` (object with
+  `message`/`code`, or a bare string; OpenRouter's `code` may be a string or
+  a number) or `choices[0].finish_reason == "error"` becomes
+  `DataLine::Error` (`stream_error` builds the message, e.g.
+  `provider error (server_error): …`), emitted after any token/usage in the
+  same chunk. The stream loop returns it as `Err` at once: tokens already sent
+  stand, accumulated tool-call fragments are dropped (a failed round never
+  runs half-streamed calls), and the usage reported so far is still emitted,
+  ahead of the `Event::Error`. `error: null` is no error. Other finish
+  reasons (`stop`, `length`, `tool_calls`, `content_filter`) are ignored.
 - Error mapping: `describe()` turns `ureq::Error::StatusCode(code)` into
   `"chat request: server returned HTTP {code}"` (status code is usually the
   whole diagnosis).

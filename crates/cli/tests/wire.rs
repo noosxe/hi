@@ -650,6 +650,31 @@ fn a_failed_turn_fails_with_stdout_empty() {
 }
 
 #[test]
+fn a_mid_stream_error_frame_fails_print_mode() {
+    let env = Env::new("stream-error");
+    let body = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        token_chunk("par"),
+        json!({"error": {"code": 502, "message": "upstream exploded"}})
+    );
+    let api = FakeApi::start(vec![Script::Sse(body)]);
+    env.write_models_json(api.url(), plain_model());
+    let project = env.project("stream-error-proj");
+
+    let (code, stdout, stderr) = run(
+        &project,
+        &env,
+        &["-p", "--provider", "fake", "--model", "fake-mini", "hi"],
+    );
+    assert_eq!(code, 1, "stderr: {stderr:?}");
+    assert_eq!(stdout, "", "a failed turn leaves stdout empty");
+    assert!(
+        stderr.starts_with("hi: ") && stderr.contains("upstream exploded"),
+        "the provider's message reaches stderr: {stderr:?}"
+    );
+}
+
+#[test]
 fn json_mode_streams_the_wire_events() {
     let env = Env::new("json");
     let api = FakeApi::start(vec![Script::Sse(sse(&[
