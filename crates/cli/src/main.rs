@@ -111,13 +111,17 @@ enum Mode {
 }
 
 fn main() -> ExitCode {
-    dispatch(Cli::parse())
+    dispatch_with(Cli::parse(), read_piped_stdin)
 }
 
 /// Everything `main` does after parsing: validation, dispatch by flag,
 /// and launch. An own function so the dispatch arms are testable —
 /// `main` itself would run the TUI. Launching stays `hi_tui::run`.
-fn dispatch(cli: Cli) -> ExitCode {
+/// The piped-stdin source is injected (`main` passes the real
+/// [`read_piped_stdin`]): a test never reads the process's own stdin,
+/// which blocks until EOF whenever the test runner's stdin is an open
+/// pipe (#210).
+fn dispatch_with(cli: Cli, read_stdin: impl FnOnce() -> Option<String>) -> ExitCode {
     // Validate before any dispatch: the mock paths never resolve a target,
     // so a bad --tools value must still fail loudly there.
     if let Some(raw) = cli.tools.as_deref()
@@ -164,11 +168,11 @@ fn dispatch(cli: Cli) -> ExitCode {
     }
 
     if cli.print || auto_print {
-        return print_mode(&cli, false);
+        return print_mode(&cli, false, read_stdin);
     }
 
     if cli.mode == Some(Mode::Json) {
-        return print_mode(&cli, true);
+        return print_mode(&cli, true, read_stdin);
     }
 
     if cli.mock {
@@ -549,8 +553,8 @@ fn stamp_session_cache_key(target: &mut Target, session: &Session) {
 /// `out=$(hi -p …)` never captures a half-answer. `--mode json` runs
 /// the same turn with a JSONL sink instead: one record per event on
 /// stdout, ending in `done` or `failed` (#18).
-fn print_mode(cli: &Cli, json: bool) -> ExitCode {
-    let prompt = match headless::combine_prompt(read_piped_stdin(), cli.prompt.clone()) {
+fn print_mode(cli: &Cli, json: bool, read_stdin: impl FnOnce() -> Option<String>) -> ExitCode {
+    let prompt = match headless::combine_prompt(read_stdin(), cli.prompt.clone()) {
         Ok(prompt) => prompt,
         Err(err) => return fail(&err),
     };
@@ -928,7 +932,24 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         point_xdg_at(&hermetic_root("mock-headless"));
         let cli = Cli::try_parse_from(["hi", "--mock", "-p", "say something"]).unwrap();
-        assert_eq!(dispatch(cli), ExitCode::SUCCESS);
+        assert_eq!(dispatch_with(cli, || None), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn print_mode_reads_stdin_only_through_the_injected_source() {
+        // #210: the process's real stdin blocks until EOF when the
+        // runner's stdin is an open pipe; dispatch must take its piped
+        // text from the injected closure and never touch it itself.
+        let _guard = ENV_LOCK.lock().unwrap();
+        point_xdg_at(&hermetic_root("injected-stdin"));
+        let called = std::cell::Cell::new(false);
+        let cli = Cli::try_parse_from(["hi", "--mock", "-p"]).unwrap();
+        let code = dispatch_with(cli, || {
+            called.set(true);
+            Some("from the injected source".to_string())
+        });
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(called.get(), "print mode asked the injected source");
     }
 
     #[test]
@@ -936,7 +957,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         point_xdg_at(&hermetic_root("headless-no-config"));
         let cli = Cli::try_parse_from(["hi", "-p", "review this"]).unwrap();
-        assert_eq!(dispatch(cli), ExitCode::FAILURE);
+        assert_eq!(dispatch_with(cli, || None), ExitCode::FAILURE);
     }
 
     #[test]
@@ -944,7 +965,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         point_xdg_at(&hermetic_root("list-no-config"));
         let cli = Cli::try_parse_from(["hi", "--list-models"]).unwrap();
-        assert_eq!(dispatch(cli), ExitCode::FAILURE);
+        assert_eq!(dispatch_with(cli, || None), ExitCode::FAILURE);
     }
 
     #[test]
@@ -958,7 +979,7 @@ mod tests {
         .unwrap();
         point_xdg_at(&root);
         let cli = Cli::try_parse_from(["hi", "--list-models"]).unwrap();
-        assert_eq!(dispatch(cli), ExitCode::SUCCESS);
+        assert_eq!(dispatch_with(cli, || None), ExitCode::SUCCESS);
     }
 
     #[test]

@@ -50,6 +50,8 @@ Session layout and the on-disk format are in [core.md](core.md).
 
 --print (headless, `print_mode`):
   1. prompt = combine_prompt(piped stdin, positional PROMPT)
+       (stdin comes from an injected source: `dispatch_with` takes it,
+        `main` passes `read_piped_stdin` — tests never read real stdin, #210)
        — neither present → "hi: no prompt…", exit FAILURE
   2. --mock → MockProvider; otherwise resolve_target() as below
   3. open_session() per flags → headless::run(...)
