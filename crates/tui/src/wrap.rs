@@ -12,6 +12,23 @@ pub fn display_width(text: &str) -> usize {
     text.width()
 }
 
+/// Columns a tab renders as in transcript output — pi-tui's rule: every
+/// `\t` becomes three spaces (its Text, Markdown and `visibleWidth`
+/// all do, no tab stops). Terminals and ratatui drop the control
+/// character, so indentation vanished (#201).
+pub const TAB_SPACES: &str = "   ";
+
+/// `text` with every tab rendered as [`TAB_SPACES`]. Display text only:
+/// the composer's byte-exact wrap (`wrap_row_starts`) never goes
+/// through it.
+pub fn expand_tabs(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains('\t') {
+        std::borrow::Cow::Owned(text.replace('\t', TAB_SPACES))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
 /// Greedy word-wrap into rows of at most `width` display columns.
 /// Newlines break first — every line wraps independently and earns
 /// at least one row. Within a line, trailing spaces stay attached to
@@ -201,6 +218,15 @@ pub fn row_col_to_offset(text: &str, row: usize, col: usize, width: usize) -> us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expand_tabs_is_pi_tuis_three_spaces() {
+        assert_eq!(expand_tabs("\tx\t\ty"), "   x      y");
+        assert!(matches!(
+            expand_tabs("no tabs"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
 
     #[test]
     fn display_width_counts_columns_not_chars() {

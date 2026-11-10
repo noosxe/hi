@@ -145,7 +145,7 @@ fn draw_tasks(frame: &mut Frame, area: Rect, app: &App) {
             rows.extend(
                 tail_lines[start..]
                     .iter()
-                    .map(|line| Line::from(line.to_string())),
+                    .map(|line| Line::from(crate::wrap::expand_tabs(line).into_owned())),
             );
             rows.push(Line::from(Span::styled("esc back", THEME.fg(Fg::Dim))));
             frame.render_widget(Paragraph::new(Text::from(rows)), area);
@@ -831,6 +831,7 @@ pub fn block_segments(
 /// markdown; pi renders diagnostics as colored text, no labels).
 fn wrap_plain(text: &str, width: usize, style: Style) -> Vec<Line<'static>> {
     let mut rows: Vec<Line<'static>> = Vec::new();
+    let text = crate::wrap::expand_tabs(text);
     for source in text.split('\n') {
         for piece in crate::wrap::wrap(source, width.max(1)) {
             rows.push(Line::from(Span::styled(piece, style)));
@@ -997,7 +998,8 @@ fn tool_rows(exec: &ToolExec, width: usize) -> Vec<Line<'static>> {
     if let Some(result) = &exec.result {
         let total = result.content.lines().count();
         for line in result.content.lines().take(TOOL_PREVIEW_LINES) {
-            for piece in crate::wrap::wrap(line, inner_width) {
+            let line = crate::wrap::expand_tabs(line);
+            for piece in crate::wrap::wrap(&line, inner_width) {
                 inner.push(Line::from(Span::styled(piece, THEME.fg(Fg::ToolOutput))));
             }
         }
@@ -1052,7 +1054,9 @@ fn args_preview(arguments: &str) -> String {
             collapse(joined)
         }
         _ => {
-            let raw = arguments.trim().to_string();
+            // Raw text (not valid JSON) can carry tabs, which have no
+            // cell (#201).
+            let raw = crate::wrap::expand_tabs(arguments.trim()).into_owned();
             if raw.is_empty() {
                 String::new()
             } else {
@@ -2045,6 +2049,11 @@ mod tests {
     }
 
     #[test]
+    fn raw_args_expand_tabs() {
+        assert_eq!(args_preview("not json\tat all"), "not json   at all");
+    }
+
+    #[test]
     fn long_args_collapse_with_ellipsis() {
         let long = "x".repeat(300);
         let preview = args_preview(&format!("{{\"path\":\"{long}\"}}"));
@@ -2071,6 +2080,33 @@ mod tests {
             .map(|s| s.content.to_string())
             .collect();
         assert!(marker.contains("... (40 more lines)"), "marker: {marker}");
+    }
+
+    #[test]
+    fn tab_indented_tool_output_keeps_its_indentation() {
+        // #201: tabs have no cell, so the indentation vanished.
+        let rows = block_rows(
+            &TranscriptBlock::Tool(ToolExec {
+                call: Some(tool_call("{}")),
+                result: Some(tool_result("fn main() {\n\tlet x = 1;\n}", false)),
+            }),
+            40,
+        );
+        let body: String = rows[3]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(body.contains("   let x = 1;"), "body: {body:?}");
+        assert!(!body.contains('\t'));
+        // Plain system text takes the same path.
+        let plain = wrap_plain("a\n\tb", 20, Style::new());
+        let second: String = plain[1]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert_eq!(second, "   b");
     }
 
     #[test]

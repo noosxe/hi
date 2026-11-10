@@ -446,7 +446,9 @@ position, and the parked input stay session-local.
 strikethrough, tasklists; no math, by ruling) and renders with pi-tui's
 conventions: h1 bold+underlined, h2 bold, h3+ keep their `### ` prefix
 (headings color); fenced code restated with border-colored ``` lines and a
-two-space indented body, hard-wrapped by display columns (`wrap_code_line`: every row keeps the indent and fits the width, whitespace is kept as written, no word-boundary breaks, a wide character never straddles rows, at least one character per row at any width; fence lines are not wrapped; tabs arrive unexpanded and count as width 0) (no syntax highlighting — a recorded divergence);
+two-space indented body, hard-wrapped by display columns (`wrap_code_line`: every row keeps the indent and fits the width, whitespace is kept as written, no word-boundary breaks, a wide character never straddles rows, at least one character per row at any width; fence lines are not wrapped; tabs never arrive: see below) (no syntax highlighting — a recorded divergence);
+
+Tabs (#201): ratatui drops control characters, so every display path expands `\t` to three spaces first (`wrap::expand_tabs`, pi-tui's rule: Text, Markdown and `visibleWidth` all use three spaces, no tab stops) — `markdown_rows` entry (prose and code), `wrap_plain` (system/error/tool-result text), the tool block's result preview, `args_preview`'s raw-text fallback, the `/resume` and `--resume` preview (`preview_of`) and the tasks output tail. The composer's byte-exact wrap is untouched.
 `│ `-bordered blockquotes with italic bodies; `- `/`N. ` list markers with
 `[x]`/`[ ] ` task checkboxes and four-space nesting; links as underlined
 text plus ` (url)` when the text differs from the href (the no-OSC-8
