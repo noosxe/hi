@@ -142,7 +142,15 @@ structural chunk-walk for the kitty renderer — AD-0010 — and
 `from_rgba`, pixels → PNG for clipboard pastes —
 [decisions.md](decisions.md) AD-0011).
 
-- **The eight built-ins**: `read` (line-numbered, `offset`/`limit` paging;
+- **The eight built-ins**: `read` (line-numbered, `offset`/`limit` paging; whole lines
+  only, clamped at 2000 lines / 50KB. The footer counts the lines actually kept —
+  `[Showing lines a-b of n (50.0KB limit). Use offset=N to continue.]` (no limit
+  suffix for the line cap), `[R more lines in file. Use offset=N to continue.]`
+  when a user `limit` stopped early, `[lines a–b of n]` when `offset > 1` reaches
+  the end. A first line over the byte cap returns `Ok` text with no content — pi
+  parity: `[Line N is 60.0KB, exceeds 50.0KB limit. Use bash: sed -n 'Np' <path> |
+  head -c 51200]`, path shell-quoted only when needed — never a same-offset retry
+  hint;
   image files — png/jpeg/webp/gif, magic-byte sniffed, never extension-guessed — are
   base64-attached for the model when the startup image policy allows, after the
   `image_resize` ladder fits them to a universal budget; notes always say what happened)
