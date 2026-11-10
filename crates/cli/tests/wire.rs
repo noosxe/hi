@@ -181,6 +181,11 @@ fn token_chunk(text: &str) -> Value {
     json!({"choices": [{"delta": {"content": text}}]})
 }
 
+fn tool_call_chunk(name: &str, arguments: &str) -> Value {
+    json!({"choices": [{"delta": {"tool_calls": [
+        {"index": 0, "id": "c1", "function": {"name": name, "arguments": arguments}}]}}]})
+}
+
 fn usage_chunk(prompt: u64, completion: u64) -> Value {
     json!({
         "choices": [],
@@ -935,4 +940,60 @@ fn print_mode_exit_kills_a_task_the_model_started() {
     assert!(!pid.is_empty(), "the task never started");
     assert!(!left, "task_run process {pid} outlived `hi -p`");
     let _ = std::fs::remove_dir_all(&env.root);
+}
+
+/// #184: resuming a session recorded on a `vision: false` model must
+/// close the image gate the startup model (vision-capable) opened, so
+/// a `read` of a PNG sends the model text, not an image part.
+#[test]
+fn continue_on_a_non_vision_session_does_not_send_images() {
+    let env = Env::new("resume-gate");
+    let api = FakeApi::start(
+        [
+            reply_script(),
+            vec![Script::Sse(sse(&[tool_call_chunk(
+                "read",
+                r#"{"path":"x.png"}"#,
+            )]))],
+            reply_script(),
+        ]
+        .concat(),
+    );
+    let config = json!({
+        "providers": {
+            "fake": {
+                "baseUrl": api.url(),
+                "apiKey": "test-key",
+                "models": [{"id": "vis"}, {"id": "novis", "vision": false}],
+            },
+        },
+    });
+    std::fs::write(env.config_dir().join("models.json"), config.to_string()).unwrap();
+    let project = env.project("resume-gate-proj");
+    // A 1x1 PNG the read tool will treat as an image.
+    let png = [
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0,
+        0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0d, 0x49, 0x44,
+        0x41, 0x54, 0x78, 0xda, 0x63, 0x64, 0x60, 0xf8, 0x5f, 0x0f, 0, 2, 0x87, 1, 0x80, 0xeb,
+        0x47, 0xba, 0x92, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    std::fs::write(project.join("x.png"), png).unwrap();
+    // Session one is recorded on the non-vision model.
+    let (code, _, stderr) = run(
+        &project,
+        &env,
+        &["-p", "--provider", "fake", "--model", "novis", "first"],
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    // Startup selection is the vision model; --continue adopts novis.
+    let (code, _, stderr) = run(&project, &env, &["-p", "--continue", "look at x.png"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let requests = api.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[1].body["model"], json!("novis"));
+    let after_read = requests[2].body["messages"].to_string();
+    assert!(
+        !after_read.contains("image_url") && !after_read.contains("data:image"),
+        "an image reached the non-vision model: {after_read}"
+    );
 }

@@ -152,6 +152,10 @@ hi -p --no-session "throwaway"          # don't touch the session dir
   and session files as the TUI (see [core.md](core.md)). A fresh
   interactive run plans a session but writes nothing until the first
   recorded record — open, look, quit leaves no file (AD-0050).
+- Resuming adopts the session's recorded provider/model
+  (`apply_session_identity`, AD-0046) and, with it, re-resolves the shared
+  image gate (`resolve_image_gate`, AD-0012) so a `vision: false` model
+  never receives an image after `--continue`/`--session`/`--fork`.
 - `--tools` composes: `hi -p --tools read-only "…"` runs headless with
   only the observation tools; `--tools none` restores a pure-text model.
 

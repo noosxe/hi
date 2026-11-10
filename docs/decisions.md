@@ -581,6 +581,16 @@ rebuilds; the wire never loses its tools.
 loud, one turn, and self-explanatory; versus the old cost, which was
 silently blinding models that could see.
 
+**Addendum (2026-11-10, #184): resume re-resolves the gate too.**
+`apply_session_identity` (the CLI's `--continue`/`--resume`/`--session`/
+`--fork` restoration, AD-0046) switched `target.status` to the recorded
+model but left the gate on the startup model's policy, so a session
+recorded on a `vision: false` model could be sent an image after resume.
+The CLI now re-resolves the same shared `ImageGate` (`ImageGate::set`,
+never a new gate) through one helper, `resolve_image_gate`, with the same
+rule as `rebuild_provider`; when the recorded model is unavailable the
+startup model stays and the gate is untouched.
+
 ---
 
 ## AD-0013 — Cmd+V aliases the paste chord under the kitty keyboard protocol (2026-10-15)
