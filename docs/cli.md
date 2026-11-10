@@ -64,7 +64,9 @@ Session layout and the on-disk format are in [core.md](core.md).
      pipe, e.g. `| head`, stops the printing but never panics or aborts the
      turn — it still runs, is recorded and exits 0; any other write error
      (`> /dev/full`) also lets the turn finish and record, then prints one
-     `hi: cannot write output: <err>` and exits non-zero, #200); Err → "hi: …" on stderr,
+     `hi: cannot write output: <err>` and exits non-zero, #200); a round's
+     `Notice` (a reply cut off at the token limit, #229) → one "hi: …" line on
+     stderr, exit still 0; Err → "hi: …" on stderr,
      stdout empty, FAILURE
 
 otherwise (interactive):
@@ -183,6 +185,7 @@ either way — the `-p` empty-stdout rule is text-mode only).
 | `message` | the finalized `Message` | Session-file JSON shapes: `{"User": …}`, `{"Assistant": …}`, `{"ToolCall": …}`, `{"ToolResult": …}`, `{"Error": …}` — a json run and its transcript agree byte for byte |
 | `token` | `delta` | A streaming fragment; concatenating every `token` reproduces the reply exactly |
 | `usage` | camelCase usage fields | The round's bill, once reported (AD-0026) |
+| `notice` | `text` | A non-fatal note about the round, e.g. the reply was cut off at the token limit (#229); the run still ends in `done`. Text mode prints it as one `hi: …` line on stderr |
 | `done` | `text` | Success — the last record |
 | `failed` | `reason` | Failure — the last record, after the partial output and the error line |
 

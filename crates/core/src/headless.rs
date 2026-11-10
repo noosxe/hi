@@ -94,6 +94,9 @@ pub enum JsonRecord {
     Message { message: Message },
     /// The round's bill, once reported (AD-0026).
     Usage { usage: Usage },
+    /// A non-fatal note about the round — e.g. the reply was cut off at
+    /// the token limit (#229). The turn still ends in `Done`.
+    Notice { text: String },
     /// Success: the final assistant text. The last record.
     Done { text: String },
     /// Failure: the reason, after the partial output and the error
@@ -214,6 +217,9 @@ fn drain_turn(
                 sink(&JsonRecord::Usage { usage: recorded });
                 bills.push(recorded);
             }
+            // Notes are not transcript: they reach the sink (json
+            // records, the text-mode stderr line) and nothing else.
+            Event::Notice(text) => sink(&JsonRecord::Notice { text }),
             Event::Error(message) => error = Some(message),
             Event::TurnEnd => {
                 ended = true;
@@ -657,9 +663,36 @@ mod tests {
             JsonRecord::Thinking { .. } => "thinking",
             JsonRecord::Message { .. } => "message",
             JsonRecord::Usage { .. } => "usage",
+            JsonRecord::Notice { .. } => "notice",
             JsonRecord::Done { .. } => "done",
             JsonRecord::Failed { .. } => "failed",
         }
+    }
+
+    #[test]
+    fn a_notice_is_a_record_and_not_a_failure_or_transcript() {
+        // #229: a length-cut reply still succeeds; the note reaches the
+        // sink but never the history.
+        let provider = Arc::new(ScriptedProvider::new(vec![vec![
+            Event::Token("part".into()),
+            Event::Notice("cut off".into()),
+            Event::TurnEnd,
+        ]]));
+        let mut history = Vec::new();
+        let (reply, records) = json_run(
+            provider,
+            registry(),
+            &mut history,
+            "go",
+            None,
+            DEFAULT_MAX_TOOL_ROUNDS,
+        );
+        assert_eq!(reply.unwrap(), "part");
+        assert!(records.contains(&JsonRecord::Notice {
+            text: "cut off".into()
+        }));
+        assert_eq!(kind(records.last().unwrap()), "done");
+        assert_eq!(history.len(), 2, "user + reply only: {history:?}");
     }
 
     #[test]

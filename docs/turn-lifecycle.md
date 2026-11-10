@@ -36,6 +36,7 @@ per frame (event_loop polls keys with 50ms timeout):
             ├─ Token(t)      → turn.text.push_str(t)     (rendered live)
             ├─ ToolCall(c)   → flush pending text as Assistant, push ToolCall
             ├─ ToolResult(r) → push ToolResult
+            ├─ Notice(n)     → turn.notices.push(n)  (System line after the reply, #229)
             ├─ Error(m)      → turn.error = Some(m)
             ├─ Heartbeat     → ignored (liveness probe, #170)
             └─ TurnEnd       → finalize (below)
@@ -197,7 +198,13 @@ path: partial `Token`s stand, then one `Event::Error` (message built by
 `TurnEnd`. Malformed SSE payload → `Malformed` → same path. An in-stream
 error frame (`error` member or `finish_reason: "error"`) → `DataLine::Error`
 → same path, so headless runs exit non-zero (tool-call fragments of that
-round are dropped, usage still reported). Missing
+round are dropped, usage still reported). `finish_reason: "content_filter"`
+takes the same path with the message `Provider finish_reason: content_filter`
+(pi's text). `finish_reason: "length"` is *not* a failure: it becomes
+`Event::Notice` (the reply was cut off at the token limit), so the turn
+ends normally but the cut-off is visible (#229). The tool calls of a
+length-cut round are not run: each is answered with an error result (pi's
+rule), and the loop continues to the next round. Missing
 `[DONE]` (server closed early) is tolerated as a complete stream.
 
 ## Invariants recap (all tested somewhere)

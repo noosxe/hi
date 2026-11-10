@@ -61,11 +61,23 @@ the pre-thinking plain string (upgraded to one `Text` block on replay).
 
 ## event.rs — the turn event stream
 
-`enum Event { TurnStart, Token(String), Thinking{..}, ToolCall(ToolCall), ToolResult(ToolResult), Usage(Usage), TurnEnd, Error(String), Heartbeat }`,
+`enum Event { TurnStart, Token(String), Thinking{..}, ToolCall(ToolCall), ToolResult(ToolResult), Usage(Usage), TurnEnd, Error(String), Notice(String), Heartbeat }`,
 `Clone + PartialEq`. This is how a turn in progress talks to the UI.
 **Invariants (the single finalization path)**
 - A turn always emits `TurnStart` first and exactly one `TurnEnd` last.
 - `Token`s arrive in order; concatenating them reproduces the full reply.
+- `Notice(String)` (#229) is a non-fatal note about a round — today only
+  "the reply was cut off at the output-token limit" (`finish_reason:
+  "length"`, text `event::TRUNCATED_NOTICE`). The agent loop recognises that
+  text: like pi, it does **not** execute the tool calls of such a round (their
+  arguments may be truncated, and a call cut off before any arguments is `{}`
+  by #204) — each gets an error `ToolResult` saying the call was not executed
+  because the reply hit the token limit, so the transcript stays paired and the
+  model can re-issue it; the turn goes on. It is not reply text and is never sent back to the model; the
+  turn still ends normally. The agent loop forwards it; the TUI `pump` shows it
+  as a `System` line after the reply; headless emits a `notice` record
+  (`--mode json`) or, in text mode, one `hi: …` line on stderr; the subagent
+  drain ignores it.
 - `Heartbeat` (#170) carries no content: a liveness probe a long-running
   tool sends on the consumer's channel to detect a dropped `Receiver`.
   Every consumer (TUI `pump`, headless, the subagent drain, the agent
@@ -407,7 +419,8 @@ terminal — the CLI only assembles the prompt, session, and exit code.
 - `headless::run_with(…, sink)` — the same drain, emitting a
   `JsonRecord` per event (AD-0038): the `Session` header (when a
   session file is open), the user `Message`, `Token` deltas,
-  transcript `Message`s as they finalize, `Usage`, and exactly one
+  transcript `Message`s as they finalize, `Usage`, `Notice{text}` (#229),
+  and exactly one
   terminal record — `Done{text}` or, after the partial output and the
   error line, `Failed{reason}`. A stream that closes without `TurnEnd`
   (dead agent thread, #172) is a failure too — `Failed`, `Err`, non-zero
@@ -517,12 +530,14 @@ Wire behavior:
   (`encode_request_body`); smaller bodies and compression failures ride
   identity.
 - SSE parsing: `parse_data_line` classifies each line into
-  `DataLine::{Token, Thinking, ToolFragments, Usage, Done, Malformed, Error}`.
+  `DataLine::{Token, Thinking, ToolFragments, Usage, Notice, Done, Malformed, Error}`
+  (`Notice` is `finish_reason: "length"`, #229).
   `data: [DONE]` ends the stream; a server closing without `[DONE]` is
   tolerated as complete.
 - Mid-stream errors: a chunk with a non-null top-level `error` (object with
   `message`/`code`, or a bare string; OpenRouter's `code` may be a string or
-  a number) or `choices[0].finish_reason == "error"` becomes
+  a number) or `choices[0].finish_reason == "error"` (or `"content_filter"`,
+  message `Provider finish_reason: content_filter`, #229) becomes
   `DataLine::Error` (`stream_error` builds the message, e.g.
   `provider error (server_error): …`), emitted after any token/usage in the
   same chunk. The stream loop returns it as `Err` at once: tokens already sent

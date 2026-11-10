@@ -722,6 +722,58 @@ fn a_failed_turn_fails_with_stdout_empty() {
 }
 
 #[test]
+fn a_reply_cut_off_by_length_still_exits_zero_with_a_stderr_note() {
+    // #229: stdout stays the (partial) answer; the truncation is said
+    // once on stderr instead of passing for a complete reply.
+    let env = Env::new("length-cut");
+    let body = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        token_chunk("par"),
+        json!({"choices": [{"delta": {}, "finish_reason": "length"}]})
+    );
+    let api = FakeApi::start(vec![Script::Sse(body)]);
+    env.write_models_json(api.url(), plain_model());
+    let project = env.project("length-cut-proj");
+
+    let (code, stdout, stderr) = run(
+        &project,
+        &env,
+        &["-p", "--provider", "fake", "--model", "fake-mini", "hi"],
+    );
+    assert_eq!(code, 0, "stderr: {stderr:?}");
+    assert_eq!(stdout.trim_end(), "par");
+    assert!(
+        stderr.contains("cut off") && stderr.contains("length"),
+        "the note reaches stderr: {stderr:?}"
+    );
+}
+
+#[test]
+fn a_content_filtered_reply_fails_print_mode() {
+    let env = Env::new("content-filter");
+    let body = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        token_chunk("par"),
+        json!({"choices": [{"delta": {}, "finish_reason": "content_filter"}]})
+    );
+    let api = FakeApi::start(vec![Script::Sse(body)]);
+    env.write_models_json(api.url(), plain_model());
+    let project = env.project("content-filter-proj");
+
+    let (code, stdout, stderr) = run(
+        &project,
+        &env,
+        &["-p", "--provider", "fake", "--model", "fake-mini", "hi"],
+    );
+    assert_eq!(code, 1, "stderr: {stderr:?}");
+    assert_eq!(stdout, "");
+    assert!(
+        stderr.contains("Provider finish_reason: content_filter"),
+        "{stderr:?}"
+    );
+}
+
+#[test]
 fn a_mid_stream_error_frame_fails_print_mode() {
     let env = Env::new("stream-error");
     let body = format!(

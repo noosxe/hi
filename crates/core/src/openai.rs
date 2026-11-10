@@ -340,6 +340,11 @@ impl OpenAiCompatProvider {
                             accumulate_fragment(&mut partials, fragment);
                         }
                     }
+                    DataLine::Notice(note) => {
+                        if tx.send(Event::Notice(note)).is_err() {
+                            return Ok(());
+                        }
+                    }
                     DataLine::Usage(usage) => {
                         // Last-wins: a server that reports usage on
                         // every chunk gets only its final word counted.
@@ -528,6 +533,9 @@ enum DataLine {
     Thinking(String, &'static str),
     ToolFragments(Vec<ToolCallDelta>),
     Usage(Usage),
+    /// The reply was cut short but is still usable (`finish_reason:
+    /// "length"`): shown as a note, not a failure (#229).
+    Notice(String),
     Done,
     Malformed(String),
     /// The server reported a failure inside the stream (a top-level
@@ -591,6 +599,9 @@ fn parse_data_line(line: &str) -> Vec<DataLine> {
     if !choice.delta.tool_calls.is_empty() {
         out.push(DataLine::ToolFragments(choice.delta.tool_calls));
     }
+    if choice.finish_reason.as_deref() == Some("length") {
+        out.push(DataLine::Notice(crate::event::TRUNCATED_NOTICE.to_string()));
+    }
     // The error goes last so partial content in the same chunk stands.
     if let Some(error) = stream_error(chunk.error, choice.finish_reason.as_deref()) {
         out.push(DataLine::Error(error));
@@ -625,8 +636,15 @@ fn stream_error(error: Option<serde_json::Value>, finish_reason: Option<&str>) -
             });
         }
     }
-    (finish_reason == Some("error"))
-        .then(|| "provider error: stream ended with finish_reason \"error\"".to_string())
+    match finish_reason {
+        Some("error") => {
+            Some("provider error: stream ended with finish_reason \"error\"".to_string())
+        }
+        // The provider withheld the rest of the reply (#229); pi maps
+        // it to the same error text.
+        Some("content_filter") => Some("Provider finish_reason: content_filter".to_string()),
+        _ => None,
+    }
 }
 
 /// One OpenAI chat request. Borrowed strings (`&'a str`,
@@ -1189,6 +1207,35 @@ mod tests {
             parse_data_line("data: {not json").as_slice(),
             [DataLine::Malformed(_)]
         ));
+    }
+
+    #[test]
+    fn finish_reason_length_is_a_note_and_content_filter_an_error() {
+        // #229: neither may pass for a normal, complete reply.
+        assert_eq!(
+            parse_data_line(
+                r#"data: {"choices":[{"delta":{"content":"par"},"finish_reason":"length"}]}"#
+            ),
+            vec![
+                DataLine::Token("par".into()),
+                DataLine::Notice(crate::event::TRUNCATED_NOTICE.into())
+            ]
+        );
+        assert_eq!(
+            parse_data_line(r#"data: {"choices":[{"delta":{},"finish_reason":"content_filter"}]}"#),
+            vec![DataLine::Error(
+                "Provider finish_reason: content_filter".into()
+            )]
+        );
+        // The ordinary reasons stay silent.
+        for reason in ["stop", "tool_calls"] {
+            assert_eq!(
+                parse_data_line(&format!(
+                    r#"data: {{"choices":[{{"delta":{{}},"finish_reason":"{reason}"}}]}}"#
+                )),
+                Vec::new()
+            );
+        }
     }
 
     #[test]
