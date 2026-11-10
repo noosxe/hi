@@ -270,7 +270,7 @@ so a timed-out command cannot leave orphans behind either. Completion is one `Ta
 the front end drains per frame; `TaskManager::shutdown` (also run by
 dropping the last handle) kills every running group whatever the handle
 count (#175). Threads, not tokio — the choice #6's Luau bridge
-inherits. No default timeout: long-lived work is the point; a cap of
+inherits. The worker runs under `guarded` (`catch_unwind`): a panic in `monitor` kills the group, marks the task `Failed` (exit code -1), writes a line to its output and sends the one completion notice (tracked by a `sent` flag the monitor sets right after its send, so a panic between the state flip and the send still notifies, exactly once), instead of leaving it `Running` forever with no signal (#219). It kills the group only for a task still `Running` (a reaped leader's pgid may be recycled) and tolerates poisoned locks. No default timeout: long-lived work is the point; a cap of
 16 running tasks refuses beyond that with a readable error.
 
 **Exit (#175):** `exit::shutdown(tasks)` is the one sweep every front end
