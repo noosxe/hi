@@ -2089,13 +2089,27 @@ keeping the old provider until you /model"
                 if let Some(picker) = self.session_picker.as_mut() {
                     let _ = picker.filter.pop();
                 }
+                self.clamp_session_picker_selection();
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(picker) = self.session_picker.as_mut() {
                     picker.filter.push(c);
                 }
+                self.clamp_session_picker_selection();
             }
             _ => {}
+        }
+    }
+
+    /// Pull the highlight back inside the visible rows after the filter
+    /// changed: a stale index past the end made Enter close the picker
+    /// without opening anything (#193). The draw already clamped for
+    /// display, so what the user saw highlighted and what Enter acted on
+    /// disagreed.
+    fn clamp_session_picker_selection(&mut self) {
+        let last = self.session_picker_visible().len().saturating_sub(1);
+        if let Some(picker) = self.session_picker.as_mut() {
+            picker.selected = picker.selected.min(last);
         }
     }
 
@@ -4948,6 +4962,32 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, Message::System(text) if text.contains("not persisting")))
         );
+    }
+
+    #[test]
+    fn narrowing_the_filter_keeps_the_highlight_on_a_visible_row() {
+        let root = std::env::temp_dir().join(format!("hi-picker-clamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cwd = std::env::current_dir().unwrap();
+        for name in ["alpha", "bravo", "charlie"] {
+            let mut s = Session::start_in(&root, &cwd, "mock", "mock", None, Some(name)).unwrap();
+            s.append(&[Message::User(format!("{name} hello"))]).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let mut app = app();
+        app.session_root = Some(root.clone());
+        app.run_command("resume", "");
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Down));
+        for c in "alpha".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.session_picker.as_ref().unwrap().selected, 0);
+        let before = app.messages.len();
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.session_picker.is_none());
+        assert_ne!(app.messages.len(), before, "the highlighted session opened");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
