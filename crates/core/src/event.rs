@@ -89,8 +89,13 @@ impl Usage {
     /// Cumulative merge across rounds: counts sum; a detail stays
     /// absent until some round reports it (`None` is not zero).
     pub fn merge(&mut self, other: Usage) {
-        self.prompt_tokens += other.prompt_tokens;
-        self.completion_tokens += other.completion_tokens;
+        // Counts come straight off the wire and are never range-checked:
+        // saturate so a huge report cannot panic (debug) or wrap to a
+        // tiny total (release) (#242).
+        self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
+        self.completion_tokens = self
+            .completion_tokens
+            .saturating_add(other.completion_tokens);
         self.cached_tokens = sum_details(self.cached_tokens, other.cached_tokens);
         self.reasoning_tokens = sum_details(self.reasoning_tokens, other.reasoning_tokens);
     }
@@ -100,13 +105,41 @@ impl Usage {
 fn sum_details(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     match (a, b) {
         (None, None) => None,
-        (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+        (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_saturates_instead_of_overflowing() {
+        // #242: a server reporting counts near u64::MAX must not panic
+        // a debug build or wrap a release build to a tiny total.
+        let huge = Usage {
+            prompt_tokens: u64::MAX - 1,
+            completion_tokens: u64::MAX,
+            cached_tokens: Some(u64::MAX),
+            reasoning_tokens: Some(u64::MAX - 1),
+        };
+        let mut total = huge;
+        total.merge(Usage {
+            prompt_tokens: 5,
+            completion_tokens: 5,
+            cached_tokens: Some(5),
+            reasoning_tokens: Some(5),
+        });
+        assert_eq!(
+            total,
+            Usage {
+                prompt_tokens: u64::MAX,
+                completion_tokens: u64::MAX,
+                cached_tokens: Some(u64::MAX),
+                reasoning_tokens: Some(u64::MAX),
+            }
+        );
+    }
 
     #[test]
     fn merge_sums_counts_and_keeps_absent_details_absent() {

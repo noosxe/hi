@@ -87,6 +87,9 @@ the pre-thinking plain string (upgraded to one `Text` block on replay).
   `TurnEnd`. Producers: see `OpenAiCompatProvider::respond`. Consumers
   therefore need exactly one finalize code path (`App::pump` is the reference
   consumer).
+- `Usage::merge` (and the subagent's per-round bill sum) **saturate**: counts come
+  straight off the wire, so a server reporting near-`u64::MAX` pins the total at
+  `u64::MAX` instead of panicking (debug) or wrapping (release) (#242).
 
 ## tool.rs — what a model may call, and who decides what runs
 

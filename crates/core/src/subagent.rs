@@ -410,8 +410,10 @@ fn drain(
                 }
             }
             Event::Usage(u) => {
-                usage.prompt_tokens += u.prompt_tokens;
-                usage.completion_tokens += u.completion_tokens;
+                // Saturating: wire counts are unchecked (#242).
+                usage.prompt_tokens = usage.prompt_tokens.saturating_add(u.prompt_tokens);
+                usage.completion_tokens =
+                    usage.completion_tokens.saturating_add(u.completion_tokens);
                 if let Some(session) = transcript.as_mut() {
                     let _ = session.append_usage(&u);
                 }
@@ -922,6 +924,41 @@ mod tests {
         assert_eq!(result.usage.prompt_tokens, 40);
         assert_eq!(result.usage.completion_tokens, 10);
         assert_eq!(result.text, "done");
+    }
+
+    #[test]
+    fn a_huge_reported_bill_saturates_instead_of_overflowing() {
+        // #242: two rounds each reporting u64::MAX sum to u64::MAX.
+        let dir = std::env::temp_dir().join(format!("hi-sub-huge-{}", std::process::id()));
+        let huge = format!(
+            "{{\"choices\":[],\"usage\":{{\"prompt_tokens\":{m},\"completion_tokens\":{m}}}}}",
+            m = u64::MAX
+        );
+        let tool_call = sse_response(&[
+            "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"nope\",\"arguments\":\"{}\"}}]}}]}",
+            &huge,
+            "[DONE]",
+        ]);
+        let settle = sse_response(&[
+            "{\"choices\":[{\"delta\":{\"content\":\"done\"}}]}",
+            &huge,
+            "[DONE]",
+        ]);
+        let api = FakeApi::start_sequence(vec![tool_call, settle]);
+        let runner = runner_with(&api.base_url, &dir, None);
+        runner.stamp("prov", "m");
+        let result = runner
+            .run(&SubagentSpec {
+                prompt: "go".into(),
+                provider: None,
+                model: None,
+                thinking: None,
+                tools: None,
+                max_tool_rounds: None,
+            })
+            .unwrap();
+        assert_eq!(result.usage.prompt_tokens, u64::MAX);
+        assert_eq!(result.usage.completion_tokens, u64::MAX);
     }
 
     #[test]
