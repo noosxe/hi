@@ -291,16 +291,25 @@ impl Settings {
 /// one, never a truncated one. A failed write or rename removes the temp
 /// file.
 fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
-    use std::io::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
     }
     let pretty = serde_json::to_string_pretty(value)
         .map_err(|err| format!("cannot serialize settings: {err}"))?;
+
+    write_atomic(path, (pretty + "\n").as_bytes())
+}
+
+/// Replace `path`'s contents with `bytes` atomically: write a unique temp
+/// file beside it, flush it, rename it over the target. Readers (and a
+/// crash mid-write) see the old file or the new one, never a truncated
+/// one; a failed write or rename removes the temp file. Shared by
+/// settings saves and the session header restamp (#205).
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(
@@ -312,7 +321,7 @@ fn write_json(path: &Path, value: &serde_json::Value) -> Result<(), String> {
 
     let result = (|| {
         let mut file = std::fs::File::create(&tmp)?;
-        file.write_all((pretty + "\n").as_bytes())?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
         std::fs::rename(&tmp, path)

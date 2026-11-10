@@ -311,8 +311,9 @@ too, so the cli ships neither serde nor an HTTP client (AD-0004).
 The header records the session's identity — thinking level and
 `provider`/`model` (AD-0045, AD-0046). `Session::set_thinking` and
 `Session::set_model` restamp the live header in place on mid-session
-switches (the shared line-one rewrite, transcript untouched, append
-handle reopened); the `thinking()`/`provider()`/`model()` accessors
+switches (the shared line-one rewrite, transcript untouched, written
+atomically through `settings::write_atomic` — temp file + rename, #205 —
+and the append handle reopened); the `thinking()`/`provider()`/`model()` accessors
 are what every resume path reads to put the session back where it
 was — the header outranks the startup selection; a missing level
 keeps the current value, a vanished model falls back with a warning
@@ -620,7 +621,8 @@ on read (`None` fields are skipped on serialize). Path: next to `models.json`
 - Missing file = `Settings::default()` (normal first-run state; tested).
 - Unparseable file = `Err` (surfaced, not silently ignored; tested).
 - `save()` creates parent dirs, writes pretty JSON + trailing newline. All
-  saves go through `write_json`, which is **atomic**: it writes a uniquely
+  saves go through `write_json` (over the shared `write_atomic`, which the
+  session header restamp reuses), which is **atomic**: it writes a uniquely
   named temp file beside the target (`settings.json.tmp-<pid>-<n>`), `sync_all`s
   it and `rename`s it over the target (removed again if the write or rename
   fails), so a concurrent reader or a crash never sees a truncated file (#215). It
