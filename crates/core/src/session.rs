@@ -661,24 +661,22 @@ pub fn resolve_in_root(root: &Path, cwd: &Path, arg: &str) -> Result<SessionRef,
 ///
 /// Tolerates a torn final line (crash mid-append) — an unparsable line
 /// is fatal anywhere *except* at the end of the file, where it is
-/// treated as the aftermath of an interrupted write and dropped. Read
+/// treated as the aftermath of an interrupted write and dropped. A line
+/// that is not valid UTF-8 (a character cut in half) counts as unparsable. Read
 /// only: `Session::resume` is what cuts the fragment out of the file
 /// before anything is appended after it.
 pub fn load(path: &Path) -> Result<LoadedSession, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|err| format!("cannot read {}: {err}", path.display()))?;
+    let raw =
+        std::fs::read(path).map_err(|err| format!("cannot read {}: {err}", path.display()))?;
     let mut header: Option<SessionHeader> = None;
     let mut messages = Vec::new();
     let mut usage = Usage::default();
     let mut usage_last_prompt = 0u64;
     let mut name = None;
-    let lines: Vec<&str> = raw
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    for (index, line) in lines.iter().enumerate() {
-        match parse_line(line) {
+    let lines = scan_lines(&raw);
+    let last = lines.len().wrapping_sub(1);
+    for (index, (_, parsed)) in lines.into_iter().enumerate() {
+        match parsed {
             Ok(Entry::Header(parsed)) => {
                 if header.is_some() || !messages.is_empty() {
                     return Err(format!(
@@ -717,7 +715,7 @@ pub fn load(path: &Path) -> Result<LoadedSession, String> {
                 };
             }
             Err(err) => {
-                let is_torn_tail = index == lines.len() - 1;
+                let is_torn_tail = index == last;
                 if is_torn_tail {
                     break; // crash mid-append; everything before it stands
                 }
@@ -836,26 +834,41 @@ fn epoch_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// Every non-empty line of a session file as `(byte offset, parsed
+/// entry)`. A line that is not valid UTF-8 (a crash can cut a
+/// multibyte character in half) is a parse error like any other, so
+/// `load` and `repair_tail` agree on what "torn" means.
+fn scan_lines(raw: &[u8]) -> Vec<(usize, Result<Entry, String>)> {
+    let mut offset = 0;
+    let mut out = Vec::new();
+    for segment in raw.split_inclusive(|&byte| byte == b'\n') {
+        let start = offset;
+        offset += segment.len();
+        match std::str::from_utf8(segment) {
+            Ok(text) => {
+                let line = text.trim();
+                if !line.is_empty() {
+                    out.push((start, parse_line(line)));
+                }
+            }
+            Err(err) => out.push((start, Err(format!("invalid UTF-8: {err}")))),
+        }
+    }
+    out
+}
+
 /// Make an existing session file safe to append to (see
 /// [`Session::resume`]). Uses [`parse_line`] and `load`'s trimming, so
 /// "torn" means exactly what `load` drops.
 fn repair_tail(path: &Path) -> Result<(), String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|err| format!("cannot read {}: {err}", path.display()))?;
-    // Byte offset of the start of the last non-empty line.
-    let mut offset = 0;
-    let mut last: Option<(usize, &str)> = None;
-    for segment in raw.split_inclusive('\n') {
-        let trimmed = segment.trim();
-        if !trimmed.is_empty() {
-            last = Some((offset, trimmed));
-        }
-        offset += segment.len();
-    }
+    let raw =
+        std::fs::read(path).map_err(|err| format!("cannot read {}: {err}", path.display()))?;
+    let torn_start = scan_lines(&raw)
+        .into_iter()
+        .next_back()
+        .and_then(|(start, parsed)| parsed.is_err().then_some(start));
     let fail = |err: std::io::Error| format!("cannot repair {}: {err}", path.display());
-    if let Some((start, line)) = last
-        && parse_line(line).is_err()
-    {
+    if let Some(start) = torn_start {
         let file = std::fs::OpenOptions::new()
             .write(true)
             .open(path)
@@ -863,7 +876,7 @@ fn repair_tail(path: &Path) -> Result<(), String> {
         file.set_len(start as u64).map_err(fail)?;
         return Ok(());
     }
-    if !raw.is_empty() && !raw.ends_with('\n') {
+    if !raw.is_empty() && !raw.ends_with(b"\n") {
         std::fs::OpenOptions::new()
             .append(true)
             .open(path)
@@ -1294,6 +1307,38 @@ mod tests {
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.header.thinking.as_deref(), Some("high"));
         assert_eq!(loaded.messages.len(), 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_tail_cut_mid_character_is_dropped_by_load_and_repaired_by_resume() {
+        let (root, path) = session_file("repair-utf8");
+        append_raw(&path, "{\"type\":\"message\",\"message\":{\"user\":\"caf");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(&[0xC3]).unwrap();
+        drop(file);
+        assert_eq!(load(&path).unwrap().messages.len(), 1);
+        assert_resume_recovers(&path, vec![Message::User("one".into())]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn invalid_utf8_mid_file_is_still_fatal() {
+        let (root, path) = session_file("repair-utf8-mid");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"{\"caf\xC3\n").unwrap();
+        drop(file);
+        append_raw(
+            &path,
+            "{\"type\":\"message\",\"message\":{\"user\":\"end\"}}\n",
+        );
+        assert!(load(&path).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 
