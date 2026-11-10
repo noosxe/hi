@@ -161,7 +161,8 @@ session.
 
 - **Files win when they speak.** A key present in `settings.json`
   applies live: `thinking`, `taskTurns`, `images`, `maxToolRounds`,
-  `subagentTranscripts`, `telemetry`. A key the file drops keeps its
+  `subagentTranscripts`, `telemetry` (which still resolves through the
+  `HI_TELEMETRY` override, as at startup — #203). A key the file drops keeps its
   live value — removing `thinking` from the file does not zero the
   session's level. That is why `subagentTranscripts` reads through an
   `Option`: "off" must stay distinguishable from unspoken.
