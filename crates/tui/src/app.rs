@@ -2567,9 +2567,11 @@ keeping the old provider until you /model"
         // transcript after the loop — `self.messages` can't be touched
         // while `turn` holds a borrow of `self`.
         let mut transcript: Vec<Message> = Vec::new();
-        // The round's bill (AD-0026): merged across rounds within one
-        // pump, applied to `self` after the borrow ends.
-        let mut round_bill: Option<Usage> = None;
+        // The bills (AD-0026) of the rounds that landed in this pump, one
+        // entry per round and never merged here — the context fact is the
+        // latest round's prompt, and each round is its own usage record.
+        // Applied to `self` after the borrow ends.
+        let mut round_bills: Vec<Usage> = Vec::new();
         loop {
             let event = match turn.rx.try_recv() {
                 Ok(event) => event,
@@ -2611,13 +2613,9 @@ keeping the old provider until you /model"
                 }
                 Event::ToolResult(result) => transcript.push(Message::ToolResult(result)),
                 Event::Usage(usage) => {
-                    round_bill = Some(match round_bill {
-                        Some(mut total) => {
-                            total.merge(usage);
-                            total
-                        }
-                        None => usage,
-                    });
+                    // Kept per round: two rounds can land in one frame,
+                    // and each is its own bill and its own context size.
+                    round_bills.push(usage);
                 }
                 Event::Error(message) => turn.error = Some(message),
                 Event::TurnEnd => {
@@ -2629,13 +2627,13 @@ keeping the old provider until you /model"
         for message in transcript {
             self.messages.push(message);
         }
-        if let Some(bill) = round_bill {
+        for bill in round_bills {
             self.usage.merge(bill);
             // The latest round's prompt IS the context size: every
             // turn re-sends the whole conversation.
             self.usage_last_prompt = bill.prompt_tokens;
-            // And the bill rides the session file (#85) — the front
-            // end that resumes shows the totals.
+            // And each bill rides the session file (#85), one record
+            // per round — the front end that resumes shows the totals.
             self.persist_usage(bill);
         }
         if finished {
@@ -3174,6 +3172,26 @@ mod tests {
             "the live turn is the latest context"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_rounds_in_one_frame_keep_the_latest_prompt_as_context() {
+        let mut app = test_app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.turn = Some(Turn::with_rx(rx));
+        for prompt_tokens in [100, 200] {
+            tx.send(Event::Usage(Usage {
+                prompt_tokens,
+                completion_tokens: 1,
+                cached_tokens: None,
+                reasoning_tokens: None,
+            }))
+            .unwrap();
+        }
+        app.pump();
+        assert_eq!(app.usage_last_prompt, 200, "the latest round, not a sum");
+        assert_eq!(app.usage.prompt_tokens, 300, "the bill still totals");
+        assert_eq!(app.usage.completion_tokens, 2);
     }
 
     #[test]
