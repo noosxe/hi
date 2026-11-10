@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
-use crate::event::Event;
+use crate::event::{Event, TRUNCATED_NOTICE};
 use crate::message::{AssistantBlock, Message};
 use crate::provider::{Provider, spawn_turn};
 use crate::tool::{ToolCall, ToolDecision, ToolGate, ToolRegistry, ToolResult};
@@ -89,6 +89,9 @@ fn run_agent_turn(
         let mut round_blocks: Vec<AssistantBlock> = Vec::new();
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut failed = false;
+        // Did the server cut this round off at the token limit? Then its
+        // tool calls may carry truncated arguments (#229).
+        let mut truncated = false;
         // Did the round's own `TurnEnd` arrive? A provider thread that
         // panics drops its sender mid-round: the channel closes with no
         // `TurnEnd` and, without this flag, the loop would read "no
@@ -124,6 +127,15 @@ fn run_agent_turn(
                 // dropped silently.
                 result @ Event::ToolResult(_) => {
                     if tx.send(result).is_err() {
+                        return;
+                    }
+                }
+                // A note about the round (#229) rides through too.
+                notice @ Event::Notice(_) => {
+                    if matches!(&notice, Event::Notice(text) if text == TRUNCATED_NOTICE) {
+                        truncated = true;
+                    }
+                    if tx.send(notice).is_err() {
                         return;
                     }
                 }
@@ -184,8 +196,16 @@ fn run_agent_turn(
         // Deterministic beats clever: results land in a stable order,
         // and parallel execution is background-task territory (#5).
         for call in &calls {
-            let result =
-                decide_and_execute(gate, &registry, call, &|| tx.send(Event::Heartbeat).is_ok());
+            // pi fails every call of a length-cut message instead of
+            // running possibly-incomplete ones; the error result keeps
+            // the transcript well-formed and lets the model retry. (An
+            // empty `{}` from a call cut off before any arguments would
+            // otherwise run — #204 — with arguments the model never sent.)
+            let result = if truncated {
+                truncated_call_result(call)
+            } else {
+                decide_and_execute(gate, &registry, call, &|| tx.send(Event::Heartbeat).is_ok())
+            };
             working.push(Message::ToolResult(result.clone()));
             if tx.send(Event::ToolResult(result)).is_err() {
                 return;
@@ -198,6 +218,22 @@ fn run_agent_turn(
         "tool loop {ROUND_CAP_MARKER} {max_tool_rounds} rounds"
     )));
     let _ = tx.send(Event::TurnEnd);
+}
+
+/// The error result for a tool call from a round the server cut off at
+/// its output-token limit: not executed (#229).
+fn truncated_call_result(call: &ToolCall) -> ToolResult {
+    ToolResult {
+        call_id: call.id.clone(),
+        name: call.name.clone(),
+        content: format!(
+            "tool call `{}` was not executed: the reply was cut off at the output token \
+             limit before the call was complete. Re-issue it with complete arguments.",
+            call.name
+        ),
+        is_error: true,
+        images: Vec::new(),
+    }
 }
 
 /// The error for a round whose provider thread vanished mid-stream.
@@ -508,6 +544,54 @@ mod tests {
             // An incomplete round never dispatches its calls.
             assert!(tool_results(&events).is_empty(), "had_call={had_call}");
         }
+    }
+
+    #[test]
+    fn a_length_cut_round_fails_its_tool_calls_instead_of_running_them() {
+        // #229 + #204: a call cut off before any arguments arrived is
+        // `{}` — it must not run. pi fails every call of a length-cut
+        // message; the model sees why and the next round proceeds.
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            vec![
+                Event::TurnStart,
+                Event::Token("let me".into()),
+                Event::ToolCall(call("c1", "echo", "{}")),
+                Event::Notice(TRUNCATED_NOTICE.into()),
+                Event::TurnEnd,
+            ],
+            vec![
+                Event::TurnStart,
+                Event::Token("retrying".into()),
+                Event::TurnEnd,
+            ],
+        ]));
+        let events = collect(spawn_agent_turn(
+            provider,
+            registry_with(Arc::new(EchoTool)),
+            None,
+            &[Message::User("go".into())],
+            DEFAULT_MAX_TOOL_ROUNDS,
+        ));
+        let results = tool_results(&events);
+        assert_eq!(results.len(), 1, "{events:?}");
+        assert!(results[0].is_error);
+        assert_eq!(results[0].call_id, "c1");
+        assert!(
+            results[0].content.contains("not executed"),
+            "{}",
+            results[0].content
+        );
+        assert!(results[0].content.contains("token limit"));
+        assert!(
+            !results[0].content.starts_with("echo"),
+            "the tool never ran"
+        );
+        assert!(events.contains(&Event::Notice(TRUNCATED_NOTICE.into())));
+        assert!(
+            events.contains(&Event::Token("retrying".into())),
+            "the turn went on"
+        );
+        assert_eq!(events.last(), Some(&Event::TurnEnd));
     }
 
     #[test]

@@ -357,6 +357,9 @@ pub struct Turn {
     /// Set when the provider reported a failure for this turn;
     /// `Some` turns the finalization into an error transcript entry.
     pub error: Option<String>,
+    /// Notes the provider attached to the turn (#229) — shown as
+    /// `System` lines after the reply when the turn finalizes.
+    pub notices: Vec<String>,
     /// When this turn started — feeds the elapsed time in the
     /// activity title.
     pub started_at: Instant,
@@ -373,6 +376,7 @@ impl Turn {
         Turn {
             blocks: Vec::new(),
             error: None,
+            notices: Vec::new(),
             started_at: Instant::now(),
             rx,
         }
@@ -385,6 +389,7 @@ impl Turn {
         Turn {
             blocks: vec![hi_core::message::AssistantBlock::Text(text.to_string())],
             error: None,
+            notices: Vec::new(),
             started_at: Instant::now(),
             rx: std::sync::mpsc::channel().1,
         }
@@ -949,6 +954,7 @@ impl App {
         self.turn = Some(Turn {
             blocks: Vec::new(),
             error: None,
+            notices: Vec::new(),
             started_at: Instant::now(),
             rx,
         });
@@ -2647,6 +2653,7 @@ keeping the old provider until you /model"
                     // and each is its own bill and its own context size.
                     round_bills.push(usage);
                 }
+                Event::Notice(text) => turn.notices.push(text),
                 Event::Error(message) => turn.error = Some(message),
                 Event::TurnEnd => {
                     finished = true;
@@ -2675,6 +2682,9 @@ keeping the old provider until you /model"
                 // entry goes below it so the failure is visible.
                 if !turn.blocks.is_empty() {
                     self.messages.push(Message::Assistant(turn.blocks));
+                }
+                for note in turn.notices {
+                    self.messages.push(Message::System(note));
                 }
                 if let Some(err) = turn.error {
                     self.messages.push(Message::Error(err));
@@ -4638,6 +4648,34 @@ mod tests {
     }
 
     #[test]
+    fn a_notice_lands_as_a_system_line_after_the_reply() {
+        // #229: a reply cut off at the token limit says so, below the
+        // partial reply — and the turn still ends without an error.
+        let mut app = app();
+        let (tx, rx) = std::sync::mpsc::channel::<Event>();
+        app.turn = Some(Turn::with_rx(rx));
+        tx.send(Event::TurnStart).unwrap();
+        tx.send(Event::Notice("the reply was cut off".into()))
+            .unwrap();
+        tx.send(Event::Token("partial".into())).unwrap();
+        tx.send(Event::TurnEnd).unwrap();
+        app.pump();
+        assert!(app.turn.is_none());
+        let reply = app
+            .messages
+            .iter()
+            .position(|m| matches!(m, Message::Assistant(_)))
+            .expect("reply kept");
+        let note = app
+            .messages
+            .iter()
+            .position(|m| matches!(m, Message::System(t) if t == "the reply was cut off"))
+            .expect("note shown");
+        assert!(reply < note, "the note follows the reply");
+        assert!(!app.messages.iter().any(|m| matches!(m, Message::Error(_))));
+    }
+
+    #[test]
     fn a_dead_agent_thread_fails_the_turn_keeps_partials_and_fires_the_queue() {
         // #172: the channel closes with no `TurnEnd`. The turn must
         // finalize as failed, not hang in flight forever.
@@ -5384,6 +5422,7 @@ mod tests {
         app.turn = Some(Turn {
             blocks: Vec::new(),
             error: None,
+            notices: Vec::new(),
             started_at: std::time::Instant::now(),
             rx,
         });
@@ -5892,6 +5931,7 @@ mod tests {
         app.turn = Some(Turn {
             blocks: vec![],
             error: None,
+            notices: Vec::new(),
             started_at: Instant::now(),
             rx,
         });
@@ -5934,6 +5974,7 @@ mod tests {
         app.turn = Some(Turn {
             blocks: vec![hi_core::message::AssistantBlock::Text("so far".into())],
             error: None,
+            notices: Vec::new(),
             started_at: Instant::now(),
             rx,
         });

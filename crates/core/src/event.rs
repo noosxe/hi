@@ -43,6 +43,13 @@ pub enum Event {
     /// `TurnEnd` still follows, so consumers keep a single
     /// finalization path and just mark the reply as failed.
     Error(String),
+    /// A non-fatal note about the round just streamed — today, that the
+    /// server cut the reply short at its output-token limit (#229).
+    /// Not part of the reply: consumers show it beside the transcript
+    /// (the TUI as a `System` line after the reply, `--mode json` as a
+    /// `notice` record, text mode on stderr) and never feed it back to
+    /// the model. Unlike `Error` the turn still ends normally.
+    Notice(String),
     /// A liveness probe (#170). Carries no content and means nothing to
     /// any consumer: it exists only so a long-running tool (the
     /// subagent) can `send` and learn whether the `Receiver` is still
@@ -51,6 +58,13 @@ pub enum Event {
     /// transcript or session file.
     Heartbeat,
 }
+
+/// The `Notice` text for a reply the server cut off at its
+/// output-token limit (`finish_reason: "length"`, #229). The agent loop
+/// recognises it: a round that carried it never executes its tool calls,
+/// whose arguments may be truncated (pi's rule).
+pub const TRUNCATED_NOTICE: &str =
+    "the reply was cut off: the model hit its output token limit (finish_reason: length)";
 
 /// Token economics of one round, raw from the wire. Raw counts —
 /// formatting is a front-end policy. The detail halves are `Option`

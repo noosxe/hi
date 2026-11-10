@@ -655,7 +655,7 @@ fn print_mode(cli: &Cli, json: bool, read_stdin: impl FnOnce() -> Option<String>
             &mut |record| out.line(&record.to_line()),
         )
     } else {
-        headless::run(
+        headless::run_with(
             provider,
             tools,
             None,
@@ -663,6 +663,14 @@ fn print_mode(cli: &Cli, json: bool, read_stdin: impl FnOnce() -> Option<String>
             &prompt,
             session,
             max_tool_rounds,
+            // Text mode prints only the reply on stdout; a note about
+            // the round (a reply cut off at the token limit, #229)
+            // goes to stderr, so a script's stdout stays the answer.
+            &mut |record| {
+                if let headless::JsonRecord::Notice { text } = record {
+                    eprintln!("hi: {text}");
+                }
+            },
         )
     };
     match turn {
