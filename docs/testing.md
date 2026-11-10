@@ -27,12 +27,12 @@ the session; only Ctrl-S persists, so tests that stop at Enter need no lock.
 Saves are also atomic in core (`write_json`: temp file + rename), so a reader
 never sees an empty `settings.json` even without the lock (#215).
 
-Current count: **691 `#[test]` functions** (the README's count gets refreshed in passing;
+Current count: **694 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 91
-core: openai 48, session 44, settings 31, subagent 20, tasks 24, selection 15, read 13,
+core: openai 48, session 44, settings 31, subagent 21, tasks 24, selection 15, read 13,
 agent 17, walk 11, headless 13, message 5, catalog 5, context_report 4, grep 8, image_util 7, truncate 7, edit 6,
 config 7, system_prompt 6, tasks-tool 6, bash 16, process 2, mod 6, image_resize 6, subagent-tool 10,
-find 5, write 3, ls 3, thinking 3, mock 2, event 1, tool 1. tui: app 118,
+find 5, write 3, ls 3, thinking 3, mock 2, event 1, tool 1. tui: app 120,
 ui 35, status 12, markdown 27, kitty 12, wrap 12, editor 9, picker 7, scroll 11,
 commands 4, clipboard 3, keybinds 3, theme 3, catalog 3, lib 1. cli: 10 unit + 10 wire + 3 auto-print + 3 json-mode + 11 pty integration
 (`tests/tui_pty.rs` — the real binary in a pseudo-terminal, its byte stream

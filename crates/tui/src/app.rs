@@ -1794,6 +1794,10 @@ impl App {
 
         match ModelsConfig::load() {
             Ok(config) => {
+                // The subagent runner resolves against the same config
+                // the app now holds (#186) — stamped on every adopt,
+                // including the "current model is gone" path below.
+                self.subagent.stamp_config(config.clone());
                 self.config = config;
                 self.catalog = Catalog::from_config(&self.config);
                 // Copy the identity out: the rebuild takes `&mut self`
@@ -3746,6 +3750,58 @@ mod tests {
             "a key the file drops keeps its live value"
         );
         assert_eq!(app.max_tool_rounds, 5);
+    }
+
+    #[test]
+    fn reload_restamps_the_subagent_runners_config() {
+        // #186: a provider added to models.json must reach the runner,
+        // including on the "current model is gone" path, which still
+        // replaces the app's own config.
+        let _guard = settings_lock();
+        let _cleanup = ConfigCleanup::fresh();
+        let mut app = test_app();
+        let dir = hermetic_config_dir();
+        assert!(!app.subagent.config().providers.contains_key("added"));
+        write_mock_models(&dir);
+        std::fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{"mock":{"baseUrl":"http://localhost:9/v1","models":[{"id":"mock"}]},
+                "added":{"baseUrl":"http://localhost:9/v1","models":[{"id":"m"}]}}}"#,
+        )
+        .unwrap();
+        app.run_command("reload", "");
+        assert!(app.subagent.config().providers.contains_key("added"));
+        // Model gone: the app keeps the old provider but its config
+        // still moved — and so must the runner's.
+        std::fs::write(
+            dir.join("models.json"),
+            r#"{"providers":{"other":{"baseUrl":"http://localhost:9/v1","models":[{"id":"x"}]}}}"#,
+        )
+        .unwrap();
+        app.run_command("reload", "");
+        assert!(last_system_note(&app).contains("is gone"));
+        let runner = app.subagent.config();
+        assert!(runner.providers.contains_key("other"));
+        assert!(!runner.providers.contains_key("added"));
+        assert_eq!(
+            runner.providers.keys().collect::<Vec<_>>(),
+            app.config.providers.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_broken_models_json_reload_leaves_the_subagent_config_alone() {
+        let _guard = settings_lock();
+        let _cleanup = ConfigCleanup::fresh();
+        let mut app = test_app();
+        let dir = hermetic_config_dir();
+        write_mock_models(&dir);
+        app.run_command("reload", "");
+        let before = app.subagent.config();
+        assert!(before.providers.contains_key("mock"));
+        std::fs::write(dir.join("models.json"), "{ not json").unwrap();
+        app.run_command("reload", "");
+        assert!(Arc::ptr_eq(&before, &app.subagent.config()));
     }
 
     #[test]
