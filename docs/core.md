@@ -442,7 +442,10 @@ pub fn spawn_turn(provider: Arc<dyn Provider>, history: &[Message]) -> Receiver<
 ```
 
 - `respond` runs **on its own thread** (spawned by `spawn_turn`), streams
-  `Event`s into `tx`, and returns when done.
+  `Event`s into `tx`, and returns when done. `spawn_turn` runs it on a worker thread and
+  relays its events; a panic is reported as `Error("provider panicked:
+  <message>")` then `TurnEnd`, minus whichever of the two the provider already
+  sent (#243).
 - `Send + Sync` are required because the provider is moved into an `Arc` and
   used through `&self` from the turn thread.
 - **Cancellation contract: dropping the `Receiver` is the cancel signal.**
