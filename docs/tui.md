@@ -482,7 +482,9 @@ seam as messages and usage.
 - `pick_session(summaries)` — the standalone `--resume` chooser. It owns a
   short inline-viewport terminal before the main TUI boots (pi's
   startup-TUI pattern), restores the terminal, and returns the chosen file
-  (`None` on Esc). The CLI owns everything around it: listing, what Esc
+  (`None` on Esc). Its viewport height comes from `picker_height`: 6–20 rows,
+  always inside the terminal, so a very short terminal gets a smaller picker
+  instead of a `clamp` panic. The CLI owns everything around it: listing, what Esc
   means, the resumed-from note.
 - `/resume` in-session — `app.session_picker` takes over the keyboard and
   the whole live area (status row stays), reusing `picker_lines`. Type
