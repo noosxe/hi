@@ -273,6 +273,9 @@ transcripts are generated data):
 - Writes are **append + flush at turn end**; tokens are never persisted. A
   crash costs at most the in-flight turn, and a torn final line is
   tolerated on read (a malformed line mid-file is a loud error).
+  `--continue` repairs that tail before appending (#178): the torn
+  fragment (and blank lines after it) is truncated away, or a missing
+  final newline is added; a healthy file is left untouched.
 - Unknown fields are ignored, like every hi file — newer sessions open in
   older builds.
 - `hi --continue` reopens the newest session for the current directory and
