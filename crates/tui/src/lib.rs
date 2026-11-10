@@ -208,14 +208,15 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io
         let size = terminal.size()?;
         let (width, height) = (size.width, size.height);
         app.width = width;
-        app.scroll.sync(&app.messages, width, kitty::detect());
+        app.scroll
+            .sync(&app.messages, width, kitty::detect(), app.turn.is_some());
         let stream_h = ui::stream_window_height(
             height,
             ui::input_height(app, width),
             app.menu_height(),
             app.status_height(),
         );
-        let live_follows = app.turn.is_some() || ui::pending_tool(&app.messages).is_some();
+        let live_follows = app.turn.is_some();
         if let Some((rows, segments)) = app.scroll.take_flush(stream_h as usize, live_follows) {
             terminal.insert_before(rows, |buf| ui::segments_into(segments, buf))?;
         }

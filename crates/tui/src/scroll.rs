@@ -18,7 +18,7 @@ use ratatui::text::Line;
 
 use crate::kitty::Protocol;
 use crate::ui::{
-    Segment, TranscriptBlock, block_rows, block_segments, derive_blocks, segments_height,
+    Segment, TranscriptBlock, block_rows, block_segments, derive_full, segments_height,
 };
 
 /// One finalized transcript block, cached at the width it was wrapped.
@@ -53,6 +53,10 @@ pub(crate) struct Scroll {
     /// `printed` watermark. A trailing unpaired call stays live until
     /// its result lands, so it is not folded yet.
     seen: usize,
+    /// Messages after the open (pending) call at `seen` that were
+    /// already folded into blocks — mid-turn notes — so the next fold
+    /// does not print them again.
+    passed: usize,
     /// The width `blocks` were wrapped at.
     width: u16,
     cursor: Cursor,
@@ -76,6 +80,7 @@ impl Scroll {
         Self {
             blocks: vec![welcome],
             seen: 0,
+            passed: 0,
             width: 0,
             cursor: Cursor::default(),
             flushed: 0,
@@ -88,7 +93,13 @@ impl Scroll {
     /// immutable — they are already in the terminal's scrollback —
     /// so a resize may re-print a couple of seam rows once (pi's
     /// behavior too).
-    pub(crate) fn sync(&mut self, messages: &[Message], width: u16, caps: Option<Protocol>) {
+    pub(crate) fn sync(
+        &mut self,
+        messages: &[Message],
+        width: u16,
+        caps: Option<Protocol>,
+        turn_live: bool,
+    ) {
         if self.width != width {
             self.width = width;
             self.rebuild_from_cursor(messages, caps);
@@ -96,11 +107,22 @@ impl Scroll {
         if self.seen >= messages.len() {
             return;
         }
-        let (blocks, pending) = derive_blocks(&messages[self.seen..]);
-        for block in blocks {
+        let derived = derive_full(&messages[self.seen..], turn_live, self.passed);
+        for block in derived.blocks {
             self.push_block(block, width, caps);
         }
-        self.seen = messages.len() - usize::from(pending.is_some());
+        // An open call stays unfolded: the pointer parks on it (not on
+        // the last message), so its result pairs when it lands.
+        match derived.open {
+            Some((at, _)) => {
+                self.seen += at;
+                self.passed = derived.passed;
+            }
+            None => {
+                self.seen = messages.len();
+                self.passed = 0;
+            }
+        }
     }
 
     /// A session switch replays the new history below the old
@@ -109,6 +131,7 @@ impl Scroll {
     /// fresh blocks.
     pub(crate) fn refold(&mut self) {
         self.seen = 0;
+        self.passed = 0;
     }
 
     fn push_block(&mut self, block: TranscriptBlock, width: u16, caps: Option<Protocol>) {
@@ -282,7 +305,7 @@ mod tests {
 
     fn scroll_with(messages: &[Message], width: u16) -> Scroll {
         let mut scroll = Scroll::new();
-        scroll.sync(messages, width, None);
+        scroll.sync(messages, width, None, true);
         scroll
     }
 
@@ -290,7 +313,7 @@ mod tests {
     fn the_welcome_line_survives_rebuilds() {
         let mut scroll = Scroll::new();
         assert_eq!(scroll.window_rows().len(), 1);
-        scroll.sync(&[], 80, None);
+        scroll.sync(&[], 80, None, true);
         let rows = scroll.window_rows();
         let text: Vec<String> = rows
             .iter()
@@ -461,6 +484,7 @@ mod tests {
             ],
             40,
             None,
+            true,
         );
         assert_eq!(scroll.seen(), 3);
     }
@@ -480,6 +504,7 @@ mod tests {
             &[user("a longer first message"), Message::assistant("reply")],
             12,
             None,
+            true,
         );
         let (after_resize, _) = scroll.totals();
         assert!(after_resize <= flushed_before);
@@ -493,7 +518,7 @@ mod tests {
         let msgs = [user("hello")];
         let mut scroll = scroll_with(&msgs, 40);
         scroll.refold();
-        scroll.sync(&msgs, 40, None);
+        scroll.sync(&msgs, 40, None, true);
         assert_eq!(scroll.seen(), 1);
         // Welcome + the original block + the replayed one.
         assert_eq!(scroll.blocks.len(), 3);
@@ -502,7 +527,7 @@ mod tests {
     #[test]
     fn a_tail_image_over_flushes_so_it_never_strands_invisible() {
         let mut scroll = Scroll::new();
-        scroll.sync(&[user("draw")], 40, None);
+        scroll.sync(&[user("draw")], 40, None, true);
         // Hand-build a final block whose image is taller than any
         // reasonable window: without the over-flush rule it would
         // never reach the scrollback.

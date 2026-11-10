@@ -133,6 +133,17 @@ into the scrollback above the viewport exactly once
   still be running. This covers Esc, quitting mid-turn, crashes and old
   session files alike (tests: `an_orphan_*`,
   `esc_during_a_tool_then_a_new_message_sends_a_well_formed_request`).
+  The *display* settles the orphan too (#221): `derive_blocks(messages,
+  live)` treats an unpaired call as the running pending block while a
+  turn is live; a `User` message or another call after it, or the end of
+  the transcript with no live turn, settles it into an error block
+  ("interrupted — no result was recorded"), purely at render time — the
+  transcript is still untouched. Other messages folded while it runs (a
+  task-completion or settings `System` note) do not settle it: the note
+  prints once, in scrollback above the pending call, and the result pairs
+  later. `Scroll::sync` takes the same `turn_live` flag and parks its fold
+  pointer on the open call, remembering how many later messages it already
+  printed (`derive_full`'s `passed`), so nothing prints twice.
 - Esc also clears the auto-trigger arm (`auto_armed`), so a cancelled
   turn's mandate cannot fire after the next unrelated human turn.
 - Esc also restores any queued mid-turn input back into the input box

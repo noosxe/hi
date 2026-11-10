@@ -505,7 +505,7 @@ fn draw_stream(frame: &mut Frame, area: Rect, app: &App) {
     let mut rows = app.scroll.window_rows();
     // Live units lead with the same seam row their flushed block will
     // carry, so completing a turn is visually a no-op (AD-0024).
-    if let Some(exec) = pending_tool(&app.messages) {
+    if let Some(exec) = pending_tool(&app.messages, app.turn.is_some()) {
         rows.push(Line::raw(""));
         rows.extend(block_rows(&TranscriptBlock::Tool(exec), area.width));
     } else if let Some(turn) = app.turn.as_ref() {
@@ -587,27 +587,86 @@ pub struct ToolExec {
     pub result: Option<ToolResult>,
 }
 
+/// Display text for a call that never got a result (Esc mid-tool,
+/// quit, crash). The transcript keeps no result for it (the wire layer
+/// answers it at send time); the display settles it as an error block
+/// instead of leaving it looking like it is still running.
+const INTERRUPTED_RESULT_TEXT: &str = "interrupted — no result was recorded";
+
+/// An unanswered call settled for display: an error block, not pending.
+fn settled_orphan(call: &ToolCall) -> TranscriptBlock {
+    TranscriptBlock::Tool(ToolExec {
+        call: Some(call.clone()),
+        result: Some(ToolResult {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            content: INTERRUPTED_RESULT_TEXT.into(),
+            is_error: true,
+            images: Vec::new(),
+        }),
+    })
+}
+
+/// What [`derive_full`] folded: the display blocks, plus the call
+/// still open (its index in the slice, the call, and how many
+/// following messages were already emitted as blocks while it waited).
+pub struct Derived {
+    pub blocks: Vec<TranscriptBlock>,
+    /// `(index in the slice, the pending execution)`.
+    pub open: Option<(usize, ToolExec)>,
+    /// Messages after the open call that were emitted as blocks while
+    /// it was pending (mid-turn notes). A later fold over the same
+    /// slice passes this back as `skip` so they are not emitted twice.
+    pub passed: usize,
+}
+
 /// Derive display blocks from the message stream. Calls pair with their
-/// results (the agent loop guarantees call-then-result order); a
-/// trailing unpaired call comes back separately as the live pending
-/// execution instead of a block. Resumed sessions pair up the same way.
-pub fn derive_blocks(messages: &[Message]) -> (Vec<TranscriptBlock>, Option<ToolExec>) {
+/// results (the agent loop guarantees call-then-result order). An
+/// unpaired call settles as an interrupted block when a `User` message
+/// or another call follows it — or, with no live turn, at the end of
+/// the slice if no result came (#221: it used to stay "open" across later messages, so it never
+/// flushed and the scroll's fold pointer re-derived the next message
+/// twice). Any other message (a task-completion or settings `System`
+/// note folded mid-turn) does *not* settle the call: the note is emitted as a block right away — above the still
+/// pending call, which stays in the live region and lands after the
+/// note when its result arrives. Resumed sessions pair up the same way.
+pub fn derive_blocks(messages: &[Message], live: bool) -> (Vec<TranscriptBlock>, Option<ToolExec>) {
+    let derived = derive_full(messages, live, 0);
+    (derived.blocks, derived.open.map(|(_, exec)| exec))
+}
+
+/// [`derive_blocks`] with the fold bookkeeping the scroll needs: the
+/// open call's index and `skip`, the number of messages after the open
+/// call a previous fold already emitted.
+pub fn derive_full(messages: &[Message], live: bool, skip: usize) -> Derived {
+    let mut skip = skip;
     let mut blocks: Vec<TranscriptBlock> = Vec::new();
-    let mut open: Option<ToolExec> = None;
-    for message in messages {
+    let mut open: Option<(usize, ToolExec)> = None;
+    let mut passed = 0usize;
+    for (index, message) in messages.iter().enumerate() {
         match message {
             Message::ToolCall(call) => {
-                if let Some(exec) = open.take() {
-                    // An abandoned call followed by a new one: flush it.
-                    blocks.push(TranscriptBlock::Tool(exec));
+                if let Some((_, exec)) = open.take() {
+                    // An abandoned call followed by a new one: settle it.
+                    blocks.push(settled_orphan(exec.call.as_ref().unwrap()));
                 }
-                open = Some(ToolExec {
-                    call: Some(call.clone()),
-                    result: None,
-                });
+                // `skip` belongs to the call the previous fold parked on
+                // — the slice's first message; any later call is new.
+                if index > 0 {
+                    skip = 0;
+                }
+                passed = 0;
+                open = Some((
+                    index,
+                    ToolExec {
+                        call: Some(call.clone()),
+                        result: None,
+                    },
+                ));
             }
             Message::ToolResult(result) => {
-                if let Some(mut exec) = open.take() {
+                (skip, passed) = (0, 0);
+                if let Some((_, mut exec)) = open.take() {
                     exec.result = Some(result.clone());
                     blocks.push(TranscriptBlock::Tool(exec));
                 } else {
@@ -619,6 +678,20 @@ pub fn derive_blocks(messages: &[Message]) -> (Vec<TranscriptBlock>, Option<Tool
                         result: Some(result.clone()),
                     }));
                 }
+            }
+            other if open.is_some() && !matches!(other, Message::User(_)) => {
+                // A mid-turn note: print it once, keep the call pending.
+                passed += 1;
+                if passed > skip {
+                    blocks.extend(derive_blocks(std::slice::from_ref(other), true).0);
+                }
+            }
+            other if open.is_some() => {
+                // A user message ends an unanswered call's wait.
+                let (_, exec) = open.take().unwrap();
+                (skip, passed) = (0, 0);
+                blocks.push(settled_orphan(exec.call.as_ref().unwrap()));
+                blocks.extend(derive_blocks(std::slice::from_ref(other), true).0);
             }
             Message::Assistant(content) => {
                 // One display block per content block (AD-0051):
@@ -635,13 +708,21 @@ pub fn derive_blocks(messages: &[Message]) -> (Vec<TranscriptBlock>, Option<Tool
             other => blocks.push(TranscriptBlock::Message(other.clone())),
         }
     }
-    (blocks, open)
+    if !live && let Some((_, exec)) = open.take() {
+        blocks.push(settled_orphan(exec.call.as_ref().unwrap()));
+        passed = 0;
+    }
+    Derived {
+        blocks,
+        open,
+        passed,
+    }
 }
 
-/// The still-running execution, if the transcript ends in an unpaired
-/// call.
-pub fn pending_tool(messages: &[Message]) -> Option<ToolExec> {
-    derive_blocks(messages).1
+/// The still-running execution: the transcript ends in an unpaired
+/// call and a turn is live.
+pub fn pending_tool(messages: &[Message], live: bool) -> Option<ToolExec> {
+    derive_blocks(messages, live).1
 }
 
 /// Compose a transcript block into wrapped, styled rows — one `Line`
@@ -1018,7 +1099,7 @@ mod tests {
         let mut app = test_app();
         app.messages
             .push(hi_core::Message::User("where did my transcript go".into()));
-        app.scroll.sync(&app.messages, 40, None);
+        app.scroll.sync(&app.messages, 40, None, app.turn.is_some());
         let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();
         let buf = terminal.backend_mut().buffer().clone();
@@ -1048,7 +1129,7 @@ mod tests {
         // flush is visually a no-op instead of a reflow jump.
         app.messages
             .push(hi_core::Message::User("earlier question".into()));
-        app.scroll.sync(&app.messages, 40, None);
+        app.scroll.sync(&app.messages, 40, None, app.turn.is_some());
         app.turn = Some(Turn::with_text("streamed padding probe"));
         let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();
@@ -1095,7 +1176,7 @@ mod tests {
             app.messages
                 .push(hi_core::Message::User(format!("filler message {i}")));
         }
-        app.scroll.sync(&app.messages, 40, None);
+        app.scroll.sync(&app.messages, 40, None, app.turn.is_some());
         let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
         terminal.draw(|f| draw(f, &app)).unwrap();
         let buf = terminal.backend_mut().buffer().clone();
@@ -1773,7 +1854,7 @@ mod tests {
             Message::ToolCall(tool_call("{}")),
             Message::ToolResult(tool_result("out", false)),
         ];
-        let (blocks, pending) = derive_blocks(&messages);
+        let (blocks, pending) = derive_blocks(&messages, true);
         assert!(pending.is_none());
         assert_eq!(blocks.len(), 2);
         assert!(matches!(
@@ -1790,9 +1871,70 @@ mod tests {
     }
 
     #[test]
+    fn an_unanswered_call_settles_when_another_message_follows() {
+        // #221: the call used to stay open across later messages.
+        let messages = vec![
+            Message::User("run it".into()),
+            Message::ToolCall(tool_call("{}")),
+            Message::User("never mind".into()),
+        ];
+        let (blocks, pending) = derive_blocks(&messages, true);
+        assert!(pending.is_none(), "not running: a message followed it");
+        assert_eq!(blocks.len(), 3);
+        match &blocks[1] {
+            TranscriptBlock::Tool(exec) => {
+                let result = exec.result.as_ref().expect("settled, not pending");
+                assert!(result.is_error);
+                assert!(result.content.contains("interrupted"));
+            }
+            _ => panic!("expected the settled tool block"),
+        }
+        assert!(matches!(
+            &blocks[2],
+            TranscriptBlock::Message(Message::User(t)) if t == "never mind"
+        ));
+    }
+
+    #[test]
+    fn a_mid_turn_note_keeps_the_live_call_pending_and_prints_once() {
+        let messages = vec![
+            Message::User("go".into()),
+            Message::ToolCall(tool_call("{}")),
+            Message::System("task finished".into()),
+        ];
+        let first = derive_full(&messages, true, 0);
+        assert_eq!(first.blocks.len(), 2, "user + the note");
+        assert_eq!(first.passed, 1);
+        let (at, exec) = first.open.expect("still pending");
+        assert_eq!(at, 1);
+        assert!(exec.result.is_none());
+        // Re-folding from the call with the note already passed emits
+        // nothing new.
+        let again = derive_full(&messages[1..], true, first.passed);
+        assert!(again.blocks.is_empty());
+        assert!(again.open.is_some());
+        // A user message after it still settles the call.
+        let mut more = messages.clone();
+        more.push(Message::User("stop".into()));
+        let settled = derive_full(&more[1..], true, 1);
+        assert!(settled.open.is_none());
+        assert_eq!(settled.blocks.len(), 2, "interrupted call + the user");
+    }
+
+    #[test]
+    fn a_trailing_call_with_no_live_turn_settles_too() {
+        let messages = vec![Message::ToolCall(tool_call("{}"))];
+        let (blocks, pending) = derive_blocks(&messages, false);
+        assert!(pending.is_none());
+        assert_eq!(blocks.len(), 1);
+        assert!(pending_tool(&messages, false).is_none());
+        assert!(pending_tool(&messages, true).is_some());
+    }
+
+    #[test]
     fn trailing_unpaired_call_is_the_pending_execution() {
         let messages = vec![Message::ToolCall(tool_call("{}"))];
-        let (blocks, pending) = derive_blocks(&messages);
+        let (blocks, pending) = derive_blocks(&messages, true);
         assert!(blocks.is_empty());
         let pending = pending.unwrap();
         assert_eq!(pending.call.unwrap().name, "bash");
@@ -1809,7 +1951,7 @@ mod tests {
             },
             hi_core::message::AssistantBlock::Text("the reply".into()),
         ]);
-        let (blocks, pending) = derive_blocks(&[Message::User("go".into()), message]);
+        let (blocks, pending) = derive_blocks(&[Message::User("go".into()), message], true);
         assert!(pending.is_none());
         assert_eq!(
             blocks.len(),
@@ -1829,12 +1971,16 @@ mod tests {
                 if matches!(v.as_slice(), [hi_core::message::AssistantBlock::Text(_)]))
         );
         // A contentless assistant message derives nothing.
-        assert_eq!(derive_blocks(&[Message::Assistant(vec![])]).0.len(), 0);
+        assert_eq!(
+            derive_blocks(&[Message::Assistant(vec![])], true).0.len(),
+            0
+        );
     }
 
     #[test]
     fn orphan_result_renders_self_contained() {
-        let (blocks, pending) = derive_blocks(&[Message::ToolResult(tool_result("nope", true))]);
+        let (blocks, pending) =
+            derive_blocks(&[Message::ToolResult(tool_result("nope", true))], true);
         assert!(pending.is_none());
         match &blocks[0] {
             TranscriptBlock::Tool(exec) => {
