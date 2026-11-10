@@ -141,11 +141,12 @@ fn dispatch_with(cli: Cli, read_stdin: impl FnOnce() -> Option<String>) -> ExitC
         };
         return match hi_core::selection::list_for(&config, cli.provider.as_deref()) {
             Ok((name, models)) => {
-                println!("{name}:");
+                let mut out = Stdout::default();
+                out.line(&format!("{name}:"));
                 for id in models {
-                    println!("  {id}");
+                    out.line(&format!("  {id}"));
                 }
-                ExitCode::SUCCESS
+                out.finish()
             }
             Err(err) => fail(&err),
         };
@@ -638,6 +639,7 @@ fn print_mode(cli: &Cli, json: bool, read_stdin: impl FnOnce() -> Option<String>
         // The mock path: no wire, no stamp.
         None => Arc::new(MockProvider::default()),
     };
+    let mut out = Stdout::default();
     let turn = if json {
         headless::run_with(
             provider,
@@ -647,7 +649,10 @@ fn print_mode(cli: &Cli, json: bool, read_stdin: impl FnOnce() -> Option<String>
             &prompt,
             session,
             max_tool_rounds,
-            &mut |record| println!("{}", record.to_line()),
+            // A reader that went away (`| head`) must not abort the
+            // turn mid-way: keep running so the session is recorded,
+            // and just stop printing (#200).
+            &mut |record| out.line(&record.to_line()),
         )
     } else {
         headless::run(
@@ -663,11 +668,48 @@ fn print_mode(cli: &Cli, json: bool, read_stdin: impl FnOnce() -> Option<String>
     match turn {
         Ok(text) => {
             if !json {
-                println!("{text}");
+                out.line(&text);
             }
-            ExitCode::SUCCESS
+            out.finish()
         }
         Err(reason) => fail(&reason),
+    }
+}
+
+/// Headless stdout. `println!` panics when a write fails (`hi -p … |
+/// head`, exit 101), and in json mode that aborted the turn before the
+/// session append, so writes are checked instead (#200). Either failure
+/// turns later output off and lets the turn run to the end and be
+/// recorded; they differ only in the verdict:
+///
+/// - a closed pipe (`BrokenPipe`) is the reader's choice — silent, exit 0;
+/// - any other error (`> /dev/full`, ENOSPC, EIO) means output was lost:
+///   `finish` reports it once on stderr and exits non-zero.
+#[derive(Default)]
+struct Stdout {
+    stopped: bool,
+    error: Option<std::io::Error>,
+}
+
+impl Stdout {
+    fn line(&mut self, line: &str) {
+        use std::io::Write;
+        if self.stopped {
+            return;
+        }
+        if let Err(err) = writeln!(std::io::stdout().lock(), "{line}") {
+            self.stopped = true;
+            if err.kind() != std::io::ErrorKind::BrokenPipe {
+                self.error = Some(err);
+            }
+        }
+    }
+
+    fn finish(self) -> ExitCode {
+        match self.error {
+            Some(err) => fail(&format!("cannot write output: {err}")),
+            None => ExitCode::SUCCESS,
+        }
     }
 }
 

@@ -60,7 +60,11 @@ Session layout and the on-disk format are in [core.md](core.md).
   3. open_session() per flags → headless::run(...)
        (selection errors are hard: --resume refuses headless — use
         --session; cross-project --session refuses — use --fork)
-  4. Ok(text) → println! + SUCCESS; Err → "hi: …" on stderr,
+  4. Ok(text) → print + SUCCESS (stdout goes through `Stdout`: a closed
+     pipe, e.g. `| head`, stops the printing but never panics or aborts the
+     turn — it still runs, is recorded and exits 0; any other write error
+     (`> /dev/full`) also lets the turn finish and record, then prints one
+     `hi: cannot write output: <err>` and exits non-zero, #200); Err → "hi: …" on stderr,
      stdout empty, FAILURE
 
 otherwise (interactive):
