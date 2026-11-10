@@ -117,6 +117,8 @@ pub struct SubagentSpec {
 pub struct SubagentResult {
     pub text: String,
     pub usage: Usage,
+    /// Provider rounds that ended in tool calls — parallel calls in one
+    /// round count once (#197).
     pub rounds: usize,
     /// The session file this run recorded to (#116), when the
     /// `subagentTranscripts` opt-in is on and the file opened. `None`
@@ -353,6 +355,8 @@ fn drain(
     let mut narration = String::new();
     let mut usage = Usage::default();
     let mut rounds = 0usize;
+    // Calls of one round arrive back to back; its results close the batch.
+    let mut in_call_batch = false;
     let mut failure = None;
     let mut ended = false;
     // The transcript mirror: the same reconstruction rule the loop
@@ -378,7 +382,12 @@ fn drain(
                 AssistantBlock::push_thinking(&mut blocks, &delta, field);
             }
             Event::ToolCall(c) => {
-                rounds += 1;
+                // A round is the batch of calls the model made at once,
+                // not each call in it (#197).
+                if !in_call_batch {
+                    rounds += 1;
+                    in_call_batch = true;
+                }
                 // The reply that matters is the one after the last
                 // tool round; keep the pre-tool prose as the run's
                 // narration so a cap failure can return it.
@@ -395,6 +404,7 @@ fn drain(
                 blocks.clear();
             }
             Event::ToolResult(r) => {
+                in_call_batch = false;
                 if transcript.is_some() {
                     tbuf.push(Message::ToolResult(r));
                 }
@@ -742,6 +752,45 @@ mod tests {
         // The nested call was refused as unknown; the run still settled.
         assert_eq!(result.text, "settled");
         assert_eq!(result.rounds, 1);
+    }
+
+    #[test]
+    fn parallel_calls_in_one_round_count_as_one_round() {
+        // #197: three calls in one provider round reported rounds=3.
+        let dir = std::env::temp_dir().join(format!("hi-sub-rounds-{}", std::process::id()));
+        let call = |i: usize| {
+            format!(
+                "{{\"index\":{i},\"id\":\"call_{i}\",\"function\":{{\"name\":\"ghost\",\"arguments\":\"{{}}\"}}}}"
+            )
+        };
+        let parallel = sse_response(&[
+            &format!(
+                "{{\"choices\":[{{\"delta\":{{\"tool_calls\":[{},{},{}]}}}}]}}",
+                call(0),
+                call(1),
+                call(2)
+            ),
+            "[DONE]",
+        ]);
+        let settle = sse_response(&[
+            "{\"choices\":[{\"delta\":{\"content\":\"settled\"}}]}",
+            "[DONE]",
+        ]);
+        let api = FakeApi::start_sequence(vec![parallel, settle]);
+        let runner = runner_with(&api.base_url, &dir, None);
+        runner.stamp("prov", "m");
+        let result = runner
+            .run(&SubagentSpec {
+                prompt: "go".into(),
+                provider: None,
+                model: None,
+                thinking: None,
+                tools: None,
+                max_tool_rounds: None,
+            })
+            .unwrap();
+        assert_eq!(result.text, "settled");
+        assert_eq!(result.rounds, 1, "one round of three calls");
     }
 
     #[test]
