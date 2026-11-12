@@ -1,5 +1,5 @@
 {
-  description = "Dev shell for a Rust + ratatui TUI app";
+  description = "hi, a minimalist agent harness (Rust TUI): package and dev shell";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -11,7 +11,7 @@
   };
 
   outputs = { self, nixpkgs, rust-overlay, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
+    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-darwin" ] (system:
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs {
@@ -39,8 +39,16 @@
           default = hi;
         };
         apps = rec {
-          hi = flake-utils.lib.mkApp { drv = hiApp; };
+          hi = flake-utils.lib.mkApp { drv = hiApp; } // {
+            meta.description = "hi, a minimalist agent harness (Rust TUI)";
+          };
           default = hi;
         };
-      });
+      })
+    // {
+      # Not per-system: `pkgs.hi` for consumers that import this flake.
+      overlays.default = final: prev: {
+        hi = self.packages.${prev.stdenv.hostPlatform.system}.default;
+      };
+    };
 }

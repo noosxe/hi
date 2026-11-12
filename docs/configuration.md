@@ -255,7 +255,7 @@ One JSONL file per session, under the **data** directory (not config —
 transcripts are generated data):
 
 ```
-~/.local/share/hi/sessions/--Users-mechsoull-Projects-hi--/1760000000000_<uuid>.jsonl
+~/.local/share/hi/sessions/--Users-me-Projects-hi--/1760000000000_<uuid>.jsonl
 ```
 
 - The directory name is the cwd, pi-style (`/` → `-`, wrapped in `--`).
