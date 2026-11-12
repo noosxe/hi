@@ -13,7 +13,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write as _};
+use std::io::{BufRead, BufReader, Read as _, Write as _};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Duration;
@@ -305,6 +305,7 @@ impl OpenAiCompatProvider {
             .header("content-type", "application/json")
             .send(body)
             .map_err(|err| describe("chat request", err))?;
+        let response = check_status("chat request", response)?;
 
         // The body reader is a plain `Read`; buffering turns it into
         // lines, which is exactly what SSE frames are.
@@ -410,6 +411,9 @@ fn encode_request_body(body: Vec<u8>, compress: bool) -> (Vec<u8>, bool) {
 
 fn bounded_agent() -> ureq::Agent {
     ureq::Agent::config_builder()
+        // Non-2xx statuses come back as responses, so `check_status`
+        // can read the provider's explanation out of the body.
+        .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(15)))
         .timeout_resolve(Some(Duration::from_secs(10)))
         .build()
@@ -463,6 +467,7 @@ pub(crate) fn discover_model_ids(
     let response = request
         .call()
         .map_err(|err| describe("model discovery", err))?;
+    let response = check_status("model discovery", response)?;
     let value: serde_json::Value = response
         .into_body()
         .read_json()
@@ -512,14 +517,91 @@ fn emit_usage(usage: Option<Usage>, tx: &Sender<Event>) {
     }
 }
 
-/// Turn a provider error into something a human can act on. Status
-/// codes are called out because "HTTP 401" is usually the whole
-/// diagnosis (bad or missing key).
+/// Turn a transport error into something a human can act on.
+/// (Status errors never reach here: the agent hands non-2xx back as
+/// responses and [`check_status`] describes them.)
 fn describe(action: &str, err: ureq::Error) -> String {
     match err {
         ureq::Error::StatusCode(code) => format!("{action}: server returned HTTP {code}"),
         err => format!("{action}: {err}"),
     }
+}
+
+/// How much of an error body is read. The provider's explanation is
+/// a sentence; anything beyond this is noise (or hostile).
+const ERROR_BODY_LIMIT: u64 = 4096;
+/// Longest raw-body snippet shown when the body isn't OpenAI-style JSON.
+const ERROR_SNIPPET_CHARS: usize = 200;
+
+/// Pass a 2xx response through; turn anything else into the error
+/// message, including the provider's own explanation from a bounded
+/// prefix of the body. The status code stays first because "HTTP 401"
+/// is usually the whole diagnosis (bad or missing key).
+fn check_status(
+    action: &str,
+    response: ureq::http::Response<ureq::Body>,
+) -> Result<ureq::http::Response<ureq::Body>, String> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+    let mut raw = Vec::new();
+    // A failed read just means less detail: the status still reports.
+    let _ = response
+        .into_body()
+        .into_reader()
+        .take(ERROR_BODY_LIMIT)
+        .read_to_end(&mut raw);
+    Err(status_message(action, status.as_u16(), &raw))
+}
+
+/// `<action>: server returned HTTP <code>[: <detail>]`, where the
+/// detail is `error.message (code N)` for OpenAI-style JSON, else a
+/// trimmed single-line snippet, else nothing.
+fn status_message(action: &str, code: u16, body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let detail = error_detail(&text).unwrap_or_else(|| snippet(&text));
+    if detail.is_empty() {
+        format!("{action}: server returned HTTP {code}")
+    } else {
+        format!("{action}: server returned HTTP {code}: {detail}")
+    }
+}
+
+fn error_detail(text: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    let error = value.get("error")?;
+    let message = error.get("message")?.as_str()?;
+    let message = one_line(message);
+    if message.is_empty() {
+        return None;
+    }
+    let code = match error.get("code") {
+        Some(serde_json::Value::String(code)) if !code.trim().is_empty() => Some(one_line(code)),
+        Some(serde_json::Value::Number(code)) => Some(code.to_string()),
+        _ => None,
+    };
+    Some(match code {
+        Some(code) => format!("{} (code {code})", cap(&message)),
+        None => cap(&message),
+    })
+}
+
+/// Collapse all whitespace runs (newlines included) to single spaces.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn cap(text: &str) -> String {
+    if text.chars().count() <= ERROR_SNIPPET_CHARS {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(ERROR_SNIPPET_CHARS).collect();
+    format!("{head}…")
+}
+
+fn snippet(text: &str) -> String {
+    cap(&one_line(text))
 }
 
 /// The outcome of one SSE line. Frames are `data: <payload>`;
@@ -1184,7 +1266,6 @@ mod tests {
     use crate::test_support::{EchoTool, FakeApi, json_response, sse_response};
     use crate::{Event, spawn_agent_turn};
     use std::collections::BTreeMap;
-    use std::io::Read as _;
     use std::sync::Arc;
 
     #[test]
@@ -2723,6 +2804,107 @@ mod tests {
                 r#"{"role":"assistant","content":"done"},"#,
                 r#"{"role":"user","content":"thanks"}]"#,
             )
+        );
+    }
+
+    const ZAI_BODY: &str = r#"{"error":{"code":"1113","message":"Insufficient balance or no resource package. Please recharge."}}"#;
+    const ZAI_MESSAGE: &str = "chat request: server returned HTTP 429: Insufficient balance or no resource package. Please recharge. (code 1113)";
+
+    #[test]
+    fn status_message_shows_the_message_and_a_string_code() {
+        assert_eq!(
+            status_message("chat request", 429, ZAI_BODY.as_bytes()),
+            ZAI_MESSAGE
+        );
+    }
+
+    #[test]
+    fn status_message_accepts_a_numeric_code() {
+        let body = br#"{"error":{"code":429,"message":"slow down"}}"#;
+        assert_eq!(
+            status_message("chat request", 429, body),
+            "chat request: server returned HTTP 429: slow down (code 429)"
+        );
+    }
+
+    #[test]
+    fn status_message_without_a_code_shows_just_the_message() {
+        let body = br#"{"error":{"message":"model not found"}}"#;
+        assert_eq!(
+            status_message("model discovery", 404, body),
+            "model discovery: server returned HTTP 404: model not found"
+        );
+    }
+
+    #[test]
+    fn status_message_falls_back_to_a_one_line_snippet() {
+        assert_eq!(
+            status_message(
+                "chat request",
+                502,
+                b"  <html>\n  Bad\r\n Gateway </html>\n"
+            ),
+            "chat request: server returned HTTP 502: <html> Bad Gateway </html>"
+        );
+        // JSON of another shape is shown raw, not dropped.
+        assert_eq!(
+            status_message("chat request", 400, br#"{"detail":"nope"}"#),
+            r#"chat request: server returned HTTP 400: {"detail":"nope"}"#
+        );
+    }
+
+    #[test]
+    fn status_message_with_an_empty_body_is_the_bare_status() {
+        assert_eq!(
+            status_message("chat request", 401, b""),
+            "chat request: server returned HTTP 401"
+        );
+        assert_eq!(
+            status_message("chat request", 401, b" \n "),
+            "chat request: server returned HTTP 401"
+        );
+    }
+
+    #[test]
+    fn status_message_caps_a_huge_body() {
+        let body = "x".repeat(100_000);
+        let message = status_message("chat request", 500, body.as_bytes());
+        assert!(message.chars().count() < 300, "{}", message.len());
+        assert!(message.ends_with('…'));
+    }
+
+    #[test]
+    fn a_chat_http_error_carries_the_provider_message_before_turn_end() {
+        let body = ZAI_BODY;
+        let api = FakeApi::start(format!(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ));
+        let provider =
+            OpenAiCompatProvider::new(api.base_url.clone(), Some("sk-secret".into()), "m");
+        let (tx, rx) = std::sync::mpsc::channel();
+        provider.respond(&[Message::User("go".into())], tx);
+        let events: Vec<Event> = rx.iter().collect();
+        assert!(matches!(events.first(), Some(Event::TurnStart)));
+        assert!(
+            matches!(&events[events.len() - 2], Event::Error(e) if e == ZAI_MESSAGE),
+            "{events:?}"
+        );
+        assert!(matches!(events.last(), Some(Event::TurnEnd)));
+        assert!(!format!("{events:?}").contains("sk-secret"));
+    }
+
+    #[test]
+    fn model_discovery_http_error_carries_the_provider_message() {
+        let body = r#"{"error":{"message":"bad key","code":"invalid_api_key"}}"#;
+        let api = FakeApi::start(format!(
+            "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ));
+        let err = discover_model_ids(&api.base_url, None).unwrap_err();
+        assert_eq!(
+            err,
+            "model discovery: server returned HTTP 401: bad key (code invalid_api_key)"
         );
     }
 }

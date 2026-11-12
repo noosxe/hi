@@ -37,6 +37,8 @@ enum Script {
     Sse(String),
     /// A bare status line with an empty body — the failure path.
     Status(u16),
+    /// A status line carrying a JSON error body.
+    StatusBody(u16, String),
 }
 
 /// A recording fake OpenAI-compatible endpoint. Binds 127.0.0.1:0,
@@ -156,6 +158,10 @@ fn answer(
         Some(Script::Status(code)) => {
             format!("HTTP/1.1 {code} nope\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
         }
+        Some(Script::StatusBody(code, body)) => format!(
+            "HTTP/1.1 {code} nope\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ),
         None => panic!("script exhausted — more requests than scripted"),
     };
     let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
@@ -718,6 +724,31 @@ fn a_failed_turn_fails_with_stdout_empty() {
     assert!(
         stderr.starts_with("hi: "),
         "the reason names itself on stderr: {stderr:?}"
+    );
+}
+
+#[test]
+fn a_provider_error_body_reaches_stderr_in_print_mode() {
+    // #261: the provider's own explanation, not a bare "HTTP 429".
+    let env = Env::new("error-body");
+    let body = r#"{"error":{"code":"1113","message":"Insufficient balance or no resource package. Please recharge."}}"#;
+    let api = FakeApi::start(vec![Script::StatusBody(429, body.to_string())]);
+    env.write_models_json(api.url(), plain_model());
+    let project = env.project("error-body-proj");
+
+    let (code, stdout, stderr) = run(
+        &project,
+        &env,
+        &["-p", "--provider", "fake", "--model", "fake-mini", "hi"],
+    );
+    assert_eq!(code, 1);
+    assert_eq!(stdout, "");
+    assert!(
+        stderr.contains(
+            "server returned HTTP 429: Insufficient balance or no resource package. \
+             Please recharge. (code 1113)"
+        ),
+        "{stderr:?}"
     );
 }
 
