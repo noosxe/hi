@@ -553,9 +553,18 @@ Wire behavior:
   runs half-streamed calls), and the usage reported so far is still emitted,
   ahead of the `Event::Error`. `error: null` is no error. Other finish
   reasons (`stop`, `length`, `tool_calls`, `content_filter`) are ignored.
-- Error mapping: `describe()` turns `ureq::Error::StatusCode(code)` into
-  `"chat request: server returned HTTP {code}"` (status code is usually the
-  whole diagnosis).
+- Error mapping (#261): `bounded_agent()` sets `http_status_as_error(false)`,
+  and both the chat request and `discover_model_ids` pass the response through
+  `check_status()`. A non-2xx status reads at most 4 KB of the body and
+  `status_message()` builds `"{action}: server returned HTTP {code}: {detail}"`
+  (the code stays first: 401 is usually the whole diagnosis). `detail` is
+  OpenAI-style `error.message` plus `(code N)` when `error.code` is a string
+  or number, e.g. `chat request: server returned HTTP 429: Insufficient
+  balance or no resource package. Please recharge. (code 1113)`; any other
+  body becomes a whitespace-collapsed snippet capped at 200 chars; an empty
+  body leaves the bare `server returned HTTP {code}`. Only the response body
+  is read — request headers and the API key never reach the message.
+  `describe()` still formats transport errors (DNS, connect, timeout).
 
 Model listing (hybrid policy):
 - `list_models()` returns configured `models[].id` when non-empty (only

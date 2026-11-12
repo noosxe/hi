@@ -27,7 +27,7 @@ the session; only Ctrl-S persists, so tests that stop at Enter need no lock.
 Saves are also atomic in core (`write_json`: temp file + rename), so a reader
 never sees an empty `settings.json` even without the lock (#215).
 
-Current count: **762 `#[test]` functions** (the README's count gets refreshed in passing;
+Current count: **771 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 91
 core: openai 48, session 44, settings 31, subagent 21, tasks 28, selection 15, read 13,
 agent 17, walk 11, headless 15, message 5, catalog 5, context_report 4, grep 8, image_util 7, truncate 7, edit 6,
@@ -113,6 +113,7 @@ because of the #20 bug class — the startup provider never attached
 | `finish_reason` `length` → `Notice` / `content_filter` → error (#229, #245): `parse_data_line`, headless `notice` record, TUI `pump` System line, the subagent drain's `[note: …]` suffix, and print mode through the real binary | `core/openai.rs`, `core/headless.rs`, `core/subagent.rs`, `tui/app.rs`, `cli/tests/wire.rs` |
 | `--mode json` through the real binary: framing, header/done, `--no-session`, text `-p` contract | `crates/cli/tests/json_mode.rs` |
 | auto-print on redirected streams: pipe→print, guard bypass, honest no-prompt, terminal still opens the TUI | `crates/cli/tests/auto_print.rs` + `tui_pty.rs` |
+| provider HTTP error bodies (#261): `status_message` formatting (string/numeric/absent code, non-JSON, empty, huge), chat and discovery through the fake server, print-mode stderr through the real binary | `core/openai.rs`, `cli/tests/wire.rs` |
 | wire-level: the real binary against a recording fake API — system-prompt chain on the wire, thinking kwargs, `--continue`/`--no-session` files, failure contract, json stream | `crates/cli/tests/wire.rs` |
 | built-in tools: truncation contract, gitignore walk, per-tool behavior (paging, uniqueness, exit codes, timeouts), bundle selection | `tools/` |
 | session layout, header/message round-trip incl. tools, torn-tail tolerance and `resume` tail repair, project keys (+ collisions), XDG data dir | `session.rs`, `config.rs` |

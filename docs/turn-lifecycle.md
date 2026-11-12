@@ -204,7 +204,7 @@ cannot affect it.
 
 `OpenAiCompatProvider::respond` maps failures so consumers keep one finalize
 path: partial `Token`s stand, then one `Event::Error` (message built by
-`describe()`, e.g. `"chat request: server returned HTTP 401"`), then
+`check_status()`, e.g. `"chat request: server returned HTTP 401: Incorrect API key (code invalid_api_key)"` — the provider's own explanation when its body carries one), then
 `TurnEnd`. Malformed SSE payload → `Malformed` → same path. An in-stream
 error frame (`error` member or `finish_reason: "error"`) → `DataLine::Error`
 → same path, so headless runs exit non-zero (tool-call fragments of that
