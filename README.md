@@ -44,6 +44,9 @@ nix run .            # run the app straight from the flake — no devshell neede
 nix profile install github:noosxe/hi   # or install the binary (flake = the package)
 ```
 
+The flake supports `x86_64-linux` and `aarch64-darwin`. Other flakes can
+add `hi.overlays.default` to their overlays to get it as `pkgs.hi`.
+
 
 ## Usage
 

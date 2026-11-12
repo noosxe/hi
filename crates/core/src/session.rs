@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! $XDG_DATA_HOME/hi/sessions/  (else ~/.local/share/hi/sessions/)
-//!   └── --Users-mechsoull-Projects-hi--/      ← project key (cwd-encoded)
+//!   └── --Users-me-Projects-hi--/      ← project key (cwd-encoded)
 //!        └── 1760000000000_7c9e…-.jsonl       ← <millis>_<uuid>.jsonl
 //! ```
 //!
