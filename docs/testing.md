@@ -27,7 +27,18 @@ the session; only Ctrl-S persists, so tests that stop at Enter need no lock.
 Saves are also atomic in core (`write_json`: temp file + rename), so a reader
 never sees an empty `settings.json` even without the lock (#215).
 
-Current count: **771 `#[test]` functions** (the README's count gets refreshed in passing;
+**Tests must never resolve the real config or data dirs.** A test helper that
+deletes or writes files under `config_dir()`/`sessions_dir()` (i.e. under
+`XDG_CONFIG_HOME`/`XDG_DATA_HOME`/`HOME`) must arm `hermetic_config()` *first* —
+`hermetic_config_dir()` does it itself — and assert the path with `assert_in_temp`,
+which panics unless it is under `std::env::temp_dir()`. A `ConfigCleanup` that ran
+before the env was armed once deleted a developer's real `settings.json` and
+`models.json` (#262); `a_lone_reload_test_leaves_the_environments_config_alone`
+guards it by re-running one reload test alone in a child process with decoy XDG
+dirs. Other crates' tests use per-test temp roots (`std::env::temp_dir()` +
+pid/tag) or the path-taking `_to`/`_in` variants, never the ambient XDG env.
+
+Current count: **772 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 91
 core: openai 48, session 44, settings 31, subagent 21, tasks 28, selection 15, read 13,
 agent 17, walk 11, headless 15, message 5, catalog 5, context_report 4, grep 8, image_util 7, truncate 7, edit 6,
