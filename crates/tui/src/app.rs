@@ -3776,10 +3776,33 @@ mod tests {
         );
     }
 
-    /// The hermetic config dir `app_with` armed via XDG_CONFIG_HOME.
+    /// Panics unless `path` is inside the OS temp dir. Every test helper
+    /// that deletes or writes config/data files goes through this, so a
+    /// mis-armed environment fails loudly instead of eating a real
+    /// `$XDG_CONFIG_HOME/hi` (#262).
+    #[cfg(test)]
+    fn assert_in_temp(path: &std::path::Path) {
+        let tmp = std::env::temp_dir();
+        assert!(
+            path.starts_with(&tmp)
+                && !path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir)),
+            "refusing to touch {} — test file operations must stay under {}",
+            path.display(),
+            tmp.display()
+        );
+    }
+
+    /// The hermetic config dir. Arms the hermetic env first, so it can
+    /// never resolve to the developer's real `XDG_CONFIG_HOME` even when
+    /// it runs before any `App` exists (#262).
     #[cfg(test)]
     fn hermetic_config_dir() -> std::path::PathBuf {
-        std::path::PathBuf::from(std::env::var("XDG_CONFIG_HOME").unwrap()).join("hi")
+        hermetic_config();
+        let dir = std::path::PathBuf::from(std::env::var("XDG_CONFIG_HOME").unwrap()).join("hi");
+        assert_in_temp(&dir);
+        dir
     }
 
     /// Reload tests write real config files into the shared hermetic
@@ -3792,6 +3815,7 @@ mod tests {
     impl ConfigCleanup {
         fn fresh() -> Self {
             let dir = hermetic_config_dir();
+            assert_in_temp(&dir);
             let _ = std::fs::remove_file(dir.join("settings.json"));
             let _ = std::fs::remove_file(dir.join("models.json"));
             ConfigCleanup(dir)
@@ -3801,15 +3825,63 @@ mod tests {
     #[cfg(test)]
     impl Drop for ConfigCleanup {
         fn drop(&mut self) {
+            assert_in_temp(&self.0);
             let _ = std::fs::remove_file(self.0.join("settings.json"));
             let _ = std::fs::remove_file(self.0.join("models.json"));
         }
+    }
+
+    /// Regression (#262): a reload test running first — alone in its
+    /// process — used to delete the developer's real config files
+    /// before the hermetic env was armed. Re-runs one reload test in a
+    /// child process whose XDG dirs hold decoy files and checks they
+    /// survive. `HI_TEST_DECOY_CHILD` stops the child from recursing.
+    #[test]
+    fn a_lone_reload_test_leaves_the_environments_config_alone() {
+        if std::env::var_os("HI_TEST_DECOY_CHILD").is_some() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("hi-tui-decoy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let config = root.join("config");
+        let data = root.join("data");
+        std::fs::create_dir_all(config.join("hi")).unwrap();
+        std::fs::create_dir_all(data.join("hi")).unwrap();
+        let decoys = [
+            config.join("hi/settings.json"),
+            config.join("hi/models.json"),
+        ];
+        for d in &decoys {
+            std::fs::write(d, "{}").unwrap();
+        }
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "app::tests::reload_rereads_models_json_and_rebuilds_the_provider",
+                "--exact",
+                "--test-threads=1",
+            ])
+            .env("HI_TEST_DECOY_CHILD", "1")
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_DATA_HOME", &data)
+            .env("HOME", &root)
+            .output()
+            .unwrap();
+        let log = String::from_utf8_lossy(&out.stdout).into_owned();
+        let survived: Vec<bool> = decoys.iter().map(|d| d.exists()).collect();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(out.status.success(), "child failed:\n{log}");
+        assert!(
+            log.contains("1 passed"),
+            "child did not run the test:\n{log}"
+        );
+        assert_eq!(survived, [true, true], "decoy config files were deleted");
     }
 
     /// A models.json whose `mock/mock` entry keeps the test app's
     /// current model resolvable — configured list, no discovery.
     #[cfg(test)]
     fn write_mock_models(dir: &std::path::Path) {
+        assert_in_temp(dir);
         std::fs::write(
             dir.join("models.json"),
             r#"{"providers":{"mock":{"baseUrl":"http://localhost:9/v1","models":[{"id":"mock"}]}}}"#,
