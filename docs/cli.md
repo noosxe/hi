@@ -22,6 +22,7 @@ The headless branch links no `hi-tui` code paths at runtime.
 | `--print`, `-p` | Run one prompt headlessly, print the final reply, exit |
 | `--mode <MODE>` | Headless output mode: `json` streams JSONL records instead of the final text (only `json` exists) |
 | `PROMPT` | Positional prompt; requires `--print`, `--mode`, or a redirected stream (#19) — piped stdin is prepended |
+| `--completions <SHELL>` | Print a completion script (`bash`, `zsh`, `fish`, `elvish`, `powershell`) and exit. Hidden from `--help`; `exclusive` (combines with nothing). Handled first in `dispatch_with`: no config, no session, no TTY needed (#260) |
 | `--no-session` | Run without loading or saving a session file |
 
 The four selection flags are mutually exclusive (pi's rules), and none of
@@ -42,6 +43,19 @@ Session layout and the on-disk format are in [core.md](core.md).
 | `--tools <BUNDLE>` | Built-in set: `none` \| `read-only` \| `coding` \| `all` (default `coding`, or `defaultTools` in settings) |
 
 `after_help` points at `~/.config/hi/models.json` and the README schema.
+
+## Shell completions (`--completions`)
+
+`completion_script` feeds the `Cli` definition to `clap_complete::generate`,
+so scripts always match the flags. The nix package (`nix/app.nix`) runs
+`hi --completions` at build time (`installShellFiles`, skipped when
+cross-compiling) and installs bash, zsh and fish. Manually:
+
+```sh
+hi --completions bash > ~/.local/share/bash-completion/completions/hi
+hi --completions zsh  > ~/.zfunc/_hi            # dir must be in $fpath
+hi --completions fish > ~/.config/fish/completions/hi.fish
+```
 
 ## Startup flow (`main`)
 

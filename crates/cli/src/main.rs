@@ -9,7 +9,8 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, Parser, ValueEnum};
+use clap_complete::Shell;
 
 use hi_core::{
     ImageGate, Message, MockProvider, ModelsConfig, OpenAiCompatProvider, Provider, Session,
@@ -101,6 +102,10 @@ struct Cli {
         conflicts_with_all = ["continue_last", "resume_picker", "session", "fork"]
     )]
     no_session: bool,
+
+    /// Print a shell completion script and exit (bash, zsh, fish, elvish, powershell)
+    #[arg(long, value_enum, value_name = "SHELL", exclusive = true, hide = true)]
+    completions: Option<Shell>,
 }
 
 /// Headless output modes (`--mode`). Only json exists: it streams one
@@ -108,6 +113,13 @@ struct Cli {
 #[derive(Clone, Copy, PartialEq, ValueEnum)]
 enum Mode {
     Json,
+}
+
+/// The completion script for `shell`, generated from the `Cli` definition.
+fn completion_script(shell: Shell) -> Vec<u8> {
+    let mut buf = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "hi", &mut buf);
+    buf
 }
 
 fn main() -> ExitCode {
@@ -122,6 +134,13 @@ fn main() -> ExitCode {
 /// which blocks until EOF whenever the test runner's stdin is an open
 /// pipe (#210).
 fn dispatch_with(cli: Cli, read_stdin: impl FnOnce() -> Option<String>) -> ExitCode {
+    // Pure output: no config, no session, no terminal needed.
+    if let Some(shell) = cli.completions {
+        let mut out = Stdout::default();
+        out.line(String::from_utf8_lossy(&completion_script(shell)).trim_end());
+        return out.finish();
+    }
+
     // Validate before any dispatch: the mock paths never resolve a target,
     // so a bad --tools value must still fail loudly there.
     if let Some(raw) = cli.tools.as_deref()
@@ -961,6 +980,22 @@ fn fail(message: &str) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completion_scripts_look_like_their_shell() {
+        for (shell, marker) in [
+            (Shell::Bash, "complete -F"),
+            (Shell::Zsh, "#compdef hi"),
+            (Shell::Fish, "complete -c hi"),
+            (Shell::Elvish, "edit:completion"),
+            (Shell::PowerShell, "Register-ArgumentCompleter"),
+        ] {
+            let script = String::from_utf8(completion_script(shell)).unwrap();
+            assert!(script.contains("hi"), "{shell}: no mention of hi");
+            assert!(script.contains(marker), "{shell}: missing {marker}");
+            assert!(script.contains("list-models"), "{shell}: flags missing");
+        }
+    }
 
     /// XDG variables are process-global; Rust runs tests on threads
     /// by default, so every env-mutating dispatch test takes this lock.

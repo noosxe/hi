@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 clap = { version = "4", features = ["derive", "wrap_help"] }
+clap_complete = "4"
 hi-core = { path = "../core" }
 hi-tui = { path = "../tui" }
 

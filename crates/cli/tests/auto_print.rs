@@ -118,3 +118,18 @@ fn empty_pipe_without_a_prompt_names_the_problem() {
         "hi: no prompt: pass one as an argument or pipe it into stdin\n"
     );
 }
+
+/// `--completions` is pure output: no config, no models.json, no
+/// session store, and it works with no terminal (#260).
+#[test]
+fn completions_print_a_script_without_any_config() {
+    for (shell, marker) in [
+        ("zsh", "#compdef hi"),
+        ("bash", "complete -F"),
+        ("fish", "complete -c hi"),
+    ] {
+        let (code, out, _err) = run_pipe(None, &["--completions", shell]);
+        assert_eq!(code, 0, "{shell}");
+        assert!(out.contains(marker), "{shell}: {out}");
+    }
+}

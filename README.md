@@ -28,7 +28,7 @@ later.
 - Ctrl-V pastes from the clipboard: an image is staged at a temp file and its path lands in the input as plain text — nothing sends until Enter, and the image enters the conversation only when the model reads it
 - Built-in agent tools: the model can read, search, list, write, edit, and run commands — the `coding` bundle by default, `--tools read-only|none|all` to change; `coding` and `all` also carry `subagent`: the model runs nested agent sessions (fresh history, own provider/model/toolset choice, capped rounds, no recursion); the `all` bundle additionally adds tracked background tasks (`task_run`/`task_status`/`task_output`/`task_cancel`): the model spawns long jobs and polls without blocking a turn
 - A pi-style composer: `Ctrl-K`/`Ctrl-U`/`Ctrl-W` kill, `Ctrl-Y` yanks the newest kill back, `Alt-Y` cycles older kills; undo/redo (`Ctrl-Z`/`Alt-Z`); jump-to-char (`Ctrl+]` forward, `Ctrl+Alt+]` backward) — `/keybinds` prints the whole table on demand
-- 772 tests, including a fake HTTP server and a pty harness that drive the real binary
+- 774 tests, including a fake HTTP server and a pty harness that drive the real binary
 
 Not yet: extensions.
 The selection and settings layers are built so each slots in without
@@ -39,7 +39,7 @@ rework.
 ```sh
 nix develop          # Rust toolchain + cargo (or any Rust 1.85+, edition 2024)
 cargo run            # builds the `hi` binary; `hi --mock` needs no config
-cargo test           # 762 tests; no network needed
+cargo test           # 774 tests; no network needed
 nix run .            # run the app straight from the flake — no devshell needed
 nix profile install github:noosxe/hi   # or install the binary (flake = the package)
 ```
@@ -84,6 +84,11 @@ How hi picks a provider and model when you don't name both:
 3. `--model M` — the first provider whose configured list contains M
 4. `defaultModel` from `settings.json` — only when no flags are given
 5. nothing — the first provider (alphabetically) that offers any model
+
+Shell completions: `hi --completions <bash|zsh|fish|elvish|powershell>` prints
+a script to stdout (no config needed), e.g. `hi --completions zsh > ~/.zfunc/_hi`.
+The nix package installs the bash, zsh and fish scripts automatically.
+See [docs/cli.md](docs/cli.md) for manual setup.
 
 In the TUI: **Enter** sends, **Esc** cancels the running turn (partial
 output stays in the transcript), **Ctrl-C** clears the draft — and quits when it is already empty. A dim status row

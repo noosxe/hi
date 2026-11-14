@@ -25,7 +25,17 @@ pkgs.rustPlatform.buildRustPackage {
 
   # TLS is rustls (Cargo.lock has no openssl-sys): nothing native to
   # wire in, the closure stays lean.
-  nativeBuildInputs = [ ];
+  nativeBuildInputs = [ pkgs.installShellFiles ];
+
+  # Completion scripts come from the binary itself (`hi --completions`),
+  # so they can never drift from the flags. Skipped when cross-compiling:
+  # the freshly built binary cannot run on the build machine.
+  postInstall = pkgs.lib.optionalString (pkgs.stdenv.buildPlatform.canExecute pkgs.stdenv.hostPlatform) ''
+    installShellCompletion --cmd hi \
+      --bash <($out/bin/hi --completions bash) \
+      --zsh <($out/bin/hi --completions zsh) \
+      --fish <($out/bin/hi --completions fish)
+  '';
 
   meta = with pkgs.lib; {
     description = "A minimalist agent harness";

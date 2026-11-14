@@ -38,7 +38,7 @@ guards it by re-running one reload test alone in a child process with decoy XDG
 dirs. Other crates' tests use per-test temp roots (`std::env::temp_dir()` +
 pid/tag) or the path-taking `_to`/`_in` variants, never the ambient XDG env.
 
-Current count: **772 `#[test]` functions** (the README's count gets refreshed in passing;
+Current count: **774 `#[test]` functions** (the README's count gets refreshed in passing;
 trust this file + `grep -rc '#\[test\]' crates`). Per-module breakdown: tools 91
 core: openai 48, session 44, settings 31, subagent 21, tasks 28, selection 15, read 13,
 agent 17, walk 11, headless 15, message 5, catalog 5, context_report 4, grep 8, image_util 7, truncate 7, edit 6,
@@ -122,6 +122,7 @@ because of the #20 bug class — the startup provider never attached
 | headless drain: final text, narration flush before tool calls, error contract, session append, prompt assembly | `headless.rs` |
 | json records: transcript order with token deltas, failed terminal, session header when open, usage bill | `headless.rs` |
 | `finish_reason` `length` → `Notice` / `content_filter` → error (#229, #245): `parse_data_line`, headless `notice` record, TUI `pump` System line, the subagent drain's `[note: …]` suffix, and print mode through the real binary | `core/openai.rs`, `core/headless.rs`, `core/subagent.rs`, `tui/app.rs`, `cli/tests/wire.rs` |
+| `--completions` per shell (`completion_script`) and through the real binary with no config (#260) | `cli/main.rs`, `cli/tests/auto_print.rs` |
 | `--mode json` through the real binary: framing, header/done, `--no-session`, text `-p` contract | `crates/cli/tests/json_mode.rs` |
 | auto-print on redirected streams: pipe→print, guard bypass, honest no-prompt, terminal still opens the TUI | `crates/cli/tests/auto_print.rs` + `tui_pty.rs` |
 | provider HTTP error bodies (#261): `status_message` formatting (string/numeric/absent code, non-JSON, empty, huge), chat and discovery through the fake server, print-mode stderr through the real binary | `core/openai.rs`, `cli/tests/wire.rs` |
